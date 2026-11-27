@@ -17,13 +17,18 @@ pub const DEFAULT_RSM_CHUNK_BYTES: usize = 1100;
 /// Default wire orientation code (`2` = upright 0° in `EncFecHeader` byte 13 bits 7..5).
 pub const DEFAULT_RSM_ORIENTATION: u8 = 2;
 const MAX_ACTIVE_ASSEMBLIES: usize = 8;
-/// Reordering/pacing grace window (in frames) before evicting an older incomplete
-/// FEC-protected P-frame when newer frames complete ahead of it.
-const FEC_P_GRACE_FRAMES: u32 = 2;
-/// Reordering/pacing grace window (in frames) before evicting an older incomplete
-/// keyframe whose paced source/parity burst overlaps subsequent small P-frames.
-const IFRAME_GRACE_FRAMES: u32 = 4;
+/// How long an incomplete frame is kept, measured in sender time against newer frames that
+/// complete after it, before it is abandoned. Retransmissions and a keyframe's paced bursts
+/// arrive within this window. The official receiver uses about 500 ms at 15 fps (bounded
+/// to 300..=1000 ms).
+const INCOMPLETE_FRAME_HOLD_MS: u32 = 500;
+/// Completed frames that may wait behind an incomplete older frame before it is evicted.
+const MAX_READY_FRAMES: usize = 20;
 const MAX_FRAGMENTS_PER_FRAME: usize = 512;
+/// Senders pace a large frame's packets over several bursts and stamp each burst with
+/// its own send time, so packets of one frame index whose timestamps differ by less than
+/// this belong to the same frame. A larger jump at the same index is an encoder restart.
+const PACED_FRAME_TIMESTAMP_SPAN_MS: u32 = 1000;
 const MAX_FEC_PARITY: usize = 64;
 
 /// Clockwise display rotation derived from the `EncFecHeader` kind-3 orientation code.
@@ -146,7 +151,13 @@ pub enum VideoChannelPayload<'a> {
     Nack(&'a [u8]),
     /// MP/iLink RSM video packet (`[codecType, LE16(mid | (sid << 11)), EncFecHeader, ...]`).
     RsmVideo(&'a [u8]),
+    /// `0x67` ARQ response: a sender's retransmission of one RSM video packet answering a
+    /// `0x06` NACK. Holds the original packet, unchanged, after the one-byte `0x67` prefix.
+    ArqResponse(&'a [u8]),
 }
+
+/// First byte of a `0x67` ARQ response (retransmitted RSM video packet).
+pub const VIDEO_ARQ_RESPONSE_PREFIX: u8 = 0x67;
 
 /// Classify a decrypted payload arriving on `packed_kind` `0x20..=0x2f`.
 pub fn classify_video_channel_payload(payload: &[u8]) -> Result<VideoChannelPayload<'_>> {
@@ -156,6 +167,10 @@ pub fn classify_video_channel_payload(payload: &[u8]) -> Result<VideoChannelPayl
         0x06 => {
             ensure!(payload.len() >= 6, "Truncated video NACK payload");
             Ok(VideoChannelPayload::Nack(payload))
+        }
+        VIDEO_ARQ_RESPONSE_PREFIX => {
+            ensure!(payload.len() > 1, "Empty video ARQ response");
+            Ok(VideoChannelPayload::ArqResponse(&payload[1..]))
         }
         _ => Ok(VideoChannelPayload::RsmVideo(payload)),
     }
@@ -242,8 +257,8 @@ pub struct VideoNack {
     pub local_stream_id: u8,
     /// Nonzero for screen-share streams; `0` for camera video.
     pub is_screen: u8,
-    /// Monotonic wrapping NACK sequence number.
-    pub arq_seq: u8,
+    /// Byte 6, the request format. Official senders ignore a NACK unless it is `0`.
+    pub format: u8,
     /// Half-open `[start_seq, end_seq)` missing 16-bit packet sequence ranges (`pkg_seq`).
     pub ranges: Vec<(u16, u16)>,
 }
@@ -256,7 +271,6 @@ pub fn encode_video_nack(
     local_member: u16,
     target_member: u16,
     stream_id: u8,
-    arq_seq: u8,
     ranges: &[(u16, u16)],
 ) -> Vec<u8> {
     let valid: Vec<(u16, u16)> = ranges
@@ -272,7 +286,8 @@ pub fn encode_video_nack(
     out.extend_from_slice(&target_packed);
     out.extend_from_slice(&local_packed);
     out.push(0x00); // camera video (non-screen)
-    out.push(arq_seq);
+                    // Request format: official senders drop the whole NACK unless this byte is 0.
+    out.push(0x00);
     out.push(valid.len() as u8);
     for (start, end) in valid {
         out.extend_from_slice(&start.to_be_bytes());
@@ -291,7 +306,7 @@ pub fn parse_video_nack(payload: &[u8]) -> Result<VideoNack> {
     let (target_member, target_stream_id) = unpack_rtcp_member(payload[1], payload[2]);
     let (local_member, local_stream_id) = unpack_rtcp_member(payload[3], payload[4]);
     let is_screen = payload[5];
-    let arq_seq = payload[6];
+    let format = payload[6];
     let count = usize::from(payload[7]);
     ensure!(
         count <= 49 && payload.len() >= 8 + count * 4,
@@ -310,7 +325,7 @@ pub fn parse_video_nack(payload: &[u8]) -> Result<VideoNack> {
         local_member,
         local_stream_id,
         is_screen,
-        arq_seq,
+        format,
         ranges,
     })
 }
@@ -1395,25 +1410,14 @@ struct PendingAssembly {
     arrival_order: u64,
 }
 
-fn grace_frames_for(is_iframe: bool, r_per_group: usize, y_groups: usize) -> u32 {
-    if is_iframe {
-        IFRAME_GRACE_FRAMES
-    } else if r_per_group > 0 || y_groups > 0 {
-        FEC_P_GRACE_FRAMES
-    } else {
-        0
-    }
+/// Whether an incomplete frame stamped `held_ts` has waited past the hold window by the
+/// time a frame stamped `newer_ts` completes (wrapping sender milliseconds).
+fn held_too_long(held_ts: u32, newer_ts: u32) -> bool {
+    let waited = newer_ts.wrapping_sub(held_ts);
+    (INCOMPLETE_FRAME_HOLD_MS..0x8000_0000).contains(&waited)
 }
 
 impl PendingAssembly {
-    fn max_r(&self) -> usize {
-        self.group_r.iter().flatten().copied().max().unwrap_or(0)
-    }
-
-    fn grace_frames(&self) -> u32 {
-        grace_frames_for(self.is_iframe, self.max_r(), self.y_groups)
-    }
-
     fn effective_group_s(&self, g: usize) -> Option<usize> {
         self.group_s
             .get(g)
@@ -1527,16 +1531,18 @@ struct StreamReassembler {
     arrival_counter: u64,
     vf_orientation: Option<u8>,
     pending_drops: Vec<u32>,
+    /// `(frame index, timestamp)` of recently emitted frames, so a late paced packet of an
+    /// emitted frame is told apart from an encoder restart that reuses its index.
+    recent_emitted: std::collections::VecDeque<(u32, u32)>,
 }
+
+/// Emitted frames remembered for late-packet matching.
+const RECENT_EMITTED_FRAMES: usize = 64;
 
 /// Returns `true` when `earlier` is strictly older than `later` in 16-bit modular frame order.
 fn is_frame_older(earlier: u32, later: u32) -> bool {
     let diff = later.wrapping_sub(earlier) & 0xffff;
     diff > 0 && diff < 0x8000
-}
-
-fn frame_distance(earlier: u32, later: u32) -> u32 {
-    later.wrapping_sub(earlier) & 0xffff
 }
 
 fn oldest_frame_key<T>(map: &BTreeMap<u32, T>) -> Option<u32> {
@@ -1577,9 +1583,8 @@ impl RsmVideoReassembler {
 
     /// Pop the next in-order completed frame that is no longer blocked by an older active assembly.
     ///
-    /// Callers should drain this after [`Self::ingest`] so newer frames buffered during a paced
-    /// keyframe or FEC-protected P-frame grace window are delivered immediately once that older
-    /// frame completes or expires.
+    /// Callers should drain this after [`Self::ingest`] so newer frames buffered behind an
+    /// incomplete older frame are delivered immediately once that frame completes or expires.
     pub fn pop_ready(&mut self) -> Option<ReassembledVideoFrame> {
         for stream in self.streams.values_mut() {
             if let Some(frame) = stream.pop_next_ready() {
@@ -1617,6 +1622,11 @@ impl RsmVideoReassembler {
     }
 }
 
+/// Whether two packet timestamps at one frame index belong to the same (paced) frame.
+fn same_paced_frame(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b).min(b.wrapping_sub(a)) < PACED_FRAME_TIMESTAMP_SPAN_MS
+}
+
 impl StreamReassembler {
     fn record_drop(&mut self, frame_idx: u32) {
         if !self.pending_drops.contains(&frame_idx) {
@@ -1645,6 +1655,11 @@ impl StreamReassembler {
             return None;
         }
         let mut frame = self.ready.remove(&next_ready)?;
+        if self.recent_emitted.len() >= RECENT_EMITTED_FRAMES {
+            self.recent_emitted.pop_front();
+        }
+        self.recent_emitted
+            .push_back((next_ready, frame.timestamp_ms));
         self.last_completed = Some(next_ready);
         self.last_timestamp_ms = Some(frame.timestamp_ms);
         let had_prior_drop = self
@@ -1731,10 +1746,15 @@ impl StreamReassembler {
         // or whose index & timestamp reset to 0) and clear pre-restart assemblies so stale
         // chunks can never splice into post-restart frames.
         if let Some(last) = self.last_completed {
-            let ts_advanced = self.last_timestamp_ms.is_some_and(|prev_ts| {
-                let delta = timestamp_ms.wrapping_sub(prev_ts);
-                delta > 0 && delta < 0x8000_0000
-            });
+            let late_packet_of_emitted = self
+                .recent_emitted
+                .iter()
+                .any(|&(idx, ts)| idx == full_frame_idx && same_paced_frame(ts, timestamp_ms));
+            let ts_advanced = !late_packet_of_emitted
+                && self.last_timestamp_ms.is_some_and(|prev_ts| {
+                    let delta = timestamp_ms.wrapping_sub(prev_ts);
+                    delta > 0 && delta < 0x8000_0000
+                });
             let low_idx_reset = full_frame_idx <= 4
                 && last > 32
                 && self.last_timestamp_ms.is_none_or(|prev_ts| {
@@ -1756,7 +1776,7 @@ impl StreamReassembler {
             }
         }
         if let Some(existing_ready) = self.ready.get(&full_frame_idx) {
-            if existing_ready.timestamp_ms == timestamp_ms {
+            if same_paced_frame(existing_ready.timestamp_ms, timestamp_ms) {
                 return Ok(self
                     .pop_next_ready()
                     .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
@@ -1778,7 +1798,6 @@ impl StreamReassembler {
         }
 
         if !self.active.contains_key(&full_frame_idx) {
-            let packet_grace = grace_frames_for(is_iframe, r_full, y_groups);
             let ready_low_idx_reset = is_iframe
                 && full_frame_idx <= 4
                 && timestamp_ms < 1000
@@ -1794,9 +1813,9 @@ impl StreamReassembler {
                 return Ok(self
                     .pop_next_ready()
                     .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
-            } else if self.ready.keys().any(|&ridx| {
+            } else if self.ready.iter().any(|(&ridx, ready)| {
                 is_frame_older(full_frame_idx, ridx)
-                    && frame_distance(full_frame_idx, ridx) > packet_grace
+                    && held_too_long(timestamp_ms, ready.timestamp_ms)
             }) {
                 self.record_drop(full_frame_idx);
                 return Ok(self
@@ -1823,7 +1842,7 @@ impl StreamReassembler {
         self.arrival_counter = self.arrival_counter.wrapping_add(1);
         let arrival = self.arrival_counter;
         if let Some(existing) = self.active.get(&full_frame_idx) {
-            if existing.timestamp_ms != timestamp_ms {
+            if !same_paced_frame(existing.timestamp_ms, timestamp_ms) {
                 let newer = timestamp_ms.wrapping_sub(existing.timestamp_ms) < 0x8000_0000;
                 if newer {
                     self.active.remove(&full_frame_idx);
@@ -1971,8 +1990,8 @@ impl StreamReassembler {
         };
         let is_keyframe = is_keyframe || completed.is_iframe;
 
-        // Evict strictly older stalled assemblies once they exceed their reordering/FEC
-        // grace window (or immediately when a self-contained keyframe completes).
+        // Evict strictly older stalled assemblies once they have waited past the hold window
+        // (or immediately when a self-contained keyframe completes).
         let mut evicted = Vec::new();
         if is_keyframe {
             self.active.retain(|&idx, _| {
@@ -1987,14 +2006,13 @@ impl StreamReassembler {
                 .retain(|&idx, _| !is_frame_older(idx, full_frame_idx));
         } else {
             self.active.retain(|&idx, asm| {
-                if !is_frame_older(idx, full_frame_idx) {
-                    return true;
-                }
-                if frame_distance(idx, full_frame_idx) <= asm.grace_frames() {
-                    true
-                } else {
+                if is_frame_older(idx, full_frame_idx)
+                    && held_too_long(asm.timestamp_ms, completed.timestamp_ms)
+                {
                     evicted.push(idx);
                     false
+                } else {
+                    true
                 }
             });
         }
@@ -2018,7 +2036,7 @@ impl StreamReassembler {
                 payload: frame_payload,
             },
         );
-        if self.ready.len() > MAX_ACTIVE_ASSEMBLIES {
+        if self.ready.len() > MAX_READY_FRAMES {
             if let Some(oldest_ready) = oldest_frame_key(&self.ready) {
                 let mut overflow_evicted = Vec::new();
                 self.active.retain(|&idx, _| {
@@ -2413,8 +2431,15 @@ mod tests {
             .packetize(VideoWireCodec::H265, &p_frame_big, 100, 15, 300)
             .unwrap();
         assert!(lost_frame_pkts.len() >= 2);
+        // Completes INCOMPLETE_FRAME_HOLD_MS of sender time after the lost frame started.
         let next_frame_pkts = tx
-            .packetize(VideoWireCodec::H265, &p_frame_small, 166, 15, 300)
+            .packetize(
+                VideoWireCodec::H265,
+                &p_frame_small,
+                100 + INCOMPLETE_FRAME_HOLD_MS,
+                15,
+                300,
+            )
             .unwrap();
         assert_eq!(next_frame_pkts.len(), 1);
 
@@ -2428,6 +2453,84 @@ mod tests {
         };
         assert!(next.prior_frames_dropped);
         assert!(!next.is_keyframe);
+    }
+
+    #[test]
+    fn incomplete_frame_is_held_for_a_late_retransmission_and_released_in_order() {
+        let mut p_frame_big = vec![0, 0, 0, 1, 0x02, 0x01];
+        p_frame_big.extend_from_slice(&[0x22; 220]);
+        let mut p_frame_small = vec![0, 0, 0, 1, 0x02, 0x01];
+        p_frame_small.extend_from_slice(&[0x33; 40]);
+
+        let mut tx = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(100).unwrap();
+        let held = tx
+            .packetize(VideoWireCodec::H265, &p_frame_big, 100, 15, 300)
+            .unwrap();
+        assert!(held.len() >= 2);
+        let newer = tx
+            .packetize(VideoWireCodec::H265, &p_frame_small, 166, 15, 300)
+            .unwrap();
+
+        let mut rx = RsmVideoReassembler::new();
+        for packet in &held[..held.len() - 1] {
+            assert_eq!(rx.ingest(packet).unwrap(), RsmIngestOutcome::Pending);
+        }
+        // The newer frame completes within the hold window and waits behind the gap.
+        assert_eq!(rx.ingest(&newer[0]).unwrap(), RsmIngestOutcome::Pending);
+        // The missing packet arrives (for example as a retransmission): both frames follow.
+        let RsmIngestOutcome::Frame(first) = rx.ingest(held.last().unwrap()).unwrap() else {
+            panic!("expected the held frame to complete");
+        };
+        assert_eq!(first.timestamp_ms, 100);
+        assert!(!first.prior_frames_dropped);
+        let second = rx.pop_ready().expect("newer frame follows in order");
+        assert_eq!(second.timestamp_ms, 166);
+        assert!(!second.prior_frames_dropped);
+    }
+
+    #[test]
+    fn paced_keyframe_bursts_with_later_timestamps_assemble_as_one_frame() {
+        let mut idr = vec![0, 0, 0, 1, 0x26, 0x01];
+        idr.extend_from_slice(&[0x44; 400]);
+        let mut tx = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(100).unwrap();
+        let mut packets = tx
+            .packetize(VideoWireCodec::H265, &idr, 1_000, 15, 300)
+            .unwrap();
+        assert!(packets.len() >= 4);
+        // Senders stamp each paced burst with its own send time: rewrite the
+        // `EncFecHeader` timestamp (bytes 9..13 of the packet) of the later packets.
+        for (i, packet) in packets.iter_mut().enumerate().skip(2) {
+            let ts = 1_000u32 + 80 * (i as u32 / 2);
+            packet[9..13].copy_from_slice(&ts.to_be_bytes());
+        }
+        let mut rx = RsmVideoReassembler::new();
+        let last = packets.len() - 1;
+        for packet in &packets[..last] {
+            assert_eq!(rx.ingest(packet).unwrap(), RsmIngestOutcome::Pending);
+        }
+        let RsmIngestOutcome::Frame(frame) = rx.ingest(&packets[last]).unwrap() else {
+            panic!("paced keyframe should complete as one frame");
+        };
+        assert!(frame.is_keyframe);
+        assert_eq!(frame.timestamp_ms, 1_000);
+        // A newer two-packet P-frame is half received when a trailing packet of the emitted
+        // keyframe arrives with a later burst timestamp. That is not an encoder restart: it
+        // must not clear the P-frame's assembly, which then completes normally.
+        let mut p_frame = vec![0, 0, 0, 1, 0x02, 0x01];
+        p_frame.extend_from_slice(&[0x55; 150]);
+        let p_packets = tx
+            .packetize(VideoWireCodec::H265, &p_frame, 1_066, 15, 300)
+            .unwrap();
+        assert_eq!(p_packets.len(), 2);
+        assert_eq!(rx.ingest(&p_packets[0]).unwrap(), RsmIngestOutcome::Pending);
+        let mut trailing = packets[last].clone();
+        trailing[9..13].copy_from_slice(&1_240u32.to_be_bytes());
+        assert_eq!(rx.ingest(&trailing).unwrap(), RsmIngestOutcome::Pending);
+        let RsmIngestOutcome::Frame(next) = rx.ingest(&p_packets[1]).unwrap() else {
+            panic!("the P-frame must survive the trailing keyframe packet");
+        };
+        assert_eq!(next.timestamp_ms, 1_066);
+        assert!(!next.prior_frames_dropped);
     }
 
     #[test]
@@ -2626,7 +2729,8 @@ mod tests {
         pkt.push(r_lo2 | ((pkg_idx_1based as u8 & 0x3f) << 2));
         pkt.extend_from_slice(&(f_pkt_idx as u16).to_be_bytes());
         pkt.extend_from_slice(&(f_pkt_idx as u16).to_be_bytes());
-        pkt.extend_from_slice(&5000u32.to_be_bytes());
+        // One timestamp per frame, 66 ms apart as at 15 fps.
+        pkt.extend_from_slice(&(5000 + frame_idx * 66).to_be_bytes());
         pkt.push(15);
         pkt.push(0);
         pkt.push((s as u8 & 0x3f) << 2);
@@ -3434,8 +3538,9 @@ mod tests {
         }
 
         // First packet of the 9th frame evicts the oldest incomplete assembly and asks for a keyframe.
+        // It is stamped past the hold window of every older frame, so it releases on completion.
         let ninth = tx
-            .packetize(VideoWireCodec::H265, &p_frame, 1000, 15, 500)
+            .packetize(VideoWireCodec::H265, &p_frame, 1100, 15, 500)
             .unwrap();
         assert!(ninth.len() >= 2);
         assert_eq!(
@@ -3782,8 +3887,8 @@ mod tests {
     }
 
     #[test]
-    fn unrecoverable_fec_p_frame_evicts_after_grace_window_and_recovery_keyframe_evicts_immediately(
-    ) {
+    fn unrecoverable_fec_p_frame_evicts_after_hold_window_and_recovery_keyframe_evicts_immediately()
+    {
         let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
         p_frame.extend((0..120u8).map(|i| i.wrapping_mul(5).wrapping_add(1)));
         let pf = frame_annexb_access_unit(VideoWireCodec::H264, &p_frame).unwrap();
@@ -3793,9 +3898,10 @@ mod tests {
         idr.extend((0..120u8).map(|i| i.wrapping_mul(9).wrapping_add(2)));
         let idrf = frame_annexb_access_unit(VideoWireCodec::H264, &idr).unwrap();
 
-        // Part 1: Frame 20 (s=3, r=1) only gets 1 packet (unrecoverable). Frames 21..=22 stay
-        // buffered within FEC_P_GRACE_FRAMES (2); frame 23 exceeds grace, evicts 20, and emits 21
-        // with prior_frames_dropped = true.
+        // Part 1: Frame 20 (s=3, r=1) only gets 1 packet (unrecoverable). Frames 21..=27 stay
+        // buffered within the hold window (frames are 66 ms apart); frame 28 completes more than
+        // INCOMPLETE_FRAME_HOLD_MS after frame 20, evicts it, and emits 21 with
+        // prior_frames_dropped = true.
         let mut rx = RsmVideoReassembler::new();
         assert_eq!(
             rx.ingest(&build_2d_rsm_pkt(
@@ -3816,7 +3922,7 @@ mod tests {
             .unwrap(),
             RsmIngestOutcome::Pending
         );
-        for fidx in [21u32, 22u32] {
+        for fidx in 21u32..28 {
             assert_eq!(
                 rx.ingest(&build_2d_rsm_pkt(
                     VideoWireCodec::H264,
@@ -3840,7 +3946,7 @@ mod tests {
         let RsmIngestOutcome::Frame(out21) = rx
             .ingest(&build_2d_rsm_pkt(
                 VideoWireCodec::H264,
-                23,
+                28,
                 1,
                 0,
                 1,
@@ -3855,7 +3961,7 @@ mod tests {
             ))
             .unwrap()
         else {
-            panic!("expected buffered frame 21 to flush once frame 20 exceeds grace window");
+            panic!("expected buffered frame 21 to flush once frame 20 exceeds the hold window");
         };
         assert_eq!(out21.frame_index, 21);
         assert!(out21.prior_frames_dropped);
@@ -3950,8 +4056,42 @@ mod tests {
             pkt
         };
 
+        let single_p = |fidx: u32| {
+            build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                fidx,
+                1,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+                0,
+                false,
+                0,
+                &pf.bytes,
+            )
+        };
+        let p51 = |pkg: usize| {
+            build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                51,
+                1,
+                0,
+                3,
+                1,
+                pkg,
+                pkg,
+                4,
+                0,
+                false,
+                0,
+                &pf.bytes[..44],
+            )
+        };
         let mut rx = RsmVideoReassembler::new();
-        // IDR 50 receives 2 of 3 source packets (still within IFRAME_GRACE_FRAMES = 4).
+        // IDR 50 receives 2 of 3 source packets; P-frame 51 (s=3, r=1) receives only 1.
         assert_eq!(
             rx.ingest(&make_idr_pkt(1, &idr_srcs[0])).unwrap(),
             RsmIngestOutcome::Pending
@@ -3960,72 +4100,15 @@ mod tests {
             rx.ingest(&make_idr_pkt(2, &idr_srcs[1])).unwrap(),
             RsmIngestOutcome::Pending
         );
-        // P-frame 51 (s=3, r=1, grace=2) receives only 1 packet.
-        assert_eq!(
-            rx.ingest(&build_2d_rsm_pkt(
-                VideoWireCodec::H264,
-                51,
-                1,
-                0,
-                3,
-                1,
-                1,
-                1,
-                4,
-                0,
-                false,
-                0,
-                &pf.bytes[..44]
-            ))
-            .unwrap(),
-            RsmIngestOutcome::Pending
-        );
-        // Single-packet P-frames 52, 53, 54 complete: frame 54 evicts P-frame 51 (distance 3 > 2)
-        // while keeping IDR 50 alive (distance 4 <= 4).
-        for fidx in [52u32, 53u32, 54u32] {
+        assert_eq!(rx.ingest(&p51(1)).unwrap(), RsmIngestOutcome::Pending);
+        // Single-packet P-frames 52..=54 complete and wait behind the incomplete frames.
+        for fidx in 52u32..=54 {
             assert_eq!(
-                rx.ingest(&build_2d_rsm_pkt(
-                    VideoWireCodec::H264,
-                    fidx,
-                    1,
-                    0,
-                    1,
-                    0,
-                    1,
-                    1,
-                    1,
-                    0,
-                    false,
-                    0,
-                    &pf.bytes
-                ))
-                .unwrap(),
+                rx.ingest(&single_p(fidx)).unwrap(),
                 RsmIngestOutcome::Pending
             );
         }
-
-        // A late trailing packet for already-evicted P-frame 51 must NOT resurrect a zombie assembly.
-        assert_eq!(
-            rx.ingest(&build_2d_rsm_pkt(
-                VideoWireCodec::H264,
-                51,
-                1,
-                0,
-                3,
-                1,
-                4,
-                4,
-                4,
-                0,
-                false,
-                0,
-                &pf.bytes[..44]
-            ))
-            .unwrap(),
-            RsmIngestOutcome::Pending
-        );
-
-        // IDR 50 recovers via parity -> emits 50 WITHOUT consuming the newer drop of 51.
+        // IDR 50 recovers via parity and is emitted; P-frame 51 still blocks 52.
         let RsmIngestOutcome::Frame(out50) = rx.ingest(&make_idr_pkt(4, &idr_pars[0])).unwrap()
         else {
             panic!("expected FEC-recovered IDR 50");
@@ -4033,19 +4116,32 @@ mod tests {
         assert_eq!(out50.frame_index, 50);
         assert!(out50.is_keyframe);
         assert!(!out50.prior_frames_dropped);
-
-        // Draining pop_ready emits 52 with prior_frames_dropped=true (reporting evicted 51),
-        // then 53 and 54 with prior_frames_dropped=false, with zero zombie stall.
-        let out52 = rx.pop_ready().expect("expected buffered P-frame 52");
+        assert!(rx.pop_ready().is_none());
+        // Frames 55..=58 stay within 51's hold window; frame 59 completes past it, evicts 51
+        // and releases 52 reporting the drop.
+        for fidx in 55u32..=58 {
+            assert_eq!(
+                rx.ingest(&single_p(fidx)).unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+        let RsmIngestOutcome::Frame(out52) = rx.ingest(&single_p(59)).unwrap() else {
+            panic!("expected P-frame 52 once 51 passes the hold window");
+        };
         assert_eq!(out52.frame_index, 52);
         assert!(out52.prior_frames_dropped);
-        let out53 = rx.pop_ready().expect("expected buffered P-frame 53");
-        assert_eq!(out53.frame_index, 53);
-        assert!(!out53.prior_frames_dropped);
-        let out54 = rx.pop_ready().expect("expected buffered P-frame 54");
-        assert_eq!(out54.frame_index, 54);
-        assert!(!out54.prior_frames_dropped);
-        assert!(rx.pop_ready().is_none());
+        // A late trailing packet for evicted P-frame 51 must NOT resurrect a zombie assembly:
+        // the remaining frames keep draining in order without another drop.
+        let mut drained = Vec::new();
+        if let RsmIngestOutcome::Frame(frame) = rx.ingest(&p51(4)).unwrap() {
+            drained.push(frame);
+        }
+        while let Some(frame) = rx.pop_ready() {
+            drained.push(frame);
+        }
+        let indices: Vec<u32> = drained.iter().map(|f| f.frame_index).collect();
+        assert_eq!(indices, (53u32..=59).collect::<Vec<_>>());
+        assert!(drained.iter().all(|f| !f.prior_frames_dropped));
     }
 
     #[test]
@@ -4232,14 +4328,15 @@ mod tests {
     #[test]
     fn video_nack_encodes_target_first_28_byte_single_range_and_roundtrips() {
         // Single range: 8-byte header + 4-byte range + 16 zero tail = 28 bytes.
-        let pkt = encode_video_nack(3, 7, 1, 42, &[(100, 103)]);
+        let pkt = encode_video_nack(3, 7, 1, &[(100, 103)]);
         assert_eq!(pkt.len(), 28);
         assert_eq!(pkt[0], 0x06);
         // Target member (7, stream 1) comes before local member (3, stream 1).
         assert_eq!([pkt[1], pkt[2]], pack_rtcp_member(7, 1));
         assert_eq!([pkt[3], pkt[4]], pack_rtcp_member(3, 1));
         assert_eq!(pkt[5], 0);
-        assert_eq!(pkt[6], 42);
+        // Request format byte: official senders drop the NACK unless it is 0.
+        assert_eq!(pkt[6], 0);
         assert_eq!(pkt[7], 1);
         assert_eq!(&pkt[12..28], &[0u8; 16]);
 
@@ -4253,8 +4350,22 @@ mod tests {
         assert_eq!(parsed.local_member, 3);
         assert_eq!(parsed.local_stream_id, 1);
         assert_eq!(parsed.is_screen, 0);
-        assert_eq!(parsed.arq_seq, 42);
+        assert_eq!(parsed.format, 0);
         assert_eq!(parsed.ranges, vec![(100, 103)]);
+    }
+
+    #[test]
+    fn arq_response_prefix_yields_the_original_rsm_packet() {
+        let original = [0x09u8, 0x00, 0x08, 0x10, 0x20, 0x30];
+        let mut wire = vec![VIDEO_ARQ_RESPONSE_PREFIX];
+        wire.extend_from_slice(&original);
+        let VideoChannelPayload::ArqResponse(inner) =
+            classify_video_channel_payload(&wire).unwrap()
+        else {
+            panic!("expected ArqResponse classification");
+        };
+        assert_eq!(inner, &original);
+        assert!(classify_video_channel_payload(&[VIDEO_ARQ_RESPONSE_PREFIX]).is_err());
     }
 
     #[test]
@@ -4263,7 +4374,7 @@ mod tests {
         for i in 0..25u16 {
             ranges.push((100 + i * 2, 101 + i * 2));
         }
-        let pkt = encode_video_nack(1, 2, 0, 9, &ranges);
+        let pkt = encode_video_nack(1, 2, 0, &ranges);
         let parsed = parse_video_nack(&pkt).unwrap();
         assert_eq!(parsed.ranges.len(), MAX_VIDEO_NACK_RANGES);
         assert_eq!(parsed.ranges[0], (100, 101));

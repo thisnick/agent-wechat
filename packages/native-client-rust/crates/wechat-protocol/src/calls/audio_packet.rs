@@ -2,12 +2,20 @@
 //! bytes does not establish negotiated capabilities, room ownership or permission
 //! to send. Media transmission requires a separately admitted generation/scope.
 
+use crate::calls::video_packet::VIDEO_ARQ_RESPONSE_PREFIX;
 use crate::crypto::{
     chacha20_xor, constant_time_eq, hmac_sha256_slices, poly1305_mac, sha256_array,
 };
 use anyhow::{bail, ensure, Result};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
+
+/// Live98 extension byte marking a `0x06` video ARQ NACK.
+const LIVE98_EXT_ARQ_NACK: u8 = 2;
+/// Live98 extension byte marking a `0x67` video ARQ retransmission.
+const LIVE98_EXT_ARQ_RETRANSMIT: u8 = 4;
+/// Accepted ARQ retransmissions remembered for duplicate suppression.
+const MAX_ARQ_RETRANSMIT_HISTORY: usize = 512;
 
 const HEADER: usize = 19;
 const HEADER_LIVE98: usize = 21;
@@ -149,6 +157,9 @@ pub struct Live96 {
     rx_high_seen: BTreeMap<u8, std::collections::BTreeSet<u32>>,
     rx_high_overflow: BTreeMap<u8, bool>,
     rx: BTreeMap<[u8; 8], Vec<[u8; 32]>>,
+    /// Recently accepted Live98 ARQ retransmissions as `(kind, ext_seq32, ciphertext digest)`.
+    /// Their sequence is the sender's separate ARQ counter, so they skip the video ledger.
+    rx_arq: std::collections::VecDeque<(u8, u32, [u8; 32])>,
     legacy_receive_nonce_reuse: bool,
     receive_nonce_reuses: BTreeMap<u8, u64>,
     audio_overlaps: u64,
@@ -256,6 +267,7 @@ impl Live96 {
             rx_high_seen: BTreeMap::new(),
             rx_high_overflow: BTreeMap::new(),
             rx: BTreeMap::new(),
+            rx_arq: std::collections::VecDeque::new(),
             legacy_receive_nonce_reuse: false,
             receive_nonce_reuses: BTreeMap::new(),
             audio_overlaps: 0,
@@ -594,9 +606,14 @@ impl Live96 {
                 HEADER,
             )
         };
+        // A Live98 video packet with extension byte 4 is a `0x67` ARQ retransmission. Its
+        // bytes 15..18 carry the sender's separate ARQ counter, not the video sequence.
+        let arq_retransmit = magic == 0x98
+            && ext_byte == LIVE98_EXT_ARQ_RETRANSMIT
+            && matches!(kind & 0xf0, 0x20 | 0x40);
         let family_ok = match kind & 0xf0 {
             0x10 | 0x30 | 0x50 | 0x70 => kind == (kind & 0xf0) && ext_byte == 0,
-            0x20 | 0x40 | 0x60 => ext_byte <= 2,
+            0x20 | 0x40 | 0x60 => ext_byte <= 2 || arq_retransmit,
             _ => false,
         };
         ensure!(family_ok, "Unsupported Live96 packet family or extension");
@@ -613,7 +630,43 @@ impl Live96 {
                 && u16::from_le_bytes(clear[..2].try_into()?) == self.context.peer_member,
             "Protected media member mismatch or extent"
         );
+        // The extension byte is not authenticated, so only a payload that really is a `0x67`
+        // ARQ response may use the retransmission ledger; anything else relabelled with
+        // extension byte 4 (for example a replayed video packet) is rejected.
+        ensure!(
+            !arq_retransmit || clear.get(2) == Some(&VIDEO_ARQ_RESPONSE_PREFIX),
+            "Live98 ARQ extension without an ARQ response"
+        );
         let digest: [u8; 32] = sha256_array(&packet[hdr_len..]);
+        // A Live98 `0x06` NACK (extension byte 2) also carries the sender's ARQ counter
+        // in bytes 15..18, so it shares the retransmission ledger.
+        let arq_nack = magic == 0x98
+            && ext_byte == LIVE98_EXT_ARQ_NACK
+            && matches!(kind & 0xf0, 0x20 | 0x60)
+            && clear.get(2) == Some(&0x06);
+        if arq_retransmit || arq_nack {
+            if self
+                .rx_arq
+                .iter()
+                .any(|&(k, s, d)| k == kind && s == sequence32 && d == digest)
+            {
+                return Ok(None);
+            }
+            if self.rx_arq.len() >= MAX_ARQ_RETRANSMIT_HISTORY {
+                self.rx_arq.pop_front();
+            }
+            self.rx_arq.push_back((kind, sequence32, digest));
+            return Ok(Some(OpenedPayload {
+                packed_kind: kind,
+                sequence: sequence32 as u16,
+                sequence32,
+                extension_byte: ext_byte,
+                magic,
+                payload: Zeroizing::new(clear[2..].to_vec()),
+                epoch: current,
+                context: self.context,
+            }));
+        }
         if let Some(previous) = self.rx.get(&nonce) {
             if previous.contains(&digest) {
                 return Ok(None);
@@ -1419,6 +1472,67 @@ mod tests {
         assert!(receiver
             .seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 2])
             .is_err());
+    }
+
+    #[test]
+    fn live98_arq_packets_use_their_own_counter_without_touching_the_video_ledger() {
+        let mut sender = peer();
+        let mut recv = receiver();
+        // A normal video packet at sequence 0.
+        let video = sender
+            .seal_inner(epoch(), 0, 0x21, 1, true, &[9, 0, 8, 3])
+            .unwrap();
+        assert!(recv.open(epoch(), &video).unwrap().is_some());
+
+        // A retransmission (extension byte 4) and a NACK (extension byte 2) whose bytes
+        // 15..18 carry the sender's separate ARQ counter, here also 0. Reusing that value
+        // must not register as a nonce conflict, which would close the receiver.
+        sender.next_video = 0;
+        let retransmit = sender
+            .seal_inner(epoch(), 0, 0x21, 4, true, &[0x67, 9, 0, 8, 3])
+            .unwrap();
+        let opened = recv.open(epoch(), &retransmit).unwrap().unwrap();
+        assert_eq!(opened.extension_byte(), 4);
+        assert_eq!(opened.payload(), &[0x67, 9, 0, 8, 3]);
+        // The same retransmission delivered twice is dropped as a duplicate.
+        assert!(recv.open(epoch(), &retransmit).unwrap().is_none());
+
+        // The NACK as sent on the wire (kind 0x61) and as relay-rewritten (0x21).
+        for wire_kind in [0x61u8, 0x21] {
+            sender.next_video = 0;
+            let mut nack = sender
+                .seal_inner(
+                    epoch(),
+                    0,
+                    0x61,
+                    2,
+                    true,
+                    &[0x06, 1, 8, 0, 8, 0, 0, 1, 0, 1, 0, 2],
+                )
+                .unwrap();
+            nack[14] = wire_kind;
+            let opened = recv.open(epoch(), &nack).unwrap().unwrap();
+            assert_eq!(opened.payload()[0], 0x06);
+        }
+
+        // A non-ARQ payload relabelled with extension byte 4 (the byte is not authenticated)
+        // is rejected instead of bypassing the replay ledger.
+        sender.next_video = 0;
+        let relabelled = sender
+            .seal_inner(epoch(), 0, 0x21, 4, true, &[0x66, 1, 8, 0, 0, 8])
+            .unwrap();
+        assert!(recv.open(epoch(), &relabelled).is_err());
+
+        // Other extension bytes on video stay unsupported, and the ledger still works.
+        sender.next_video = 1;
+        let unknown = sender
+            .seal_inner(epoch(), 0, 0x21, 3, true, &[9, 0, 8, 3])
+            .unwrap();
+        assert!(recv.open(epoch(), &unknown).is_err());
+        let next_video = sender
+            .seal_inner(epoch(), 0, 0x21, 1, true, &[9, 0, 8, 4])
+            .unwrap();
+        assert!(recv.open(epoch(), &next_video).unwrap().is_some());
     }
 
     #[test]

@@ -108,6 +108,28 @@ impl VideoStreamReceiver {
         raw: &[u8],
         now_ms: u64,
     ) -> VideoIngestBatch {
+        self.ingest_rsm_packet(channel_stream_id, raw, false, now_ms)
+    }
+
+    /// Ingest the original RSM packet carried by a `0x67` ARQ response (a retransmission
+    /// answering one of our NACKs). It joins its pending frame like any other packet and
+    /// counts toward the P2S `u16RecvArqRespPkgs` field.
+    pub(crate) fn ingest_rsm_arq_response(
+        &mut self,
+        channel_stream_id: u8,
+        raw: &[u8],
+        now_ms: u64,
+    ) -> VideoIngestBatch {
+        self.ingest_rsm_packet(channel_stream_id, raw, true, now_ms)
+    }
+
+    fn ingest_rsm_packet(
+        &mut self,
+        channel_stream_id: u8,
+        raw: &[u8],
+        arq_response: bool,
+        now_ms: u64,
+    ) -> VideoIngestBatch {
         let header = match parse_rsm_packet_header(raw) {
             Ok(h) => h,
             Err(err) => {
@@ -122,11 +144,27 @@ impl VideoStreamReceiver {
             }
         };
 
+        // Accept a retransmission only for a packet we are still missing: it was requested,
+        // and a replayed or duplicate one cannot reopen frames that already finished.
+        if arq_response
+            && !header
+                .pkg_seq
+                .is_some_and(|seq| self.nack_tracker.is_missing(seq))
+        {
+            return VideoIngestBatch {
+                header: Some(header),
+                frames: Vec::new(),
+                assembly_dropped: false,
+                ingest_error: None,
+            };
+        }
         self.keyframe_policy
             .observe_packet(channel_stream_id, &header);
-        let arq_recovered = self.nack_tracker.observe_header(&header, now_ms);
+        let gap_filled = self.nack_tracker.observe_header(&header, now_ms);
+        let arq_recovered = arq_response || gap_filled;
         self.telemetry
             .observe_packet(&header, raw.len(), arq_recovered, now_ms);
+        self.nack_tracker.set_jitter_ms(self.telemetry.jitter_ms());
 
         let mut frames = Vec::new();
         let mut assembly_dropped = false;

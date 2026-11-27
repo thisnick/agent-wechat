@@ -21,6 +21,7 @@ use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaContext, TransmitScope},
     relay::RelayEpoch,
     rudp::{self, RudpAckTracker},
+    video_arq::VideoArqSendCache,
     video_packet::{
         classify_video_channel_payload, encode_p2s_report, encode_video_nack, parse_s2p,
         parse_video_nack, VideoChannelPayload, VideoS2pCommand, P2S_CODEC_SUPPORT_H264_H265,
@@ -174,6 +175,9 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
         VideoStreamReceiver::new(connected_ms)
     };
     let mut video_tx = VideoTxPacer::new(selected.own_member, 1);
+    // Outgoing video packets kept briefly so the peer's NACKs can be answered.
+    let mut video_arq_cache = VideoArqSendCache::new();
+    let mut trace_arq_tx = 0u64;
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
     let mut last_peer_activity = Instant::now();
@@ -291,6 +295,8 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                 }
                             } else if matches!(opened.packed_kind & 0xf0, 0x20 | 0x60) {
                                 if let Ok(kind) = classify_video_channel_payload(opened.payload()) {
+                                    let arq_response =
+                                        matches!(kind, VideoChannelPayload::ArqResponse(_));
                                     match kind {
                                         VideoChannelPayload::IRequest(req) => {
                                             if video_trace && trace_rx_rtcp_logged < 32 {
@@ -312,16 +318,47 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                             host.on_peer_keyframe_requested();
                                         }
                                         VideoChannelPayload::Nack(raw_nack) => {
+                                            let parsed = parse_video_nack(raw_nack).ok();
+                                            if let Some(nack) = parsed.as_ref().filter(|n| {
+                                                n.target_member == selected.own_member
+                                                    && video.is_some()
+                                            }) {
+                                                let now_ms = clock();
+                                                let responses =
+                                                    video_arq_cache.answer(nack, 1, now_ms);
+                                                let answered = responses.len();
+                                                for response in responses {
+                                                    // A packet already at the size limit has no room
+                                                    // for the prefix; skip it rather than end the call.
+                                                    if let Ok(datagram) = channel.seal_video(
+                                                        epoch, now_ms, 1, true, &response,
+                                                    ) {
+                                                        host.submit(
+                                                            &socket,
+                                                            endpoint,
+                                                            &datagram,
+                                                            &[],
+                                                        )?;
+                                                    }
+                                                }
+                                                trace_arq_tx += answered as u64;
+                                                if video_trace {
+                                                    eprintln!(
+                                                        "[wechat-call-video] tx arq response count={answered} total={trace_arq_tx} ranges={:?}",
+                                                        nack.ranges
+                                                    );
+                                                }
+                                            }
                                             if video_trace && trace_rx_rtcp_logged < 32 {
                                                 trace_rx_rtcp_logged += 1;
-                                                if let Ok(parsed) = parse_video_nack(raw_nack) {
+                                                if let Some(parsed) = parsed {
                                                     eprintln!(
-                                                        "[wechat-call-video] rx nack magic=0x{:02x} kind=0x{:02x} ext={} seq={} arq={} from={} target={} stream={} ranges={:?} raw={:02x?}",
+                                                        "[wechat-call-video] rx nack magic=0x{:02x} kind=0x{:02x} ext={} seq={} format={} from={} target={} stream={} ranges={:?} raw={:02x?}",
                                                         opened.magic(),
                                                         opened.packed_kind,
                                                         opened.extension_byte(),
                                                         opened.sequence32(),
-                                                        parsed.arq_seq,
+                                                        parsed.format,
                                                         parsed.local_member,
                                                         parsed.target_member,
                                                         parsed.target_stream_id,
@@ -331,7 +368,8 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                                 }
                                             }
                                         }
-                                        VideoChannelPayload::RsmVideo(raw) => {
+                                        VideoChannelPayload::RsmVideo(raw)
+                                        | VideoChannelPayload::ArqResponse(raw) => {
                                             if (opened.packed_kind & 0xf0) != 0x20 {
                                                 continue;
                                             }
@@ -347,8 +385,15 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                             }
                                             let now_ms = clock();
                                             let channel_stream_id = opened.packed_kind & 0x0f;
-                                            let batch =
-                                                video_rx.ingest_rsm(channel_stream_id, raw, now_ms);
+                                            let batch = if arq_response {
+                                                video_rx.ingest_rsm_arq_response(
+                                                    channel_stream_id,
+                                                    raw,
+                                                    now_ms,
+                                                )
+                                            } else {
+                                                video_rx.ingest_rsm(channel_stream_id, raw, now_ms)
+                                            };
                                             trace_rx_pkts += 1;
                                             if let Some(hdr) = batch.header {
                                                 if video_trace
@@ -592,7 +637,6 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                         selected.own_member,
                         media.peer_member,
                         rx_stream_id,
-                        arq_seq,
                         &ranges,
                     );
                     if let Ok(datagram) =
@@ -730,9 +774,11 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                             if !host.current() || host.video_generation() != pkt_gen {
                                 return Ok(VideoTxSendAction::StaleGeneration);
                             }
-                            match channel.seal_video(epoch, clock(), 1, true, pkt) {
+                            let sent_ms = clock();
+                            match channel.seal_video(epoch, sent_ms, 1, true, pkt) {
                                 Ok(datagram) => {
                                     let _ = host.submit(&socket, endpoint, &datagram, &[])?;
+                                    video_arq_cache.record_sent(pkt, sent_ms);
                                     Ok(VideoTxSendAction::Sent)
                                 }
                                 Err(_) => Ok(VideoTxSendAction::SequenceExhausted),
