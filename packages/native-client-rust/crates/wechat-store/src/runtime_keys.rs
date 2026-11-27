@@ -128,8 +128,6 @@ const THREAD: usize = 576;
 const CALL: usize = 256;
 /// An operation, job, metadata or asset ID.
 const ID: usize = 128;
-/// Up to 2 KiB of free text.
-const TEXT: usize = 2048;
 
 const fn kind(
     prefix: &'static str,
@@ -170,7 +168,6 @@ const fn event(prefix: &'static str, max_key: usize) -> RuntimeKind {
         "Once-only event receipt.",
     )
 }
-const LEAK: Growth = Growth::Leak("#730");
 
 /// Every kind of runtime note. Order doesn't matter: a key belongs to the kind
 /// with the longest matching prefix whose tail fits.
@@ -227,13 +224,12 @@ pub static RUNTIME_KINDS: &[RuntimeKind] = &[
     kind("partial-thread-entry-read:projected:", Tail::Text, RECEIPT, R30, Growth::PerTraffic, "Phase marker while a read control applies."),
     kind("partial-thread-exit-read:projected:", Tail::Text, RECEIPT, R30, Growth::PerTraffic, "Phase marker while a read control applies."),
     kind("friend-message-stage:projected:", Tail::Text, RECEIPT, R30, Growth::PerTraffic, "Phase marker while a friend-request message applies."),
-    kind("friend-attention-stage:projected:", Tail::Text, RECEIPT + 72, R30, Growth::PerTraffic, "Phase marker while a friend-request attention flag applies."),
-    kind("friend-attention-stage:", Tail::Text, ID + 72, KEEP, LEAK, "Phase marker for an attention flag applied from an operation or metadata receipt."),
-    kind("contact-notifications:", Tail::Text, RECEIPT_USER, KEEP, LEAK, "Phase marker while a contact record's notification setting applies."),
-    kind("contact-pinning:", Tail::Text, RECEIPT_USER, KEEP, LEAK, "Phase marker while a contact record's pin applies."),
-    kind("contact-pinning-time:", Tail::Text, RECEIPT, KEEP, LEAK, "Phase marker while a record's pin time applies."),
-    kind("contact-privacy-observation:", Tail::Text, RECEIPT_USER, KEEP, LEAK, "Privacy setting observed in one contact record."),
-    kind("sync-control:", Tail::Text, RECEIPT, KEEP, Growth::Archive, "Sealed raw bytes of a control command, kept so a later build can apply what this one skipped (owner decision 2026-11-19)."),
+    kind("friend-attention-stage:", Tail::Text, RECEIPT + 72, R30, Growth::PerTraffic, "Phase marker while a friend-request attention flag applies."),
+    kind("contact-notifications:", Tail::Text, RECEIPT_USER, R30, Growth::PerTraffic, "Phase marker while a contact record's notification setting applies."),
+    kind("contact-pinning:", Tail::Text, RECEIPT_USER, R30, Growth::PerTraffic, "Phase marker while a contact record's pin applies."),
+    kind("contact-pinning-time:", Tail::Text, RECEIPT, R30, Growth::PerTraffic, "Phase marker while a record's pin time applies."),
+    kind("contact-privacy-observation:", Tail::Text, RECEIPT_USER, R30, Growth::PerTraffic, "Privacy setting observed in one contact record."),
+    kind("sync-control:", Tail::Text, RECEIPT, R7, Growth::PerTraffic, "Sealed raw bytes of a control command; kept forever when skipped (owner decision 2026-11-19) or referenced by recall-control:, otherwise removed after 7 days."),
     kind("skipped-control:", Tail::Text, RECEIPT, KEEP, Growth::Archive, "Kind of a skipped command, kept as long as its raw bytes under sync-control: (owner decision 2026-11-19)."),
     kind("recall-control:", Tail::Sha256, 15 + 64, KEEP, Growth::Archive, "Evidence of one incoming recall, kept with its raw command."),
     // Per-contact, per-group and per-thread state.
@@ -257,11 +253,11 @@ pub static RUNTIME_KINDS: &[RuntimeKind] = &[
     kind("sticker-refresh:", Tail::Text, 16 + 64, KEEP, Growth::PerJob, "Queued sticker catalog refresh."),
     kind("streaming-voice:", Tail::Text, MESSAGE, KEEP, Growth::PerJob, "Voice note still streaming in (90 seconds or less)."),
     // Group refresh results.
-    kind("incoming-group-done:", Tail::Sha256, 20 + 64, KEEP, LEAK, "A group refresh for this receipt has finished."),
-    kind("incoming-group-held:", Tail::Sha256, 20 + 64, KEEP, LEAK, "Sealed group refresh that failed three times."),
+    kind("incoming-group-done:", Tail::Sha256, 20 + 64, R30, Growth::PerTraffic, "A group refresh for this receipt has finished."),
+    kind("incoming-group-held:", Tail::Sha256, 20 + 64, R30, Growth::PerTraffic, "A group refresh for this receipt failed three times and stopped retrying."),
     kind("incoming-group-pending:", Tail::Suffixed, MAX_RUNTIME_KEY, R7, Growth::PerTraffic, "Superseded refresh copy that earlier releases saved under the queue's names (#722)."),
     kind("incoming-group-held:", Tail::Suffixed, MAX_RUNTIME_KEY, R7, Growth::PerTraffic, "Failed superseded refresh copy from earlier releases (#722)."),
-    kind("incoming-group-receipt:", Tail::Sha256, 23 + 64, R7, Growth::PerTraffic, "Sealed response bodies of a finished group refresh, kept for investigation."),
+    kind("incoming-group-receipt:", Tail::Sha256, 23 + 64, R7, Growth::PerTraffic, "Sealed response bodies of a finished or held group refresh, kept for investigation."),
     kind("incoming-group-receipt:", Tail::Suffixed, MAX_RUNTIME_KEY, R7, Growth::PerTraffic, "Receipt of a superseded refresh copy that earlier releases ran as a job (#722)."),
     kind("incoming-group-superseded:", Tail::Sha256Then, 26 + 64 + 4, R7, Growth::PerTraffic, "Sealed response bodies a refresh replaced, kept for investigation."),
     // Metadata, media and send receipts.
@@ -276,9 +272,9 @@ pub static RUNTIME_KINDS: &[RuntimeKind] = &[
     kind("thread-read-notification:", Tail::Sha256, 25 + 64, RuntimeRetention::Retire(READ_NOTIFICATION, RECEIPT_DAYS), Growth::PerTraffic, "A read notification was submitted; its key is retired so it is never sent twice."),
     kind("retention-day:", Tail::Text, 32, KEEP, Growth::OtherCleanup, "Row-ID marker for one day; retention removes markers after 400 days."),
     // Sign-in.
-    kind("login-key:", Tail::Sha256, 10 + 64, KEEP, LEAK, "Idempotency key of a login request."),
-    kind("qr:", Tail::Text, ID, KEEP, LEAK, "Sealed QR image of a login; removed when credentials are forgotten."),
-    kind("saved-login-superseded:", Tail::Sha256, 23 + 64, KEEP, LEAK, "Sealed saved-login journal replaced before it finished."),
+    kind("login-key:", Tail::Sha256, 10 + 64, R7, Growth::PerTraffic, "Idempotency key of a login request."),
+    kind("qr:", Tail::Text, ID, RuntimeRetention::RemoveFinishedLogin, Growth::PerTraffic, "Sealed QR image of a login until the login finishes."),
+    kind("saved-login-superseded:", Tail::Sha256, 23 + 64, R7, Growth::PerTraffic, "Sealed saved-login journal replaced before it finished."),
     // Calls, kept for diagnostics.
     kind("call-conference-failure:", Tail::Text, CALL, R7, Growth::PerTraffic, "Conference failure details for a call."),
     kind("call-conference-phase:", Tail::Text, CALL, R7, Growth::PerTraffic, "Conference phase reached by a call."),
@@ -322,7 +318,7 @@ pub static RUNTIME_KINDS: &[RuntimeKind] = &[
     event("event:worker:", 128),
     singleton("event:profile-recovery-pending", "Once-only event: profile recovery is pending."),
     kind("event:profile-wal-conversion:", Tail::Sha256, 29 + 64, KEEP, Growth::Singleton, "Once-only event per distinct profile WAL conversion report; a few per account."),
-    kind("event:profile-wal-conversion-skipped:", Tail::Text, TEXT, KEEP, LEAK, "Once-only event per distinct error text of a skipped WAL conversion; the text is unbounded."),
+    kind("event:profile-wal-conversion-skipped:", Tail::Sha256, 37 + 64, R30, Growth::PerTraffic, "Once-only event per distinct skipped WAL conversion error, hashed to bound the key."),
 ];
 
 /// Where a key belongs.
@@ -505,6 +501,7 @@ mod tests {
                         RuntimeRetention::Remove(RAW_DAYS | RECEIPT_DAYS)
                             | RuntimeRetention::Retire(_, RECEIPT_DAYS)
                             | RuntimeRetention::RemoveFinishedMetadata
+                            | RuntimeRetention::RemoveFinishedLogin
                     ),
                     "{} grows with traffic but retention keeps it",
                     kind.pattern()
@@ -571,125 +568,43 @@ mod tests {
         );
         assert_eq!(
             audit.families["incoming-group-done:<sha256>"].growth,
-            "leak"
+            "perTraffic"
         );
     }
 
-    /// The prefix lists retention used before this list existed.
-    fn legacy_group_refresh_copy(key: &str) -> bool {
-        ["incoming-group-pending:", "incoming-group-held:"]
-            .iter()
-            .filter_map(|prefix| key.strip_prefix(prefix))
-            .any(|rest| rest.contains(':'))
-    }
-
-    fn previous_aged_runtime(key: &str) -> RuntimeRetention {
-        // Per-command projection receipts and their phase markers.
-        const COMMAND: [&str; 11] = [
-            "projected:",
-            "blocked-control:",
-            // The newest job.updated event of a job, for merging progress.
-            "job-event:",
-            "apply-origin:",
-            "contact-fields:projected:",
-            "contact-mute:projected:",
-            "contact-pin:projected:",
-            "partial-thread-entry-read:projected:",
-            "partial-thread-exit-read:projected:",
-            "friend-message-stage:projected:",
-            "friend-attention-stage:projected:",
-        ];
-        // Once-only event receipts for one message, command, operation or minute.
-        const EVENT: [&str; 32] = [
-            "message:",
-            "message-expanded:",
-            "voice-updated:",
-            "remote-thread-read:",
-            "control-observed:",
-            "control-no-local-effect:",
-            "control-skipped:",
-            "contact:",
-            "contact-pin-event:",
-            "contact-pin:",
-            "contact-delete:",
-            "group-fields:",
-            "friend-message-event:",
-            "friend-attention:",
-            "partial-thread-entry-read:",
-            "partial-thread-exit-read:",
-            "group-refreshed:",
-            "group-refresh-held:",
-            "received:",
-            "blocked-v2:",
-            "blocked:",
-            "group-members:",
-            "group-detail:",
-            "read-thread:",
-            "contact-mutation-event:",
-            "contact-mutation:",
-            "thread-pin:",
-            "group-mutation:",
-            "auto-media-job:",
-            "auto-media-unavailable:",
-            "worker:",
-            "push:",
-        ];
-        // Raw replies kept for investigation and call diagnostics. No code reads
-        // them back.
-        const RAW: [&str; 11] = [
-            "metadata-wire:",
-            "metadata-unavailable:",
-            "incoming-group-receipt:",
-            "incoming-group-superseded:",
-            "call-host-diagnostic:",
-            "call-media-error:",
-            "call-media-diagnostic:",
-            "call-conference-receive:",
-            "call-conference-failure:",
-            "call-conference-phase:",
-            "call-conference-profile:",
-        ];
-        if let Some(event) = key.strip_prefix("event:") {
-            return if EVENT.iter().any(|prefix| event.starts_with(prefix)) {
-                RuntimeRetention::Remove(RECEIPT_DAYS)
-            } else {
-                RuntimeRetention::Keep
-            };
-        }
-        if COMMAND.iter().any(|p| key.starts_with(p)) {
-            RuntimeRetention::Remove(RECEIPT_DAYS)
-        } else if RAW.iter().any(|p| key.starts_with(p)) || legacy_group_refresh_copy(key) {
-            RuntimeRetention::Remove(RAW_DAYS)
-        } else if key.starts_with("metadata-receipt:") {
-            RuntimeRetention::RemoveFinishedMetadata
-        } else if key.starts_with("thread-read-notification:") {
-            RuntimeRetention::Retire(READ_NOTIFICATION, RECEIPT_DAYS)
-        } else {
-            RuntimeRetention::Keep
-        }
-    }
-
     #[test]
-    fn every_kind_keeps_the_lifetime_it_had_before_this_list() {
+    fn aged_runtime_follows_every_kind_and_no_issue_730_leaks_remain() {
         for kind in RUNTIME_KINDS {
+            assert_ne!(
+                kind.growth,
+                Growth::Leak("#730"),
+                "{} is still marked as a #730 leak",
+                kind.pattern()
+            );
             let well_formed = sample(kind);
-            // A tail that doesn't fit its kind keeps its prefix's old lifetime.
+            assert_eq!(
+                crate::retention::aged_runtime(&well_formed),
+                kind.retention,
+                "{well_formed}"
+            );
+            // A malformed tail still matches the longest prefix without panicking,
+            // including when multi-byte UTF-8 spans byte 64.
             for key in [
-                well_formed.clone(),
                 kind.prefix.to_owned(),
                 format!("{}x", kind.prefix),
-                format!("{well_formed}:extra"),
                 format!("{}\u{1}", kind.prefix),
-                format!("{}x:\u{1}", kind.prefix),
-                // Multi-byte text across byte 64 of the tail.
                 format!("{}{}", kind.prefix, "\u{4e2d}".repeat(30)),
             ] {
-                assert_eq!(
-                    crate::retention::aged_runtime(&key),
-                    previous_aged_runtime(&key),
-                    "{key:?}"
-                );
+                let expected = match runtime_kind(&key) {
+                    RuntimeLookup::Kind(found) | RuntimeLookup::Malformed(found) => found.retention,
+                    RuntimeLookup::Unknown => RuntimeRetention::Keep,
+                };
+                assert_eq!(crate::retention::aged_runtime(&key), expected, "{key:?}");
             }
         }
+        assert_eq!(
+            crate::retention::aged_runtime("not-a-kind:1"),
+            RuntimeRetention::Keep
+        );
     }
 }

@@ -871,6 +871,9 @@ impl Core {
             op.state = "cancelled".into();
             op.updated_at = now();
             self.store.save_operation(&op)?;
+            if op.kind == "login" {
+                let _ = self.store.clear_runtime(account, &format!("qr:{id}"));
+            }
         }
         Ok(op)
     }
@@ -976,6 +979,9 @@ impl Core {
             if let Err(error) = outcome {
                 let _ = core.progress(&worker_op, "failed", login_failure_result(&error));
             }
+            let _ = core
+                .store
+                .clear_runtime(&worker_op.account_id, &format!("qr:{}", worker_op.id));
             if let Ok(mut map) = core.cancels.lock() {
                 map.remove(&active_key);
                 map.remove(&worker_op.id);
@@ -4895,5 +4901,32 @@ pub(crate) mod tests {
         let core = Core::new(store, None).unwrap();
         assert!(core.profile_reader("fresh").is_ok());
         assert_eq!(core.account_state("fresh").unwrap().uin, 1);
+    }
+    #[test]
+    fn cancelling_login_clears_qr_image_immediately() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let timestamp = now();
+        let op = Operation {
+            id: "login-cancel".into(),
+            account_id: "one".into(),
+            kind: "login".into(),
+            state: "awaiting_scan".into(),
+            result: json!({}),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+        store.save_operation(&op).unwrap();
+        let key = format!("qr:{}", op.id);
+        let sealed = core.vault.seal("one", &key, b"synthetic-png").unwrap();
+        store.put_runtime("one", &key, &sealed).unwrap();
+        assert_eq!(core.qr("one", &op.id).unwrap(), b"synthetic-png");
+
+        let cancelled = core.cancel_operation("one", &op.id).unwrap();
+        assert_eq!(cancelled.state, "cancelled");
+        assert!(store.runtime("one", &key).unwrap().is_none());
+        assert!(core.qr("one", &op.id).is_err());
     }
 }

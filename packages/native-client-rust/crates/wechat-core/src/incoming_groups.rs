@@ -222,7 +222,10 @@ impl Core {
                     &sealed_receipt(self, account, &retained_key, &job)?,
                 )?;
                 self.store.append_event_once(account,&format!("group-refreshed:{}",job.source),"group.updated",&json!({"groupId":job.group,"origin":job.origin,"source":"remote_sync_refresh","membersRefreshed":job.members,"announcementRefreshed":job.detail,"profileProjection":"partial"}))?;
-                self.store.put_runtime(account, &done(&job.source), b"1")?;
+                // Store the source receipt so retention can match this marker
+                // against unfinished sync batches.
+                self.store
+                    .put_runtime(account, &done(&job.source), job.source.as_bytes())?;
                 // Keep the completed job until its original command has been
                 // revisited, so a restart cannot lose this local recovery work.
                 self.resume_incoming_group_source(account, &job)?;
@@ -233,12 +236,18 @@ impl Core {
                 Ok(true) => return Ok(1),
                 Ok(false) => return Ok(0),
                 Err(_) if job.attempts >= 3 && allow_fetch => {
-                    let held_key = key.replace("pending:", "held:");
+                    // Keep any fetched bodies under `receipt:` for 7-day
+                    // investigation, and store only the source receipt under
+                    // `held:` so retention can match unfinished sync batches.
+                    let retained_key = key.replace("pending:", "receipt:");
                     self.store.put_runtime(
                         account,
-                        &held_key,
-                        &sealed_receipt(self, account, &held_key, &job)?,
+                        &retained_key,
+                        &sealed_receipt(self, account, &retained_key, &job)?,
                     )?;
+                    let held_key = key.replace("pending:", "held:");
+                    self.store
+                        .put_runtime(account, &held_key, job.source.as_bytes())?;
                     self.store.clear_runtime(account, &key)?;
                     self.store.append_event_once(account,&format!("group-refresh-held:{}",job.source),"group.refresh_blocked",&json!({"groupId":job.group,"source":"remote_sync","reason":"metadata_refresh_unavailable","retryable":false}))?;
                 }
@@ -679,6 +688,43 @@ mod tests {
             .unwrap();
         let keys: Vec<_> = saved.into_iter().map(|(key, _)| key).collect();
         assert_eq!(keys, [superseded(&key, 1)]);
+        assert_eq!(
+            core.store.runtime("one", &done("phone-change")).unwrap(),
+            Some(b"phone-change".to_vec())
+        );
+    }
+    #[test]
+    fn held_group_refresh_stores_source_receipt_and_keeps_bodies_under_receipt() {
+        struct FailingServer;
+        impl crate::upstream::Upstream for FailingServer {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, _: &[String]) -> Result<Vec<u8>> {
+                bail!("synthetic_network_error")
+            }
+        }
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let (key, _job) = staged(&core);
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(FailingServer);
+        for _ in 0..3 {
+            assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
+        }
+        assert!(core
+            .store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .is_empty());
+        let held_key = key.replace("pending:", "held:");
+        let receipt_key = key.replace("pending:", "receipt:");
+        assert_eq!(
+            core.store.runtime("one", &held_key).unwrap(),
+            Some(b"phone-change".to_vec())
+        );
+        assert!(core.store.runtime("one", &receipt_key).unwrap().is_some());
     }
     #[test]
     fn local_repair_never_fetches_missing_data_or_overwrites_a_newer_change() {

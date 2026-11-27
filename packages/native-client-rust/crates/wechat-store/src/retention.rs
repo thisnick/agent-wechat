@@ -17,9 +17,10 @@
 //! | Group and contact changes, recalls | unfinished, awaiting a profile write or contact sync; for a day | operation record and key | 365 days; key retired |
 //! | Sync, metadata and media writeback operations | unfinished | - | 30 days after finishing; ID retired |
 //! | Calls | active | session and action IDs | kept: calls are rare and IDs guard against reuse |
-//! | Duplicate guards in `runtime` (see [`aged_runtime`]) | 30 days, and while they name an unfinished sync batch | - | after 30 days |
-//! | Raw replies and call diagnostics in `runtime` | 7 days, for offline investigation | - | after 7 days |
-//! | Metadata receipts in `runtime` | while their request is pending | - | once it finishes |
+//! | Duplicate guards and phase markers in `runtime` (see [`aged_runtime`]) | 30 days, and while their owning batch, metadata receipt, group or contact change is unfinished | - | after 30 days |
+//! | Raw replies, applied control bytes, login idempotency keys, superseded login journals and call diagnostics in `runtime` | 7 days (applied controls stay forever when skipped or referenced by recall evidence; login keys stay while their login is active) | - | after 7 days |
+//! | Metadata receipts and hydration checkpoints in `runtime` | while their request is pending | - | once it finishes |
+//! | Login QR images in `runtime` | while their login operation is active | - | once it finishes |
 //! | Pagination views | until they expire | - | once expired |
 //! | Message attachment rows never downloaded (`pending` or `expired`), except voice | for [`IDLE_ASSET_DAYS`], while a job or queued automatic download names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
 //! | Sticker catalog previews (`sticker_preview_*`) | until their one-day preparation window ends, while a queued or running download names them, or while they hold bytes | - | removed without retiring the ID: the catalog lists a new ID each day and never an earlier one, so a retired ID would only grow `retired_keys` |
@@ -50,7 +51,7 @@
 use super::*;
 use rusqlite::Transaction;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Message batches whose payloads are kept for recall evidence and the voice
 /// fallback. Both readers look at no more than these.
@@ -590,12 +591,14 @@ fn retire_receipts(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeRetention {
     /// Kept: a singleton, per-thread or per-contact state, a pending marker,
-    /// a held or blocked job, recall evidence or a family not listed here.
+    /// recall evidence or a family not listed here.
     Keep,
     /// Removed once older than this many days.
     Remove(i64),
     /// Removed once its metadata request has finished; nothing reads it then.
     RemoveFinishedMetadata,
+    /// Removed once its login operation has finished; nothing reads it then.
+    RemoveFinishedLogin,
     /// Removed once older than this many days, retiring its key so the same
     /// read notification is never submitted twice.
     Retire(&'static str, i64),
@@ -657,8 +660,9 @@ fn remove_expired_previews(tx: &Transaction, now: i64, budget: &mut i64) -> Resu
     Ok(removed)
 }
 
-/// Remove metadata receipts whose request finished, and expired pagination
-/// views. Neither is read again.
+/// Remove metadata receipts and hydration checkpoints whose request finished,
+/// QR images whose login finished, and expired pagination views. None is read
+/// again.
 fn remove_finished(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
     let mut removed = take(
         budget,
@@ -670,11 +674,217 @@ fn remove_finished(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize
     removed += take(
         budget,
         tx.execute(
+            "DELETE FROM runtime WHERE rowid IN (SELECT r.rowid FROM runtime r WHERE r.key>='metadata-hydrated:' AND r.key<'metadata-hydrated;' AND NOT EXISTS(SELECT 1 FROM runtime p WHERE p.key='metadata-pending:'||substr(r.key,19)) LIMIT ?1)",
+            [(*budget).max(0)],
+        )?,
+    );
+    removed += take(
+        budget,
+        tx.execute(
+            &format!(
+                "DELETE FROM runtime WHERE rowid IN (SELECT r.rowid FROM runtime r WHERE r.key>='qr:' AND r.key<'qr;' AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.id=substr(r.key,4) AND o.kind='login' AND o.state NOT IN ({FINAL_OPERATION_STATES})) LIMIT ?1)"
+            ),
+            [(*budget).max(0)],
+        )?,
+    );
+    removed += take(
+        budget,
+        tx.execute(
             "DELETE FROM pagination_views WHERE id IN (SELECT id FROM pagination_views WHERE expires_at<=?1 LIMIT ?2)",
             params![now, (*budget).max(0)],
         )?,
     );
     Ok(removed)
+}
+
+/// Active work and permanent evidence that keep aged runtime keys in place.
+struct RuntimeOwners {
+    unfinished_batches: Vec<String>,
+    pending_metadata: BTreeSet<String>,
+    active_contact_mutations: BTreeSet<String>,
+    active_group_mutations: BTreeSet<String>,
+    active_logins: BTreeSet<String>,
+    recall_controls: Option<BTreeSet<Vec<u8>>>,
+}
+
+impl RuntimeOwners {
+    fn load(tx: &Connection) -> Result<Self> {
+        let unfinished_batches = ids(
+            tx,
+            "SELECT id FROM apply_intents WHERE state!='projected'",
+            [],
+        )?;
+        let pending_metadata = ids(
+            tx,
+            "SELECT substr(key,18) FROM runtime WHERE key>='metadata-pending:' AND key<'metadata-pending;'",
+            [],
+        )?
+        .into_iter()
+        .collect();
+        let active_contact_mutations = ids(
+            tx,
+            "SELECT c.operation_id FROM contact_mutations c JOIN operations o ON o.id=c.operation_id WHERE c.phase IN ('queued','submitting','received','projecting') OR (c.phase='needs_review' AND length(c.encrypted_request)>0) OR (o.state!='expired' AND coalesce(json_extract(o.result_json,'$.profileProjection'),'') IN ('pending','awaiting_contact_sync'))",
+            [],
+        )?
+        .into_iter()
+        .collect();
+        let active_group_mutations = ids(
+            tx,
+            "SELECT g.operation_id FROM group_mutations g JOIN operations o ON o.id=g.operation_id WHERE g.phase IN ('queued','submitting','received','projecting') OR (g.phase='needs_review' AND length(g.encrypted_request)>0) OR (o.state!='expired' AND coalesce(json_extract(o.result_json,'$.profileProjection'),'')='pending')",
+            [],
+        )?
+        .into_iter()
+        .collect();
+        let active_logins = ids(
+            tx,
+            &format!(
+                "SELECT id FROM operations WHERE kind='login' AND state NOT IN ({FINAL_OPERATION_STATES})"
+            ),
+            [],
+        )?
+        .into_iter()
+        .collect();
+        Ok(Self {
+            unfinished_batches,
+            pending_metadata,
+            active_contact_mutations,
+            active_group_mutations,
+            active_logins,
+            recall_controls: None,
+        })
+    }
+
+    fn keeps(&mut self, tx: &Connection, rowid: i64, key: &str) -> Result<bool> {
+        if self
+            .unfinished_batches
+            .iter()
+            .any(|id| key.contains(id.as_str()))
+        {
+            return Ok(true);
+        }
+        // Contact phase markers and metadata event receipts can belong to a
+        // metadata receipt rather than a `projected:` sync batch.
+        for prefix in [
+            "contact-notifications:",
+            "contact-pinning:",
+            "contact-privacy-observation:",
+            "event:contact-pin:",
+        ] {
+            if let Some(tail) = key.strip_prefix(prefix) {
+                if !tail.starts_with("projected:") {
+                    let owner = tail.split(':').next().unwrap_or(tail);
+                    if self.pending_metadata.contains(owner) {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+        }
+        for prefix in [
+            "contact-pinning-time:",
+            "event:group-detail:",
+            "event:group-members:",
+        ] {
+            if let Some(tail) = key.strip_prefix(prefix) {
+                if !tail.starts_with("projected:") && self.pending_metadata.contains(tail) {
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+        }
+        for prefix in ["friend-attention-stage:", "event:friend-attention:"] {
+            if let Some(tail) = key.strip_prefix(prefix) {
+                if !tail.starts_with("projected:") {
+                    let owner = tail.split(':').next().unwrap_or(tail);
+                    if self.pending_metadata.contains(owner)
+                        || self.active_contact_mutations.contains(owner)
+                    {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+        }
+        if let Some(tail) = key.strip_prefix("event:contact-mutation-event:") {
+            return Ok(self.active_contact_mutations.contains(tail));
+        }
+        // Direct contact mutes, thread pins and group edits emit these receipts
+        // from `group_mutations` with a `:{receipt_count}` suffix.
+        for prefix in [
+            "event:contact-mutation:",
+            "event:group-mutation:",
+            "event:thread-pin:",
+        ] {
+            if let Some(tail) = key.strip_prefix(prefix) {
+                let owner = tail.split(':').next().unwrap_or(tail);
+                return Ok(self.active_group_mutations.contains(owner));
+            }
+        }
+        // Group refresh markers hash the source receipt in their key. Current
+        // builds store the receipt string as the value so we can match its
+        // owning batch; legacy opaque values stay while any batch is unfinished.
+        if key
+            .strip_prefix("incoming-group-done:")
+            .or_else(|| key.strip_prefix("incoming-group-held:"))
+            .is_some_and(|tail| !tail.contains(':'))
+        {
+            if self.unfinished_batches.is_empty() {
+                return Ok(false);
+            }
+            let value: Vec<u8> =
+                tx.query_row("SELECT value FROM runtime WHERE rowid=?1", [rowid], |r| {
+                    r.get(0)
+                })?;
+            let batch = std::str::from_utf8(&value)
+                .ok()
+                .and_then(|source| source.strip_prefix("projected:"))
+                .and_then(|rest| rest.rsplit_once(':'))
+                .map(|(batch, _)| batch);
+            return Ok(match batch {
+                Some(batch) => self.unfinished_batches.iter().any(|id| id == batch),
+                None => true,
+            });
+        }
+        // Login idempotency keys stay while their login operation is active.
+        if key.starts_with("login-key:") {
+            if self.active_logins.is_empty() {
+                return Ok(false);
+            }
+            let value: Vec<u8> =
+                tx.query_row("SELECT value FROM runtime WHERE rowid=?1", [rowid], |r| {
+                    r.get(0)
+                })?;
+            return Ok(match serde_json::from_slice::<(String, String)>(&value) {
+                Ok((op_id, _)) => self.active_logins.contains(&op_id),
+                Err(_) => true,
+            });
+        }
+        // Raw control bytes stay forever when the command was skipped (owner
+        // decision 2026-11-19) or is referenced by recall evidence.
+        if let Some(receipt) = key.strip_prefix("sync-control:") {
+            let skipped: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime WHERE key=?1)",
+                [format!("skipped-control:{receipt}")],
+                |r| r.get(0),
+            )?;
+            if skipped {
+                return Ok(true);
+            }
+            let controls = match &self.recall_controls {
+                Some(controls) => controls,
+                None => {
+                    let mut query = tx.prepare(
+                        "SELECT value FROM runtime WHERE key>='recall-control:' AND key<'recall-control;'",
+                    )?;
+                    let rows = query.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+                    let loaded: BTreeSet<Vec<u8>> = rows.collect::<rusqlite::Result<_>>()?;
+                    self.recall_controls.insert(loaded)
+                }
+            };
+            return Ok(controls.contains(receipt.as_bytes()));
+        }
+        Ok(false)
+    }
 }
 
 /// Row ID of the newest day marker at least `days` + 1 old; rows below it
@@ -703,11 +913,7 @@ fn age_runtime(tx: &Transaction, now: i64, after: i64) -> Result<(usize, i64, bo
         return Ok((0, after, false));
     };
     let old_enough = |rowid: i64, days: i64| windows.get(&days).is_some_and(|m| rowid < *m);
-    let unfinished = ids(
-        tx,
-        "SELECT id FROM apply_intents WHERE state!='projected'",
-        [],
-    )?;
+    let mut owners = RuntimeOwners::load(tx)?;
     let rows = {
         let mut query = tx.prepare(
             "SELECT rowid,key FROM runtime WHERE rowid>?1 AND rowid<?2 ORDER BY rowid LIMIT ?3",
@@ -722,15 +928,18 @@ fn age_runtime(tx: &Transaction, now: i64, after: i64) -> Result<(usize, i64, bo
     let mut removed = 0;
     for (rowid, key) in rows {
         let remove = match aged_runtime(&key) {
-            RuntimeRetention::Keep | RuntimeRetention::RemoveFinishedMetadata => false,
-            _ if unfinished.iter().any(|id| key.contains(id.as_str())) => false,
-            RuntimeRetention::Remove(days) => old_enough(rowid, days),
+            RuntimeRetention::Keep
+            | RuntimeRetention::RemoveFinishedMetadata
+            | RuntimeRetention::RemoveFinishedLogin => false,
+            RuntimeRetention::Remove(days) => {
+                old_enough(rowid, days) && !owners.keeps(tx, rowid, &key)?
+            }
             RuntimeRetention::Retire(family, days) => {
-                let old = old_enough(rowid, days);
-                if old {
+                let remove = old_enough(rowid, days) && !owners.keeps(tx, rowid, &key)?;
+                if remove {
                     retire(tx, family, &key, now)?;
                 }
-                old
+                remove
             }
         };
         if remove {
@@ -1524,6 +1733,8 @@ mod tests {
             "metadata-pending:running",
             "read-version:thread",
             "sync-control:projected:done-batch:1",
+            "skipped-control:projected:done-batch:1",
+            "sync-control:projected:done-batch:2",
             "event:profile-recovery-pending",
             "projected:open-batch:0",
             &notification,
@@ -1541,9 +1752,13 @@ mod tests {
             .unwrap()
             .is_none());
         store.put_runtime("a", "event:message:m2", b"2").unwrap();
-        // Raw replies are kept a week, duplicate guards a month.
-        assert_eq!(settle(&store, now + 9 * DAY).runtime_removed, 1);
+        // Raw replies and applied controls are kept a week, duplicate guards a month.
+        assert_eq!(settle(&store, now + 9 * DAY).runtime_removed, 2);
         assert!(store.runtime("a", "metadata-wire:x").unwrap().is_none());
+        assert!(store
+            .runtime("a", "sync-control:projected:done-batch:2")
+            .unwrap()
+            .is_none());
         assert!(store.runtime("a", "event:message:m1").unwrap().is_some());
         let step = settle(&store, now + 32 * DAY);
         assert_eq!(step.runtime_removed, 4);
@@ -1560,6 +1775,7 @@ mod tests {
             "metadata-receipt:running",
             "read-version:thread",
             "sync-control:projected:done-batch:1",
+            "skipped-control:projected:done-batch:1",
             "event:profile-recovery-pending",
             "projected:open-batch:0",
             // Written after the first marker, so younger than the window.
@@ -2496,49 +2712,472 @@ mod tests {
     }
 
     #[test]
+    fn contact_phase_markers_and_friend_attention_wait_for_unfinished_owners() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        store
+            .stage_sync("a", "open-batch", b"sealed", b"cursor")
+            .unwrap();
+        store
+            .stage_metadata("a", "meta-open", b"sealed-meta")
+            .unwrap();
+        contact_mutation(&store, "cm-open", "cm-open-key", &"1".repeat(64));
+        contact_mutation(&store, "cm-await", "cm-await-key", &"2".repeat(64));
+        set_phase(
+            &store,
+            "cm-await",
+            "succeeded",
+            "succeeded",
+            "awaiting_contact_sync",
+        );
+        contact_mutation(&store, "cm-done", "cm-done-key", &"3".repeat(64));
+        set_phase(&store, "cm-done", "succeeded", "succeeded", "complete");
+
+        let finished = [
+            "contact-notifications:projected:done-batch:0:peer",
+            "contact-pinning:projected:done-batch:0:peer",
+            "contact-pinning-time:projected:done-batch:0",
+            "contact-privacy-observation:projected:done-batch:0:peer",
+            "contact-notifications:meta-done:peer",
+            "contact-pinning:meta-done:peer",
+            "contact-pinning-time:meta-done",
+            "contact-privacy-observation:meta-done:peer",
+            "friend-attention-stage:projected:done-batch:0:hash",
+            "friend-attention-stage:meta-done:hash",
+            "friend-attention-stage:cm-done:hash",
+        ];
+        let guarded = [
+            "contact-notifications:projected:open-batch:0:peer",
+            "contact-pinning:projected:open-batch:0:peer",
+            "contact-pinning-time:projected:open-batch:0",
+            "contact-privacy-observation:projected:open-batch:0:peer",
+            "contact-notifications:meta-open:peer",
+            "contact-pinning:meta-open:peer",
+            "contact-pinning-time:meta-open",
+            "contact-privacy-observation:meta-open:peer",
+            "friend-attention-stage:projected:open-batch:0:hash",
+            "friend-attention-stage:meta-open:hash",
+            "friend-attention-stage:cm-open:hash",
+            "friend-attention-stage:cm-await:hash",
+        ];
+        for key in finished.iter().chain(guarded.iter()) {
+            store.put_runtime("a", key, b"1").unwrap();
+        }
+        // Day 0 marks the day; day 9 is still inside the 30-day window.
+        settle(&store, now);
+        settle(&store, now + 9 * DAY);
+        for key in finished.iter().chain(guarded.iter()) {
+            assert!(
+                store.runtime("a", key).unwrap().is_some(),
+                "{key} too early"
+            );
+        }
+        // After 30 days, only finished owners' markers expire.
+        settle(&store, now + 32 * DAY);
+        for key in finished {
+            assert!(store.runtime("a", key).unwrap().is_none(), "{key} leaked");
+        }
+        for key in guarded {
+            assert!(
+                store.runtime("a", key).unwrap().is_some(),
+                "{key} dropped while owner unfinished"
+            );
+        }
+        // Once every owner finishes, the remaining markers age out too.
+        store.finish_sync("a", "open-batch").unwrap();
+        store.discard_metadata("a", "meta-open").unwrap();
+        set_phase(&store, "cm-open", "succeeded", "succeeded", "complete");
+        set_phase(&store, "cm-await", "succeeded", "succeeded", "complete");
+        settle(&store, now + 32 * DAY);
+        for key in guarded {
+            assert!(
+                store.runtime("a", key).unwrap().is_none(),
+                "{key} stayed after owner finished"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_and_metadata_event_receipts_follow_their_active_owners() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        store
+            .stage_metadata("a", "meta-open", b"sealed-meta")
+            .unwrap();
+        contact_mutation(&store, "cm-open", "cm-open-key", &"1".repeat(64));
+        contact_mutation(&store, "cm-expired", "cm-expired-key", &"2".repeat(64));
+        set_phase(
+            &store,
+            "cm-expired",
+            "needs_review",
+            "needs_review",
+            "pending",
+        );
+
+        let make_group = |id: &str, key: &str, hash: &str| {
+            store
+                .create_group_mutation(
+                    &operation(id, "group_mutation"),
+                    key,
+                    hash,
+                    b"sealed request",
+                    b"sealed receipts",
+                )
+                .unwrap();
+        };
+        let set_group_phase = |id: &str, phase: &str, state: &str, projection: &str| {
+            sql(&store, |db| {
+                db.execute(
+                    "UPDATE group_mutations SET phase=?2 WHERE operation_id=?1",
+                    params![id, phase],
+                )?;
+                db.execute(
+                    "UPDATE operations SET state=?2,result_json=json_object('profileProjection',?3) WHERE id=?1",
+                    params![id, state, projection],
+                )?;
+                Ok(())
+            });
+        };
+        make_group("gm-open", "gm-open-key", &"3".repeat(64));
+        set_group_phase("gm-open", "succeeded", "succeeded", "pending");
+        make_group("gm-expired", "gm-expired-key", &"4".repeat(64));
+        set_group_phase("gm-expired", "needs_review", "needs_review", "pending");
+        make_group("gm-done", "gm-done-key", &"5".repeat(64));
+        set_group_phase("gm-done", "succeeded", "succeeded", "complete");
+
+        let kept_while_active = [
+            "event:contact-pin:meta-open:peer",
+            "event:group-detail:meta-open",
+            "event:group-members:meta-open",
+            "event:friend-attention:meta-open:hash",
+            "event:friend-attention:cm-open:hash",
+            "event:contact-mutation-event:cm-open",
+            "event:contact-mutation:gm-open:1",
+            "event:group-mutation:gm-open:1",
+            "event:thread-pin:gm-open:1",
+        ];
+        let expires_at_30d = [
+            "event:contact-pin:meta-done:peer",
+            "event:group-detail:meta-done",
+            "event:group-members:meta-done",
+            "event:friend-attention:cm-expired:hash",
+            "event:contact-mutation-event:cm-expired",
+            "event:contact-mutation:gm-done:1",
+            "event:group-mutation:gm-done:1",
+            "event:thread-pin:gm-done:1",
+            "event:contact-mutation:gm-expired:1",
+            "event:group-mutation:gm-expired:1",
+            "event:thread-pin:gm-expired:1",
+        ];
+        for key in kept_while_active.iter().chain(expires_at_30d.iter()) {
+            store.put_runtime("a", key, b"1").unwrap();
+        }
+        settle(&store, now);
+        // After 8 days, needs_review mutations expire, dropping their sealed
+        // requests; after 30 days their event receipts must no longer stay pinned.
+        settle(&store, now + 8 * DAY);
+        assert_eq!(store.operation("a", "cm-expired").unwrap().state, "expired");
+        assert_eq!(store.operation("a", "gm-expired").unwrap().state, "expired");
+
+        settle(&store, now + 32 * DAY);
+        for key in expires_at_30d {
+            assert!(store.runtime("a", key).unwrap().is_none(), "{key} leaked");
+        }
+        for key in kept_while_active {
+            assert!(
+                store.runtime("a", key).unwrap().is_some(),
+                "{key} dropped while owner active"
+            );
+        }
+
+        store.discard_metadata("a", "meta-open").unwrap();
+        set_phase(&store, "cm-open", "succeeded", "succeeded", "complete");
+        set_group_phase("gm-open", "succeeded", "succeeded", "complete");
+        settle(&store, now + 32 * DAY);
+        for key in kept_while_active {
+            assert!(
+                store.runtime("a", key).unwrap().is_none(),
+                "{key} stayed after owner finished"
+            );
+        }
+    }
+
+    #[test]
+    fn group_refresh_markers_respect_unfinished_batches_including_legacy_values() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        store
+            .stage_sync("a", "open-batch", b"sealed", b"cursor")
+            .unwrap();
+        let hex = |ch: char| std::iter::repeat_n(ch, 64).collect::<String>();
+        let done_finished = format!("incoming-group-done:{}", hex('1'));
+        let done_open = format!("incoming-group-done:{}", hex('2'));
+        let done_legacy = format!("incoming-group-done:{}", hex('3'));
+        let held_finished = format!("incoming-group-held:{}", hex('4'));
+        let held_open = format!("incoming-group-held:{}", hex('5'));
+        let held_legacy = format!("incoming-group-held:{}", hex('6'));
+        let receipt_held = format!("incoming-group-receipt:{}", hex('4'));
+
+        store
+            .put_runtime("a", &done_finished, b"projected:done-batch:0")
+            .unwrap();
+        store
+            .put_runtime("a", &done_open, b"projected:open-batch:0")
+            .unwrap();
+        store.put_runtime("a", &done_legacy, b"1").unwrap();
+        store
+            .put_runtime("a", &held_finished, b"projected:contact:done-batch:2")
+            .unwrap();
+        store
+            .put_runtime("a", &held_open, b"projected:open-batch:1")
+            .unwrap();
+        store
+            .put_runtime("a", &held_legacy, &[0xff, 0x00, 0x01])
+            .unwrap();
+        store
+            .put_runtime("a", &receipt_held, b"sealed diagnostic bodies")
+            .unwrap();
+
+        settle(&store, now);
+        // Diagnostic bodies expire after 7 days; markers stay 30 days.
+        settle(&store, now + 9 * DAY);
+        assert!(store.runtime("a", &receipt_held).unwrap().is_none());
+        for key in [
+            &done_finished,
+            &done_open,
+            &done_legacy,
+            &held_finished,
+            &held_open,
+            &held_legacy,
+        ] {
+            assert!(
+                store.runtime("a", key).unwrap().is_some(),
+                "{key} too early"
+            );
+        }
+        // After 30 days, markers naming finished batches go even while open-batch is unfinished.
+        settle(&store, now + 32 * DAY);
+        assert!(store.runtime("a", &done_finished).unwrap().is_none());
+        assert!(store.runtime("a", &held_finished).unwrap().is_none());
+        for key in [&done_open, &done_legacy, &held_open, &held_legacy] {
+            assert!(
+                store.runtime("a", key).unwrap().is_some(),
+                "{key} dropped while batch unfinished"
+            );
+        }
+        // Once the unfinished batch finishes, both its markers and legacy opaque markers go.
+        store.finish_sync("a", "open-batch").unwrap();
+        settle(&store, now + 32 * DAY);
+        for key in [&done_open, &done_legacy, &held_open, &held_legacy] {
+            assert!(
+                store.runtime("a", key).unwrap().is_none(),
+                "{key} stayed after batch finished"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_in_and_wal_skip_notes_expire_cleanly() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        let mut active_login = operation("login-active", "login");
+        active_login.state = "starting".into();
+        let mut done_login = operation("login-done", "login");
+        done_login.state = "succeeded".into();
+        store
+            .save_login_operation(&active_login, "active-key", "hash-active")
+            .unwrap();
+        store
+            .save_login_operation(&done_login, "done-key", "hash-done")
+            .unwrap();
+        let active_key = format!("login-key:{:x}", Sha256::digest(b"active-key"));
+        let done_key = format!("login-key:{:x}", Sha256::digest(b"done-key"));
+        let superseded_journal = format!("saved-login-superseded:{:x}", Sha256::digest(b"old"));
+        let wal_skip_hashed = format!(
+            "event:profile-wal-conversion-skipped:{:x}",
+            Sha256::digest(b"account_busy")
+        );
+        let wal_skip_legacy = "event:profile-wal-conversion-skipped:database is locked";
+
+        store.put_runtime("a", "qr:login-active", b"png").unwrap();
+        store.put_runtime("a", "qr:login-done", b"png").unwrap();
+        store.put_runtime("a", "qr:orphan", b"png").unwrap();
+        store.stage_metadata("a", "meta-open", b"sealed").unwrap();
+        store
+            .put_runtime("a", "metadata-hydrated:meta-open", b"progress")
+            .unwrap();
+        store
+            .put_runtime("a", "metadata-hydrated:meta-orphan", b"progress")
+            .unwrap();
+        store
+            .put_runtime("a", &superseded_journal, b"sealed-old")
+            .unwrap();
+        store.put_runtime("a", &wal_skip_hashed, b"1").unwrap();
+        store.put_runtime("a", wal_skip_legacy, b"1").unwrap();
+
+        // Day 0 removes finished/orphan QR images and orphaned hydration checkpoints at once.
+        settle(&store, now);
+        assert!(store.runtime("a", "qr:login-active").unwrap().is_some());
+        assert!(store.runtime("a", "qr:login-done").unwrap().is_none());
+        assert!(store.runtime("a", "qr:orphan").unwrap().is_none());
+        assert!(store
+            .runtime("a", "metadata-hydrated:meta-open")
+            .unwrap()
+            .is_some());
+        assert!(store
+            .runtime("a", "metadata-hydrated:meta-orphan")
+            .unwrap()
+            .is_none());
+
+        // After 7 days: finished login key and superseded journal go; active login key stays.
+        settle(&store, now + 9 * DAY);
+        assert!(store.runtime("a", &done_key).unwrap().is_none());
+        assert!(store.runtime("a", &superseded_journal).unwrap().is_none());
+        assert!(store.runtime("a", &active_key).unwrap().is_some());
+        assert!(store.runtime("a", &wal_skip_hashed).unwrap().is_some());
+        assert!(store.runtime("a", wal_skip_legacy).unwrap().is_some());
+        // Reusing an expired login key is allowed (not retired).
+        assert!(store
+            .login_operation_by_key("a", "done-key", "hash-done")
+            .unwrap()
+            .is_none());
+
+        // Once the active login finishes, both its QR and aged login key are removed.
+        active_login.state = "succeeded".into();
+        store.save_operation(&active_login).unwrap();
+        settle(&store, now + 9 * DAY);
+        assert!(store.runtime("a", "qr:login-active").unwrap().is_none());
+        assert!(store.runtime("a", &active_key).unwrap().is_none());
+
+        // After 30 days: both hashed and legacy unhashed WAL-skip receipts expire.
+        settle(&store, now + 32 * DAY);
+        assert!(store.runtime("a", &wal_skip_hashed).unwrap().is_none());
+        assert!(store.runtime("a", wal_skip_legacy).unwrap().is_none());
+    }
+
+    #[test]
+    fn applied_sync_controls_expire_after_seven_days_while_skipped_and_recall_controls_stay() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        store
+            .stage_sync("a", "open-batch", b"sealed", b"cursor")
+            .unwrap();
+        let recall_key = format!("recall-control:{:x}", Sha256::digest(br#"["peer","42"]"#));
+        for (key, value) in [
+            ("sync-control:projected:done:0", b"applied".as_slice()),
+            ("sync-control:projected:done:1", b"skipped".as_slice()),
+            ("skipped-control:projected:done:1", b"{}".as_slice()),
+            ("sync-control:projected:done:2", b"recalled".as_slice()),
+            (recall_key.as_str(), b"projected:done:2".as_slice()),
+            ("sync-control:projected:open-batch:0", b"open".as_slice()),
+        ] {
+            store.put_runtime("a", key, value).unwrap();
+        }
+        settle(&store, now);
+        settle(&store, now + 9 * DAY);
+        assert!(store
+            .runtime("a", "sync-control:projected:done:0")
+            .unwrap()
+            .is_none());
+        for kept in [
+            "sync-control:projected:done:1",
+            "skipped-control:projected:done:1",
+            "sync-control:projected:done:2",
+            recall_key.as_str(),
+            "sync-control:projected:open-batch:0",
+        ] {
+            assert!(
+                store.runtime("a", kept).unwrap().is_some(),
+                "{kept} should stay"
+            );
+        }
+        // Even past 30 days, skipped and recall-referenced controls stay.
+        settle(&store, now + 35 * DAY);
+        assert!(store
+            .runtime("a", "sync-control:projected:done:1")
+            .unwrap()
+            .is_some());
+        assert!(store
+            .runtime("a", "sync-control:projected:done:2")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
     fn runtime_families_are_classified_conservatively() {
         use RuntimeRetention::*;
+        let hex = "0123456789abcdef".repeat(4);
         for (key, expected) in [
-            ("projected:b:1", Remove(RECEIPT_DAYS)),
-            ("contact-fields:projected:b:1", Remove(RECEIPT_DAYS)),
-            ("contact-fields:legacy-mute", Keep),
-            ("contact-pinning:r:u", Keep),
-            ("event:message:id", Remove(RECEIPT_DAYS)),
-            ("event:message-expanded:id", Remove(RECEIPT_DAYS)),
-            ("event:blocked-v2:b", Remove(RECEIPT_DAYS)),
-            ("event:control-skipped:projected:b:1", Remove(RECEIPT_DAYS)),
-            // Kept as long as the raw bytes under `sync-control:`.
-            ("skipped-control:projected:b:1", Keep),
-            ("event:profile-recovery-pending", Keep),
-            ("event:profile-wal-conversion:x", Keep),
-            ("sync-control:projected:b:1", Keep),
-            ("recall-control:x", Keep),
-            ("read-version:t", Keep),
-            ("received-cursor", Keep),
-            ("metadata-receipt:u", RemoveFinishedMetadata),
-            ("metadata-wire:u", Remove(RAW_DAYS)),
-            ("incoming-group-held:x", Keep),
-            ("incoming-group-pending:x", Keep),
+            ("projected:b:1".into(), Remove(RECEIPT_DAYS)),
+            ("contact-fields:projected:b:1".into(), Remove(RECEIPT_DAYS)),
+            ("contact-fields:legacy-mute".into(), Keep),
+            ("contact-notifications:r:u".into(), Remove(RECEIPT_DAYS)),
+            ("contact-pinning:r:u".into(), Remove(RECEIPT_DAYS)),
+            ("contact-pinning-time:r".into(), Remove(RECEIPT_DAYS)),
             (
-                "incoming-group-superseded:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:1",
+                "contact-privacy-observation:r:u".into(),
+                Remove(RECEIPT_DAYS),
+            ),
+            (
+                "friend-attention-stage:projected:b:1:h".into(),
+                Remove(RECEIPT_DAYS),
+            ),
+            ("friend-attention-stage:op:h".into(), Remove(RECEIPT_DAYS)),
+            ("event:message:id".into(), Remove(RECEIPT_DAYS)),
+            ("event:message-expanded:id".into(), Remove(RECEIPT_DAYS)),
+            ("event:blocked-v2:b".into(), Remove(RECEIPT_DAYS)),
+            (
+                "event:control-skipped:projected:b:1".into(),
+                Remove(RECEIPT_DAYS),
+            ),
+            // Kept as long as the raw bytes under `sync-control:`.
+            ("skipped-control:projected:b:1".into(), Keep),
+            ("event:profile-recovery-pending".into(), Keep),
+            ("event:profile-wal-conversion:x".into(), Keep),
+            (
+                format!("event:profile-wal-conversion-skipped:{hex}"),
+                Remove(RECEIPT_DAYS),
+            ),
+            (
+                "event:profile-wal-conversion-skipped:legacy raw error".into(),
+                Remove(RECEIPT_DAYS),
+            ),
+            ("sync-control:projected:b:1".into(), Remove(RAW_DAYS)),
+            ("recall-control:x".into(), Keep),
+            ("read-version:t".into(), Keep),
+            ("received-cursor".into(), Keep),
+            ("metadata-receipt:u".into(), RemoveFinishedMetadata),
+            ("metadata-wire:u".into(), Remove(RAW_DAYS)),
+            (format!("login-key:{hex}"), Remove(RAW_DAYS)),
+            ("qr:login-op".into(), RemoveFinishedLogin),
+            (format!("saved-login-superseded:{hex}"), Remove(RAW_DAYS)),
+            (format!("incoming-group-done:{hex}"), Remove(RECEIPT_DAYS)),
+            (format!("incoming-group-held:{hex}"), Remove(RECEIPT_DAYS)),
+            ("incoming-group-held:x".into(), Remove(RECEIPT_DAYS)),
+            ("incoming-group-pending:x".into(), Keep),
+            (
+                format!("incoming-group-superseded:{hex}:1"),
                 Remove(RAW_DAYS),
             ),
             // A key whose tail doesn't fit its kind follows its prefix.
-            ("incoming-group-superseded:x:1", Remove(RAW_DAYS)),
+            ("incoming-group-superseded:x:1".into(), Remove(RAW_DAYS)),
             (
-                "incoming-group-pending:x:superseded:1:superseded:2",
+                "incoming-group-pending:x:superseded:1:superseded:2".into(),
                 Remove(RAW_DAYS),
             ),
-            ("incoming-group-held:x:superseded:255", Remove(RAW_DAYS)),
-            // Not a job: the refresh queue skips any suffixed key.
-            ("incoming-group-pending:x:other", Remove(RAW_DAYS)),
             (
-                "thread-read-notification:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "incoming-group-held:x:superseded:255".into(),
+                Remove(RAW_DAYS),
+            ),
+            // Not a job: the refresh queue skips any suffixed key.
+            ("incoming-group-pending:x:other".into(), Remove(RAW_DAYS)),
+            (
+                format!("thread-read-notification:{hex}"),
                 Retire(READ_NOTIFICATION, RECEIPT_DAYS),
             ),
-            ("retention-day:2026-01-01", Keep),
+            ("retention-day:2026-01-01".into(), Keep),
         ] {
-            assert_eq!(aged_runtime(key), expected, "{key}");
+            assert_eq!(aged_runtime(&key), expected, "{key}");
         }
     }
 }
