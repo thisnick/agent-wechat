@@ -449,36 +449,39 @@ impl Actor {
                     }
                     return Err(error);
                 }
-                if self.media.is_some() && self.worker.media_stop.load(Ordering::Acquire) {
-                    return self.exit();
+                if self.media.is_some() {
+                    if self.worker.media_stop.load(Ordering::Acquire) {
+                        return self.exit();
+                    }
+                    self.worker
+                        .joined_commands_ready
+                        .store(true, Ordering::Release);
+                    let transport = &self.transport;
+                    let state = &mut self.state;
+                    let authority = self.authority;
+                    let tasks = &mut self.tasks;
+                    let session = self.session.as_mut().expect("incoming session");
+                    let worker = &self.worker;
+                    let is_video = self.worker.call_type == CallType::Video;
+                    let last_av_ts = &mut self.last_av_ts;
+                    drain_direct_switch_av(worker, &mut |cam| {
+                        let mic = !worker.muted.load(Ordering::Acquire);
+                        let cam = is_video && cam;
+                        let now = u64::try_from(
+                            SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+                        )?;
+                        *last_av_ts = last_av_ts.saturating_add(1).max(now);
+                        session.switch_av(
+                            transport,
+                            state,
+                            authority,
+                            mic,
+                            cam,
+                            *last_av_ts,
+                            tasks.next()?,
+                        )
+                    })?;
                 }
-                self.worker
-                    .joined_commands_ready
-                    .store(true, Ordering::Release);
-                let transport = &self.transport;
-                let state = &mut self.state;
-                let authority = self.authority;
-                let tasks = &mut self.tasks;
-                let session = self.session.as_mut().expect("incoming session");
-                let worker = &self.worker;
-                let is_video = self.worker.call_type == CallType::Video;
-                let last_av_ts = &mut self.last_av_ts;
-                drain_direct_switch_av(worker, &mut |cam| {
-                    let mic = !worker.muted.load(Ordering::Acquire);
-                    let cam = is_video && cam;
-                    let now =
-                        u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
-                    *last_av_ts = last_av_ts.saturating_add(1).max(now);
-                    session.switch_av(
-                        transport,
-                        state,
-                        authority,
-                        mic,
-                        cam,
-                        *last_av_ts,
-                        tasks.next()?,
-                    )
-                })?;
             } else {
                 // No controller owns an unanswered offer. Neither local expiry
                 // nor disappearing listeners grants a user Reject operation.
@@ -1118,6 +1121,15 @@ impl Actor {
                 self.inner.config.direct_camera_off_grace,
                 self.inner.config.direct_camera_off_recovery_grace,
             );
+        }
+        if self.worker.muted.load(Ordering::Acquire) {
+            if let Ok(mut queue) = self.worker.direct_commands.lock() {
+                let (reply, _) = oneshot::channel();
+                queue.push_back(DirectCommand {
+                    sets_camera: false,
+                    reply,
+                });
+            }
         }
         let config = self.inner.config.clone();
         let worker = self.worker.clone();

@@ -17,15 +17,15 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
     fs::{self, File},
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::{broadcast, mpsc, oneshot, watch},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::{broadcast, mpsc, oneshot, watch, Semaphore},
     time::timeout,
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -109,9 +109,6 @@ pub(crate) struct SessionRunOptions {
     /// Stop automatically after this many idle seconds with no active call or commands (0 disables).
     #[arg(long, default_value_t = 600)]
     pub(crate) idle_timeout: u64,
-    /// Stop gracefully when the parent process that started this session exits.
-    #[arg(long)]
-    pub(crate) exit_with_parent: bool,
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -131,6 +128,9 @@ pub(crate) enum SessionCommand {
         /// Disable the local IPC socket (for isolated --stdio runs).
         #[arg(long)]
         no_ipc: bool,
+        /// Stop gracefully when the parent process that started this foreground session exits.
+        #[arg(long)]
+        exit_with_parent: bool,
     },
     /// List local call sessions and report whether each is running.
     List {
@@ -417,10 +417,10 @@ pub(crate) struct SessionWaitArgs {
     #[arg(long)]
     pub(crate) call_id: Option<String>,
     /// Match call.state events reaching one of these states (repeatable).
-    #[arg(long = "state", value_parser = ["dialing", "ringing", "connecting", "connected", "ending", "ended", "uncertain"])]
+    #[arg(long = "state", value_parser = ["offered", "dialing", "ringing", "connecting", "connected", "ending", "ended", "uncertain"])]
     pub(crate) states: Vec<String>,
     /// Match call.peer_status events reaching one of these kinds (repeatable).
-    #[arg(long = "peer-status", value_parser = ["joined", "ringing", "acknowledged", "left", "rejected", "busy", "no_response", "exited", "unknown"])]
+    #[arg(long = "peer-status", value_parser = ["undefined", "joined", "invited", "acknowledged", "left", "cancelled", "busy", "rejected", "no_response", "unknown"])]
     pub(crate) peer_statuses: Vec<String>,
     /// Match call.control events with this control kind (microphone or camera).
     #[arg(long, value_parser = ["microphone", "camera"])]
@@ -431,11 +431,11 @@ pub(crate) struct SessionWaitArgs {
     /// Match participant.updated, call.control, or call.peer_status for this participant or contact ID.
     #[arg(long)]
     pub(crate) participant: Option<String>,
-    /// Match participant.updated events with this membership (invited, joined, left).
-    #[arg(long, value_parser = ["invited", "joined", "left"])]
+    /// Match participant.updated events with this membership (invited, joined, left, unknown).
+    #[arg(long, value_parser = ["invited", "joined", "left", "unknown"])]
     pub(crate) membership: Option<String>,
     /// Match participant.updated events with this status kind.
-    #[arg(long, value_parser = ["joined", "ringing", "acknowledged", "left", "rejected", "busy", "no_response", "exited", "unknown"])]
+    #[arg(long, value_parser = ["undefined", "joined", "invited", "acknowledged", "left", "cancelled", "busy", "rejected", "no_response", "unknown"])]
     pub(crate) participant_status: Option<String>,
     /// Match participant.updated events where microphoneEnabled equals this value.
     #[arg(long)]
@@ -450,7 +450,7 @@ pub(crate) struct SessionWaitArgs {
     #[arg(long)]
     pub(crate) audio_frames: Option<u64>,
     /// Wait until received audio RMS level reaches at least this dBFS value (e.g. -35).
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     pub(crate) min_rms_db: Option<f64>,
     /// Wait until received audio dominant tone frequency is within --hz-tolerance of this Hz value.
     #[arg(long)]
@@ -713,8 +713,9 @@ pub(crate) async fn run_with_daemon(
             options,
             stdio,
             no_ipc,
+            exit_with_parent,
         } => {
-            let parent = if options.exit_with_parent {
+            let parent = if exit_with_parent {
                 parent.or_else(|| ParentWatch::new().ok())
             } else {
                 None
@@ -816,8 +817,8 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                     "video": video,
                     "muted": muted,
                     "cameraOff": camera_off,
-                    "audio": audio,
-                    "videoSource": video_source,
+                    "audio": audio.map(resolve_audio_spec_path),
+                    "videoSource": video_source.map(resolve_video_spec_path),
                 }),
                 Duration::from_secs(40),
             )
@@ -839,8 +840,8 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                     "callId": call_id,
                     "muted": muted,
                     "cameraOff": camera_off,
-                    "audio": audio,
-                    "videoSource": video_source,
+                    "audio": audio.map(resolve_audio_spec_path),
+                    "videoSource": video_source.map(resolve_video_spec_path),
                 }),
                 Duration::from_secs(40),
             )
@@ -881,8 +882,8 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                         "video": video,
                         "muted": muted,
                         "cameraOff": camera_off,
-                        "audio": audio,
-                        "videoSource": video_source,
+                        "audio": audio.map(resolve_audio_spec_path),
+                        "videoSource": video_source.map(resolve_video_spec_path),
                     }),
                     Duration::from_secs(40),
                 )
@@ -908,8 +909,8 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                         "video": video,
                         "muted": muted,
                         "cameraOff": camera_off,
-                        "audio": audio,
-                        "videoSource": video_source,
+                        "audio": audio.map(resolve_audio_spec_path),
+                        "videoSource": video_source.map(resolve_video_spec_path),
                     }),
                     Duration::from_secs(40),
                 )
@@ -965,7 +966,7 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
         SessionCommand::Audio { target, source } => {
             let resp = ipc_call(
                 &target,
-                json!({ "op": "audio", "source": source }),
+                json!({ "op": "audio", "source": resolve_audio_spec_path(source) }),
                 Duration::from_secs(20),
             )
             .await?;
@@ -974,7 +975,7 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
         SessionCommand::Video { target, source } => {
             let resp = ipc_call(
                 &target,
-                json!({ "op": "video", "source": source }),
+                json!({ "op": "video", "source": resolve_video_spec_path(source) }),
                 Duration::from_secs(20),
             )
             .await?;
@@ -995,7 +996,7 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                 json!({
                     "op": "snapshot",
                     "track": track,
-                    "out": out.map(|p| p.display().to_string()),
+                    "out": out.map(|p| resolve_client_path(p).display().to_string()),
                 }),
                 Duration::from_secs(15),
             )
@@ -1008,7 +1009,7 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                     &target,
                     json!({
                         "op": "record.start",
-                        "dir": out.map(|p| p.display().to_string()),
+                        "dir": out.map(|p| resolve_client_path(p).display().to_string()),
                     }),
                     Duration::from_secs(15),
                 )
@@ -1092,17 +1093,130 @@ fn resolve_session_dir(name: &str, explicit_dir: Option<&Path>) -> Result<PathBu
     Ok(default_sessions_root().join(name))
 }
 
-fn ensure_private_session_dir(dir: &Path) -> Result<()> {
+fn resolve_client_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        path
+    }
+}
+
+fn resolve_audio_spec_path(raw: String) -> String {
+    let Some(rest) = raw.strip_prefix("file:") else {
+        return raw;
+    };
+    let (path_part, suffix) = if let Some(prefix) = rest.strip_suffix(":loop") {
+        (prefix, ":loop")
+    } else if let Some(prefix) = rest.strip_suffix(":once") {
+        (prefix, ":once")
+    } else {
+        (rest, "")
+    };
+    if path_part.is_empty() {
+        return raw;
+    }
+    let resolved = resolve_client_path(PathBuf::from(path_part));
+    format!("file:{}{suffix}", resolved.display())
+}
+
+fn resolve_video_spec_path(raw: String) -> String {
+    let Some(rest) = raw.strip_prefix("file:") else {
+        return raw;
+    };
+    if rest.is_empty() {
+        return raw;
+    }
+    let resolved = resolve_client_path(PathBuf::from(rest));
+    format!("file:{}", resolved.display())
+}
+
+fn ensure_private_dir_exact(dir: &Path) -> Result<()> {
     if dir.exists() {
         ensure!(
             dir.is_dir() && wechat_platform::owned_path(dir)?,
-            "session directory must be an owned directory and not a link"
+            "session directory must be an owned directory and not a link: {}",
+            dir.display()
         );
         wechat_platform::protect_path(dir, true)?;
     } else {
         wechat_platform::private_dir(dir)?;
     }
     Ok(())
+}
+
+fn ensure_private_session_dir(dir: &Path) -> Result<()> {
+    // When creating under our default temp_dir fallback, validate ownership and
+    // private permissions on each managed ancestor directory, not just the leaf.
+    let default_root = default_sessions_root();
+    if dir.starts_with(&default_root) {
+        if let Some(root_parent) = default_root.parent() {
+            ensure_private_dir_exact(root_parent)?;
+        }
+        ensure_private_dir_exact(&default_root)?;
+    }
+    ensure_private_dir_exact(dir)
+}
+
+#[cfg(unix)]
+fn allocate_ipc_socket_path(session_dir: &Path) -> Result<PathBuf> {
+    let direct = session_dir.join("s.sock");
+    // macOS sockaddr_un.sun_path is 104 bytes (103 chars + NUL); keep margin for safety.
+    if direct.as_os_str().len() <= 96 {
+        return Ok(direct);
+    }
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(session_dir.as_os_str().as_encoded_bytes());
+    let hex: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let base = std::env::temp_dir().join(format!("wx-{}", wechat_platform::user_key()));
+    ensure_private_dir_exact(&base)?;
+    Ok(base.join(format!("{hex}.sock")))
+}
+
+struct TempFileGuard(Option<PathBuf>);
+
+impl TempFileGuard {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self(path)
+    }
+
+    fn path(&self) -> Option<&PathBuf> {
+        self.0.as_ref()
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn read_private_tail(path: &Path, max_lines: usize) -> String {
+    let Ok(file) = wechat_platform::OpenOptions::new()
+        .read(true)
+        .custom_flags(wechat_platform::NOFOLLOW)
+        .open(path)
+    else {
+        return String::new();
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file())
+        || !wechat_platform::private_file(&file).unwrap_or(false)
+    {
+        return String::new();
+    }
+    let mut text = String::new();
+    let _ = std::io::Read::take(file, 64 * 1024).read_to_string(&mut text);
+    text.lines()
+        .rev()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1136,22 +1250,45 @@ fn session_process_alive(meta: &SessionMetadata) -> bool {
         (Some((created, exe)), Some(want_ticks), Some(want_exe)) => {
             &created == want_ticks && &exe == want_exe
         }
-        (Some(_), None, _) => true,
         _ => false,
     }
 }
 
 async fn start_detached(
     spawn: &SessionSpawnContext,
-    options: SessionRunOptions,
+    mut options: SessionRunOptions,
     json: bool,
 ) -> Result<()> {
+    options.audio = resolve_audio_spec_path(options.audio);
+    options.video = resolve_video_spec_path(options.video);
+    options.record_dir = options.record_dir.map(resolve_client_path);
+    options.dir = options.dir.map(resolve_client_path);
+
     // Validate specs eagerly before spawning so invalid args fail fast and clearly.
     AudioSourceSpec::parse(&options.audio)?;
     AudioSinkSpec::parse(&options.output)?;
     CameraSource::parse(&options.video)?;
     let session_dir = resolve_session_dir(&options.name, options.dir.as_deref())?;
     ensure_private_session_dir(&session_dir)?;
+
+    // Serialize concurrent `session start` invocations for the same directory.
+    let start_lock = wechat_platform::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(wechat_platform::NOFOLLOW)
+        .open(session_dir.join("start.lock"))?;
+    ensure!(
+        start_lock.metadata()?.is_file() && wechat_platform::private_file(&start_lock)?,
+        "session start lock must be a private owned regular file"
+    );
+    start_lock.try_lock_exclusive().with_context(|| {
+        format!(
+            "another `wx calls session start` is already starting {:?}",
+            options.name
+        )
+    })?;
 
     // Refuse starting a duplicate if an active session already owns this directory.
     if let Ok(Some(existing)) = read_metadata(&session_dir) {
@@ -1184,21 +1321,23 @@ async fn start_detached(
         "session log must be a private owned regular file"
     );
 
-    let ephemeral_token_path = if let Some(secret) = spawn.ephemeral_token.as_deref() {
-        let path = session_dir.join("auth.token");
-        write_private_file(&path, format!("{secret}\n").as_bytes())?;
-        Some(path)
-    } else {
-        None
-    };
+    let ephemeral_token_guard =
+        TempFileGuard::new(if let Some(secret) = spawn.ephemeral_token.as_deref() {
+            let path = session_dir.join("auth.token");
+            write_private_file(&path, format!("{secret}\n").as_bytes())?;
+            Some(path)
+        } else {
+            None
+        });
 
-    let token_file = ephemeral_token_path
-        .as_ref()
+    let token_file = ephemeral_token_guard
+        .path()
         .or(spawn.token_file.as_ref())
         .context("API token file is unavailable for detached call session")?;
 
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let mut cmd = ProcessCommand::new(&executable);
+    cmd.env_remove("AGENT_WECHAT_TOKEN");
     cmd.arg("--server")
         .arg(&spawn.endpoint)
         .arg("--token-file")
@@ -1206,7 +1345,8 @@ async fn start_detached(
         .arg("--account")
         .arg(&spawn.account);
     if let Some(ca) = &spawn.ca_cert_file {
-        cmd.arg("--ca-cert-file").arg(ca);
+        cmd.arg("--ca-cert-file")
+            .arg(resolve_client_path(ca.clone()));
     }
     cmd.args(["calls", "session", "run"])
         .arg("--name")
@@ -1233,9 +1373,6 @@ async fn start_detached(
     if let Some(rec) = &options.record_dir {
         cmd.arg("--record-dir").arg(rec);
     }
-    if options.exit_with_parent {
-        cmd.arg("--exit-with-parent");
-    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log_file.try_clone()?))
         .stderr(Stdio::from(log_file));
@@ -1243,19 +1380,11 @@ async fn start_detached(
 
     let mut child = cmd.spawn().context("cannot launch call session process")?;
     let deadline = Instant::now() + Duration::from_secs(15);
+    let wait_for_ready = options.ready;
     let startup = async {
         loop {
             if let Some(status) = child.try_wait()? {
-                let tail = fs::read_to_string(&log_path)
-                    .unwrap_or_default()
-                    .lines()
-                    .rev()
-                    .take(8)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let tail = read_private_tail(&log_path, 8);
                 bail!(
                     "call session exited before becoming ready ({status}){}",
                     if tail.is_empty() {
@@ -1277,7 +1406,18 @@ async fn start_detached(
                     )
                     .await
                     {
-                        return Ok(status);
+                        if let Some(err) = status
+                            .pointer("/session/readyError")
+                            .and_then(Value::as_str)
+                        {
+                            bail!("call session readiness rejected: {err}");
+                        }
+                        if !wait_for_ready
+                            || status.pointer("/session/ready").and_then(Value::as_bool)
+                                == Some(true)
+                        {
+                            return Ok(status);
+                        }
                     }
                 }
             }
@@ -1286,9 +1426,8 @@ async fn start_detached(
     }
     .await;
 
-    if let Some(path) = ephemeral_token_path {
-        let _ = fs::remove_file(path);
-    }
+    drop(ephemeral_token_guard);
+    drop(start_lock);
 
     match startup {
         Ok(status) => Output::new(json).print(&status),
@@ -1370,7 +1509,11 @@ async fn stop_session(session_dir: &Path, hangup: bool, wait_timeout: Duration) 
     };
     if !session_process_alive(&meta) {
         let _ = fs::remove_file(session_dir.join("session.json"));
+        if let Some(sock) = &meta.ipc_socket {
+            let _ = fs::remove_file(sock);
+        }
         let _ = fs::remove_file(session_dir.join("control.sock"));
+        let _ = fs::remove_file(session_dir.join("s.sock"));
         return Ok(json!({
             "name": meta.name,
             "state": "stopped",
@@ -1563,14 +1706,14 @@ struct EventBusState {
 struct SharedEventBus {
     inner: Mutex<EventBusState>,
     tx: broadcast::Sender<Value>,
-    media_watch: watch::Sender<Option<MediaInspectionReport>>,
-    stdio_out: Option<Arc<tokio::sync::Mutex<tokio::io::Stdout>>>,
+    media_watch: watch::Sender<Option<(String, MediaInspectionReport)>>,
+    stdio_tx: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl SharedEventBus {
     fn new(
         log_path: Option<&Path>,
-        stdio_out: Option<Arc<tokio::sync::Mutex<tokio::io::Stdout>>>,
+        stdio_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<Arc<Self>> {
         let log_file = match log_path {
             Some(path) => {
@@ -1594,7 +1737,7 @@ impl SharedEventBus {
             }),
             tx,
             media_watch,
-            stdio_out,
+            stdio_tx,
         }))
     }
 
@@ -1606,11 +1749,11 @@ impl SharedEventBus {
         self.tx.subscribe()
     }
 
-    fn subscribe_media(&self) -> watch::Receiver<Option<MediaInspectionReport>> {
+    fn subscribe_media(&self) -> watch::Receiver<Option<(String, MediaInspectionReport)>> {
         self.media_watch.subscribe()
     }
 
-    fn publish_media(&self, report: Option<MediaInspectionReport>) {
+    fn publish_media(&self, report: Option<(String, MediaInspectionReport)>) {
         let _ = self.media_watch.send(report);
     }
 
@@ -1650,13 +1793,8 @@ impl SharedEventBus {
             (seq, line)
         };
         let _ = self.tx.send(payload);
-        if let Some(stdout) = self.stdio_out.clone() {
-            tokio::spawn(async move {
-                let mut out = stdout.lock().await;
-                let _ = out.write_all(serialized.as_bytes()).await;
-                let _ = out.write_all(b"\n").await;
-                let _ = out.flush().await;
-            });
+        if let Some(tx) = &self.stdio_tx {
+            let _ = tx.send(serialized);
         }
         seq
     }
@@ -1671,6 +1809,7 @@ impl SharedEventBus {
 struct EngineCommand {
     request: Value,
     reply: oneshot::Sender<Result<Value>>,
+    flushed: Option<oneshot::Receiver<()>>,
 }
 
 struct ActiveSessionCall {
@@ -1684,15 +1823,20 @@ struct ActiveSessionCall {
     video_capture: Option<LocalVideoCapture>,
     media_closed_at: Option<Instant>,
     media_closed_err: Option<String>,
+    media_attach_failed: bool,
     inspector: CallMediaInspector,
     last_snapshot_at: Instant,
     stopping: bool,
+    pending_hangup: bool,
+    hangup_started_at: Option<Instant>,
     end_waiters: Vec<oneshot::Sender<Result<Value>>>,
 }
 
 enum PendingKind {
     Ready {
-        desired_ready: bool,
+        scope: Option<CallReadyScope>,
+        initial: bool,
+        for_waiting_offer: bool,
         followup: Option<Box<StagedAction>>,
     },
     Dial {
@@ -1826,6 +1970,8 @@ async fn run_foreground(
     }
 
     let (mut control, hello) = Control::connect(remote).await?;
+    // Remove any ephemeral bearer token file written by `start_detached` now that we connected.
+    let _ = fs::remove_file(session_dir.join("auth.token"));
     if control.format != CallAudioFormat::default() {
         control.close().await;
         bail!("unsupported negotiated call audio format");
@@ -1837,8 +1983,24 @@ async fn run_foreground(
     )?;
     let mut audio_io = CallAudioIo::open(audio_source, audio_sink, audio_format).await?;
 
-    let stdio_out = stdio.then(|| Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())));
-    let bus = SharedEventBus::new(Some(&session_dir.join("events.jsonl")), stdio_out.clone())?;
+    let (stdio_tx, mut stdio_writer_task) = if stdio {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let writer = tokio::spawn(async move {
+            let mut out = tokio::io::stdout();
+            while let Some(line) = rx.recv().await {
+                if out.write_all(line.as_bytes()).await.is_err()
+                    || out.write_all(b"\n").await.is_err()
+                    || out.flush().await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (Some(tx), Some(writer))
+    } else {
+        (None, None)
+    };
+    let bus = SharedEventBus::new(Some(&session_dir.join("events.jsonl")), stdio_tx.clone())?;
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<EngineCommand>(128);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -1853,9 +2015,10 @@ async fn run_foreground(
     let mut ipc_task: Option<tokio::task::JoinHandle<()>> = None;
 
     if !no_ipc {
+        let ipc_permits = Arc::new(Semaphore::new(64));
         #[cfg(unix)]
         {
-            let sock_path = session_dir.join("control.sock");
+            let sock_path = allocate_ipc_socket_path(&session_dir)?;
             let _ = fs::remove_file(&sock_path);
             let listener = tokio::net::UnixListener::bind(&sock_path).with_context(|| {
                 format!("failed to bind session IPC socket {}", sock_path.display())
@@ -1871,9 +2034,14 @@ async fn run_foreground(
                         _ = stop_c.changed() => break,
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { continue; };
+                            let Ok(permit) = ipc_permits.clone().try_acquire_owned() else {
+                                drop(stream);
+                                continue;
+                            };
                             let bus_h = bus_c.clone();
                             let cmd_h = cmd_tx_c.clone();
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 let (r, w) = stream.into_split();
                                 handle_ipc_stream(r, w, bus_h, cmd_h, None).await;
                             });
@@ -1902,10 +2070,15 @@ async fn run_foreground(
                         _ = stop_c.changed() => break,
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { continue; };
+                            let Ok(permit) = ipc_permits.clone().try_acquire_owned() else {
+                                drop(stream);
+                                continue;
+                            };
                             let bus_h = bus_c.clone();
                             let cmd_h = cmd_tx_c.clone();
                             let sec = Some(secret.clone());
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 let (r, w) = stream.into_split();
                                 handle_ipc_stream(r, w, bus_h, cmd_h, sec).await;
                             });
@@ -1958,7 +2131,7 @@ async fn run_foreground(
     let mut stdio_task = if stdio {
         let cmd_tx_c = cmd_tx.clone();
         let bus_c = bus.clone();
-        let out_c = stdio_out.clone().expect("stdio stdout");
+        let out_tx = stdio_tx.clone().expect("stdio stdout tx");
         let shutdown_c = shutdown_tx.clone();
         Some(tokio::spawn(async move {
             let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -1968,6 +2141,7 @@ async fn run_foreground(
                     continue;
                 }
                 let parsed: Result<Value, _> = serde_json::from_str(trimmed);
+                let mut stop_flushed_tx: Option<oneshot::Sender<()>> = None;
                 let reply_json = match parsed {
                     Ok(req) => {
                         let req_id = req.get("id").cloned();
@@ -1987,17 +2161,31 @@ async fn run_foreground(
                             }))
                         } else {
                             let (tx, rx) = oneshot::channel();
+                            let flushed = if op == "stop" {
+                                let (ftx, frx) = oneshot::channel();
+                                stop_flushed_tx = Some(ftx);
+                                Some(frx)
+                            } else {
+                                None
+                            };
                             if cmd_tx_c
                                 .send(EngineCommand {
                                     request: req,
                                     reply: tx,
+                                    flushed,
                                 })
                                 .await
                                 .is_err()
                             {
                                 Err(anyhow!("session stopped"))
                             } else {
-                                rx.await.unwrap_or_else(|_| Err(anyhow!("session stopped")))
+                                match timeout(Duration::from_secs(45), rx).await {
+                                    Ok(Ok(res)) => res,
+                                    Ok(Err(_)) => Err(anyhow!("session stopped")),
+                                    Err(_) => {
+                                        Err(anyhow!("command timed out waiting for session reply"))
+                                    }
+                                }
                             }
                         };
                         match res {
@@ -2011,10 +2199,11 @@ async fn run_foreground(
                     Err(err) => ipc_err(None, "invalid_arguments", format!("invalid JSON: {err}")),
                 };
                 let line = serde_json::to_string(&reply_json).unwrap_or_default();
-                let mut out = out_c.lock().await;
-                let _ = out.write_all(line.as_bytes()).await;
-                let _ = out.write_all(b"\n").await;
-                let _ = out.flush().await;
+                let _ = out_tx.send(line);
+                if let Some(ftx) = stop_flushed_tx {
+                    let _ = ftx.send(());
+                    return;
+                }
             }
             // Stdin closed -> initiate clean shutdown.
             let _ = shutdown_c.send(true);
@@ -2025,7 +2214,8 @@ async fn run_foreground(
 
     // Main session state.
     let mut desired_ready = options.ready;
-    let mut is_ready = false;
+    let mut ready_scope: Option<CallReadyScope> = None;
+    let mut startup_ready_error: Option<String> = None;
     let mut current_video_source = video_source;
     let mut active_call: Option<ActiveSessionCall> = None;
     let mut pending: HashMap<String, PendingRequest> = HashMap::new();
@@ -2038,6 +2228,7 @@ async fn run_foreground(
     let mut stop_reason: Option<String> = None;
     let mut stop_hangup = true;
     let mut stop_reply: Option<oneshot::Sender<Result<Value>>> = None;
+    let mut stop_flushed: Option<oneshot::Receiver<()>> = None;
 
     // If `--ready` was set at startup, advertise readiness right away.
     if options.ready {
@@ -2066,7 +2257,9 @@ async fn run_foreground(
             rid,
             PendingRequest {
                 kind: PendingKind::Ready {
-                    desired_ready: true,
+                    scope: Some(CallReadyScope::All),
+                    initial: true,
+                    for_waiting_offer: false,
                     followup: None,
                 },
                 event_seq_before: before,
@@ -2092,7 +2285,11 @@ async fn run_foreground(
                 .call
                 .as_ref()
                 .is_some_and(|v| v.call_id == call.call_id && v.state == CallState::Connected);
-            if connected && call.media.is_none() && call.media_closed_at.is_none() && !call.stopping
+            if connected
+                && call.media.is_none()
+                && call.media_closed_at.is_none()
+                && !call.media_attach_failed
+                && !call.stopping
             {
                 let ep = endpoint(remote)?;
                 let client_id = control.client_id.clone();
@@ -2275,6 +2472,7 @@ async fn run_foreground(
                     stop_hangup = eng_cmd.request.get("hangup").and_then(Value::as_bool).unwrap_or(true);
                     stop_reason = Some("requested".into());
                     stop_reply = Some(eng_cmd.reply);
+                    stop_flushed = eng_cmd.flushed;
                     break Ok(());
                 }
                 let ctx = CommandContext {
@@ -2289,7 +2487,8 @@ async fn run_foreground(
                     audio_io: &mut audio_io,
                     current_video_source: &mut current_video_source,
                     desired_ready: &mut desired_ready,
-                    is_ready: &mut is_ready,
+                    ready_scope: &mut ready_scope,
+                    startup_ready_error: &startup_ready_error,
                     active_call: &mut active_call,
                     pending: &mut pending,
                     waiting_offer: &mut waiting_offer,
@@ -2318,7 +2517,9 @@ async fn run_foreground(
                     &mut audio_io,
                     &current_video_source,
                     &mut pending,
-                    &mut is_ready,
+                    &mut waiting_offer,
+                    &mut ready_scope,
+                    &mut startup_ready_error,
                     desired_ready,
                     receive_codec,
                     &options,
@@ -2353,10 +2554,20 @@ async fn run_foreground(
                                             },
                                         );
                                     }
-                                } else {
-                                    call.inspector.observe_receive_video_wire(&wire, now);
-                                    if let Some(media) = call.media.as_mut() {
-                                        let _ = media.receive_video.binary_frame(&wire);
+                                } else if let Some(media) = call.media.as_mut() {
+                                    let admitted = if wire.kind == MediaPayloadKind::Jpeg {
+                                        media.receive_video.binary_frame(&wire)
+                                    } else {
+                                        media
+                                            .receive_video
+                                            .tracks()
+                                            .get(&wire.header.track_id)
+                                            .is_some_and(|t| {
+                                                t.track.generation() == wire.header.generation
+                                            })
+                                    };
+                                    if admitted {
+                                        call.inspector.observe_receive_video_wire(&wire, now);
                                     }
                                 }
                             }
@@ -2531,6 +2742,24 @@ async fn run_foreground(
                     .collect();
                 for key in expired {
                     if let Some(mut req) = pending.remove(&key) {
+                        if matches!(req.kind, PendingKind::Hangup) {
+                            if let Some(call) = active_call.as_mut() {
+                                for waiter in call.end_waiters.drain(..) {
+                                    let _ = waiter.send(Err(anyhow!(
+                                        "hangup timed out waiting for daemon confirmation"
+                                    )));
+                                }
+                            }
+                        } else if matches!(req.kind, PendingKind::Ready { for_waiting_offer: true, .. }) {
+                            if let Some(staged) = waiting_offer.take() {
+                                let _ = staged.reply.send(Err(anyhow!(
+                                    "call readiness timed out while preparing incoming offer"
+                                )));
+                            }
+                        } else if matches!(req.kind, PendingKind::Ready { initial: true, .. }) {
+                            startup_ready_error
+                                .get_or_insert_with(|| "initial call.ready timed out".into());
+                        }
                         if let Some(reply) = req.reply.take() {
                             let _ = reply.send(Err(anyhow!(
                                 "call command timed out; check session status before retrying"
@@ -2540,9 +2769,20 @@ async fn run_foreground(
                 }
                 if let Some(call) = active_call.as_mut() {
                     last_activity = now;
+                    if call
+                        .hangup_started_at
+                        .is_some_and(|at| now.saturating_duration_since(at) > COMMAND_TIMEOUT)
+                        && !call.end_waiters.is_empty()
+                    {
+                        for waiter in call.end_waiters.drain(..) {
+                            let _ = waiter.send(Err(anyhow!(
+                                "hangup timed out waiting for terminal call.state"
+                            )));
+                        }
+                    }
                     // Update live media watch for concurrent `wait` requests.
                     let report = call.inspector.report(now);
-                    bus.publish_media(Some(report.clone()));
+                    bus.publish_media(Some((call.call_id.clone(), report.clone())));
                     if options.stats_interval > 0
                         && call.media.is_some()
                         && now.saturating_duration_since(last_stats_emitted)
@@ -2589,6 +2829,7 @@ async fn run_foreground(
                             "message": err,
                         }));
                         call.media_closed_at = None;
+                        call.media_attach_failed = true;
                     }
                 } else if options.idle_timeout > 0
                     && now.saturating_duration_since(last_activity)
@@ -2608,7 +2849,7 @@ async fn run_foreground(
         if stop_hangup {
             let _ = super::audio::terminate_owned(&mut control, &call.call_id).await;
         }
-        if let Some(rec) = call.inspector.stop_recording() {
+        if let Some(rec) = stop_inspector_recording(&mut call.inspector).await {
             bus.emit(json!({
                 "type": "recording.stopped",
                 "callId": call.call_id,
@@ -2645,6 +2886,9 @@ async fn run_foreground(
             "recording": final_recording,
         })));
     }
+    if let Some(flushed) = stop_flushed {
+        let _ = timeout(Duration::from_secs(2), flushed).await;
+    }
 
     let _ = shutdown_tx.send(true);
     if let Some(task) = ipc_task.take() {
@@ -2652,6 +2896,11 @@ async fn run_foreground(
     }
     if let Some(task) = stdio_task.take() {
         task.abort();
+    }
+    drop(stdio_tx);
+    drop(bus);
+    if let Some(writer) = stdio_writer_task.take() {
+        let _ = timeout(Duration::from_secs(2), writer).await;
     }
     if let Some(sock) = ipc_socket_path {
         let _ = fs::remove_file(sock);
@@ -2661,6 +2910,16 @@ async fn run_foreground(
     drop(lock_file);
 
     loop_result
+}
+
+async fn stop_inspector_recording(inspector: &mut CallMediaInspector) -> Option<RecordingReport> {
+    let recorder = inspector.take_recorder()?;
+    let report = tokio::task::spawn_blocking(move || recorder.finish())
+        .await
+        .ok()?
+        .ok()?;
+    inspector.record_finished_report(report.clone());
+    Some(report)
 }
 
 async fn next_active_media(active: &mut Option<ActiveSessionCall>) -> Result<Message> {
@@ -2729,7 +2988,8 @@ struct CommandContext<'a> {
     audio_io: &'a mut CallAudioIo,
     current_video_source: &'a mut CameraSource,
     desired_ready: &'a mut bool,
-    is_ready: &'a mut bool,
+    ready_scope: &'a mut Option<CallReadyScope>,
+    startup_ready_error: &'a Option<String>,
     active_call: &'a mut Option<ActiveSessionCall>,
     pending: &'a mut HashMap<String, PendingRequest>,
     waiting_offer: &'a mut Option<WaitingPendingOffer>,
@@ -2778,7 +3038,8 @@ async fn handle_engine_command(
                     "account": ctx.account,
                     "endpoint": ctx.endpoint,
                     "clientId": ctx.control.client_id,
-                    "ready": *ctx.is_ready,
+                    "ready": matches!(ctx.ready_scope, Some(CallReadyScope::All)),
+                    "readyError": ctx.startup_ready_error,
                     "eventSeq": before_seq,
                     "audioSource": ctx.audio_io.input_spec().label(),
                     "audioSink": ctx.audio_io.output_spec().label(),
@@ -2809,6 +3070,8 @@ async fn handle_engine_command(
                 enable,
                 CallReadyScope::All,
                 ctx.receive_codec,
+                false,
+                false,
                 None,
                 before_seq,
                 Some(reply),
@@ -2844,17 +3107,6 @@ async fn handle_engine_command(
                 .get("cameraOff")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if let Err(err) = apply_media_overrides(
-                &request,
-                ctx.audio_io,
-                ctx.current_video_source,
-                ctx.audio_format,
-            )
-            .await
-            {
-                let _ = reply.send(Err(err));
-                return;
-            }
             if !ctx.control.capabilities.direct_audio {
                 let _ = reply.send(Err(anyhow!("direct calling unavailable on this daemon")));
                 return;
@@ -2876,6 +3128,17 @@ async fn handle_engine_command(
                 )));
                 return;
             }
+            if let Err(err) = apply_media_overrides(
+                &request,
+                ctx.audio_io,
+                ctx.current_video_source,
+                ctx.audio_format,
+            )
+            .await
+            {
+                let _ = reply.send(Err(err));
+                return;
+            }
             let camera_enabled =
                 call_type == CallType::Video && !camera_off && !ctx.current_video_source.is_off();
             let staged = StagedAction::Dial {
@@ -2887,7 +3150,7 @@ async fn handle_engine_command(
             if let Err(err) = submit_ready_or_action(
                 ctx.control,
                 ctx.pending,
-                *ctx.is_ready,
+                ctx.ready_scope.as_ref(),
                 *ctx.desired_ready,
                 CallReadyScope::Outgoing,
                 ctx.receive_codec,
@@ -2914,17 +3177,6 @@ async fn handle_engine_command(
                 .get("cameraOff")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if let Err(err) = apply_media_overrides(
-                &request,
-                ctx.audio_io,
-                ctx.current_video_source,
-                ctx.audio_format,
-            )
-            .await
-            {
-                let _ = reply.send(Err(err));
-                return;
-            }
             if let Some(offer) = ctx
                 .control
                 .offer
@@ -2932,6 +3184,17 @@ async fn handle_engine_command(
                 .filter(|o| call_id.as_deref().is_none_or(|id| id == o.call_id))
                 .cloned()
             {
+                if let Err(err) = apply_media_overrides(
+                    &request,
+                    ctx.audio_io,
+                    ctx.current_video_source,
+                    ctx.audio_format,
+                )
+                .await
+                {
+                    let _ = reply.send(Err(err));
+                    return;
+                }
                 let is_video =
                     offer.call_type == CallType::Video && ctx.control.capabilities.direct_video;
                 let camera_enabled = is_video && !camera_off && !ctx.current_video_source.is_off();
@@ -2943,7 +3206,7 @@ async fn handle_engine_command(
                 if let Err(err) = submit_ready_or_action(
                     ctx.control,
                     ctx.pending,
-                    *ctx.is_ready,
+                    ctx.ready_scope.as_ref(),
                     *ctx.desired_ready,
                     CallReadyScope::Offer {
                         call_id: offer.call_id,
@@ -2966,6 +3229,17 @@ async fn handle_engine_command(
                 .filter(|o| call_id.as_deref().is_none_or(|id| id == o.call_id))
                 .cloned()
             {
+                if let Err(err) = apply_media_overrides(
+                    &request,
+                    ctx.audio_io,
+                    ctx.current_video_source,
+                    ctx.audio_format,
+                )
+                .await
+                {
+                    let _ = reply.send(Err(err));
+                    return;
+                }
                 // Promote the pending offer via Ready(Offer) and answer once CallEvent::Offered arrives.
                 let scope = CallReadyScope::Offer {
                     call_id: pending_offer.call_id.clone(),
@@ -2979,17 +3253,24 @@ async fn handle_engine_command(
                     reply,
                     deadline: Instant::now() + Duration::from_secs(30),
                 });
-                let _ = submit_ready(
+                if let Err(err) = submit_ready(
                     ctx.control,
                     ctx.pending,
                     true,
                     scope,
                     ctx.receive_codec,
+                    false,
+                    true,
                     None,
                     before_seq,
                     None,
                 )
-                .await;
+                .await
+                {
+                    if let Some(staged) = ctx.waiting_offer.take() {
+                        let _ = staged.reply.send(Err(err));
+                    }
+                }
             } else {
                 let _ = reply.send(Err(anyhow!(
                     "offer_expired: no matching current incoming call offer"
@@ -3057,7 +3338,7 @@ async fn handle_engine_command(
                 .cloned();
             match view {
                 Some(view) if view.state == CallState::Ended => {
-                    let rec = call.inspector.stop_recording();
+                    let rec = stop_inspector_recording(&mut call.inspector).await;
                     if let Some(r) = &rec {
                         *ctx.last_recording = Some(r.clone());
                     }
@@ -3072,6 +3353,7 @@ async fn handle_engine_command(
                     })));
                 }
                 Some(view) if view.state == CallState::Ending => {
+                    call.hangup_started_at.get_or_insert_with(Instant::now);
                     call.end_waiters.push(reply);
                 }
                 Some(view) => {
@@ -3093,6 +3375,7 @@ async fn handle_engine_command(
                     };
                     match send_json(&mut ctx.control.socket, &cmd).await {
                         Ok(()) => {
+                            call.hangup_started_at = Some(Instant::now());
                             call.end_waiters.push(reply);
                             ctx.pending.insert(
                                 rid,
@@ -3110,30 +3393,11 @@ async fn handle_engine_command(
                     }
                 }
                 None => {
-                    // Claim accepted but CallEvent::State hasn't arrived yet; send Hangup rev 1.
-                    let rid = request_id();
-                    let cmd = CallCommand::Hangup {
-                        request_id: rid.clone(),
-                        call_id: call.call_id.clone(),
-                        expected_revision: 1,
-                    };
-                    match send_json(&mut ctx.control.socket, &cmd).await {
-                        Ok(()) => {
-                            call.end_waiters.push(reply);
-                            ctx.pending.insert(
-                                rid,
-                                PendingRequest {
-                                    kind: PendingKind::Hangup,
-                                    event_seq_before: before_seq,
-                                    reply: None,
-                                    sent_at: Instant::now(),
-                                },
-                            );
-                        }
-                        Err(err) => {
-                            let _ = reply.send(Err(err));
-                        }
-                    }
+                    // Claim accepted but CallEvent::State hasn't arrived yet; defer Cancel/Hangup
+                    // until the first CallEvent::State delivers the authoritative state and revision.
+                    call.pending_hangup = true;
+                    call.hangup_started_at = Some(Instant::now());
+                    call.end_waiters.push(reply);
                 }
             }
         }
@@ -3175,17 +3439,6 @@ async fn handle_engine_command(
                 .get("cameraOff")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if let Err(err) = apply_media_overrides(
-                &request,
-                ctx.audio_io,
-                ctx.current_video_source,
-                ctx.audio_format,
-            )
-            .await
-            {
-                let _ = reply.send(Err(err));
-                return;
-            }
             if !ctx.control.capabilities.conference_create
                 || !ctx.control.capabilities.conference_audio
             {
@@ -3209,6 +3462,17 @@ async fn handle_engine_command(
                 )));
                 return;
             }
+            if let Err(err) = apply_media_overrides(
+                &request,
+                ctx.audio_io,
+                ctx.current_video_source,
+                ctx.audio_format,
+            )
+            .await
+            {
+                let _ = reply.send(Err(err));
+                return;
+            }
             let camera_enabled =
                 call_type == CallType::Video && !camera_off && !ctx.current_video_source.is_off();
             let staged = StagedAction::ConferenceStart {
@@ -3221,7 +3485,7 @@ async fn handle_engine_command(
             if let Err(err) = submit_ready_or_action(
                 ctx.control,
                 ctx.pending,
-                *ctx.is_ready,
+                ctx.ready_scope.as_ref(),
                 *ctx.desired_ready,
                 CallReadyScope::Outgoing,
                 ctx.receive_codec,
@@ -3260,17 +3524,6 @@ async fn handle_engine_command(
                 .get("cameraOff")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if let Err(err) = apply_media_overrides(
-                &request,
-                ctx.audio_io,
-                ctx.current_video_source,
-                ctx.audio_format,
-            )
-            .await
-            {
-                let _ = reply.send(Err(err));
-                return;
-            }
             if !ctx.control.capabilities.conference_join
                 || !ctx.control.capabilities.conference_audio
             {
@@ -3312,6 +3565,17 @@ async fn handle_engine_command(
                     return;
                 }
             };
+            if let Err(err) = apply_media_overrides(
+                &request,
+                ctx.audio_io,
+                ctx.current_video_source,
+                ctx.audio_format,
+            )
+            .await
+            {
+                let _ = reply.send(Err(err));
+                return;
+            }
             let camera_enabled = is_video && !camera_off && !ctx.current_video_source.is_off();
             let staged = StagedAction::ConferenceJoin {
                 invitation,
@@ -3321,7 +3585,7 @@ async fn handle_engine_command(
             if let Err(err) = submit_ready_or_action(
                 ctx.control,
                 ctx.pending,
-                *ctx.is_ready,
+                ctx.ready_scope.as_ref(),
                 *ctx.desired_ready,
                 CallReadyScope::Outgoing,
                 ctx.receive_codec,
@@ -3564,25 +3828,80 @@ async fn handle_engine_command(
             };
             match CameraSource::parse(raw) {
                 Ok(spec) => {
-                    *ctx.current_video_source = spec;
                     if let Some(call) = ctx.active_call.as_mut() {
-                        call.video_capture.take();
-                        if call.camera_enabled
-                            && call.video_allowed
-                            && !ctx.current_video_source.is_off()
-                        {
-                            if let Err(err) = start_session_video_capture(
-                                call,
-                                ctx.current_video_source,
-                                ctx.control,
-                                ctx.bus,
-                            )
-                            .await
-                            {
-                                let _ = reply.send(Err(err));
-                                return;
+                        if spec.is_off() {
+                            *ctx.current_video_source = spec;
+                            call.video_capture.take();
+                            if call.camera_enabled && call.video_allowed {
+                                let old_enabled = call.camera_enabled;
+                                call.camera_enabled = false;
+                                let rid = request_id();
+                                if send_json(
+                                    &mut ctx.control.socket,
+                                    &CallCommand::Camera {
+                                        request_id: rid.clone(),
+                                        call_id: call.call_id.clone(),
+                                        enabled: false,
+                                    },
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    ctx.pending.insert(
+                                        rid,
+                                        PendingRequest {
+                                            kind: PendingKind::Camera {
+                                                old_enabled,
+                                                new_enabled: false,
+                                            },
+                                            event_seq_before: before_seq,
+                                            reply: None,
+                                            sent_at: Instant::now(),
+                                        },
+                                    );
+                                }
                             }
+                        } else if call.camera_enabled && call.video_allowed {
+                            if let Some(format) = call
+                                .media
+                                .as_ref()
+                                .and_then(|m| m.video_send_track.as_ref())
+                                .and_then(CallTrack::video_format)
+                            {
+                                let src = spec.clone();
+                                let started = match tokio::task::spawn_blocking(move || {
+                                    LocalVideoCapture::start(&src, format)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(cap)) => cap,
+                                    Ok(Err(err)) => {
+                                        let _ = reply.send(Err(err));
+                                        return;
+                                    }
+                                    Err(err) => {
+                                        let _ = reply
+                                            .send(Err(anyhow!("camera worker panicked: {err}")));
+                                        return;
+                                    }
+                                };
+                                // Replace capture and source only after the new source starts cleanly.
+                                call.video_capture = Some(started);
+                                *ctx.current_video_source = spec;
+                                ctx.bus.emit(json!({
+                                    "type": "media.video_capture_started",
+                                    "callId": call.call_id,
+                                    "source": ctx.current_video_source.label(),
+                                    "codec": format.codec,
+                                }));
+                            } else {
+                                *ctx.current_video_source = spec;
+                            }
+                        } else {
+                            *ctx.current_video_source = spec;
                         }
+                    } else {
+                        *ctx.current_video_source = spec;
                     }
                     let _ = reply.send(Ok(json!({
                         "videoSource": ctx.current_video_source.label(),
@@ -3717,7 +4036,7 @@ async fn handle_engine_command(
                 })));
                 return;
             };
-            let report = call.inspector.stop_recording();
+            let report = stop_inspector_recording(&mut call.inspector).await;
             if let Some(r) = &report {
                 *ctx.last_recording = Some(r.clone());
                 ctx.bus.emit(json!({
@@ -3765,6 +4084,8 @@ async fn submit_ready(
     enable: bool,
     scope: CallReadyScope,
     receive_codec: CallVideoCodec,
+    initial: bool,
+    for_waiting_offer: bool,
     followup: Option<StagedAction>,
     event_seq_before: u64,
     reply: Option<oneshot::Sender<Result<Value>>>,
@@ -3788,7 +4109,7 @@ async fn submit_ready(
             request_id: rid.clone(),
             ready: enable,
             format,
-            scope: Some(scope),
+            scope: Some(scope.clone()),
             video: video_caps,
         },
     )
@@ -3799,7 +4120,9 @@ async fn submit_ready(
                 rid,
                 PendingRequest {
                     kind: PendingKind::Ready {
-                        desired_ready: enable,
+                        scope: enable.then_some(scope),
+                        initial,
+                        for_waiting_offer,
                         followup: followup.map(Box::new),
                     },
                     event_seq_before,
@@ -3818,11 +4141,19 @@ async fn submit_ready(
     }
 }
 
+fn ready_scope_covers(current: Option<&CallReadyScope>, needed: &CallReadyScope) -> bool {
+    match current {
+        Some(CallReadyScope::All) => true,
+        Some(existing) => existing == needed,
+        None => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submit_ready_or_action(
     control: &mut Control,
     pending: &mut HashMap<String, PendingRequest>,
-    is_ready: bool,
+    ready_scope: Option<&CallReadyScope>,
     desired_ready: bool,
     scope: CallReadyScope,
     receive_codec: CallVideoCodec,
@@ -3830,7 +4161,7 @@ async fn submit_ready_or_action(
     event_seq_before: u64,
     reply: oneshot::Sender<Result<Value>>,
 ) -> Result<()> {
-    if is_ready {
+    if ready_scope_covers(ready_scope, &scope) {
         return submit_staged_action(control, pending, action, event_seq_before, Some(reply)).await;
     }
     let effective_scope = if desired_ready {
@@ -3844,6 +4175,8 @@ async fn submit_ready_or_action(
         true,
         effective_scope,
         receive_codec,
+        false,
+        false,
         Some(action),
         event_seq_before,
         Some(reply),
@@ -3991,7 +4324,9 @@ async fn handle_control_event(
     audio_io: &mut CallAudioIo,
     current_video_source: &CameraSource,
     pending: &mut HashMap<String, PendingRequest>,
-    is_ready: &mut bool,
+    waiting_offer: &mut Option<WaitingPendingOffer>,
+    ready_scope: &mut Option<CallReadyScope>,
+    startup_ready_error: &mut Option<String>,
     desired_ready: bool,
     receive_codec: CallVideoCodec,
     options: &SessionRunOptions,
@@ -4017,6 +4352,26 @@ async fn handle_control_event(
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .unwrap_or_else(|| "command_rejected".into());
                 match req.kind {
+                    PendingKind::Ready {
+                        initial,
+                        for_waiting_offer,
+                        ..
+                    } => {
+                        if initial {
+                            *startup_ready_error = Some(code_str.clone());
+                            bus.emit(json!({
+                                "type": "session.error",
+                                "message": format!("initial call.ready rejected: {code_str}"),
+                            }));
+                        }
+                        if for_waiting_offer {
+                            if let Some(staged) = waiting_offer.take() {
+                                let _ = staged.reply.send(Err(anyhow!(
+                                    "call readiness rejected while preparing offer: {code_str}"
+                                )));
+                            }
+                        }
+                    }
                     PendingKind::Mute { old_muted, .. } => {
                         if let Some(call) = active_call.as_mut() {
                             call.muted = old_muted;
@@ -4057,10 +4412,15 @@ async fn handle_control_event(
             // Accepted!
             match req.kind {
                 PendingKind::Ready {
-                    desired_ready: next_ready,
+                    scope: next_scope,
+                    initial,
                     followup,
+                    ..
                 } => {
-                    *is_ready = next_ready;
+                    *ready_scope = next_scope;
+                    if initial {
+                        *startup_ready_error = None;
+                    }
                     if let Some(action) = followup {
                         let _ = submit_staged_action(
                             control,
@@ -4072,7 +4432,7 @@ async fn handle_control_event(
                         .await;
                     } else if let Some(reply) = req.reply.take() {
                         let _ = reply.send(Ok(json!({
-                            "ready": *is_ready,
+                            "ready": matches!(ready_scope, Some(CallReadyScope::All)),
                             "eventSeq": req.event_seq_before,
                         })));
                     }
@@ -4092,23 +4452,28 @@ async fn handle_control_event(
                         }
                         return;
                     };
+                    bus.publish_media(None);
                     let mut inspector = CallMediaInspector::new(control.format.sample_rate);
                     if let Some(rec_root) = &options.record_dir {
-                        let rec_dir = if rec_root.exists() && rec_root.is_dir() {
-                            rec_root.join(format!(
-                                "{}-{}",
-                                chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                                wechat_call_client::inspect::sanitize_filename_part(&cid)
-                            ))
-                        } else {
-                            rec_root.clone()
-                        };
-                        if let Ok(report) = inspector.start_recording(rec_dir) {
-                            bus.emit(json!({
-                                "type": "recording.started",
-                                "callId": cid,
-                                "recording": report,
-                            }));
+                        let rec_dir = rec_root.join(format!(
+                            "{}-{}",
+                            chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+                            wechat_call_client::inspect::sanitize_filename_part(&cid)
+                        ));
+                        match inspector.start_recording(rec_dir) {
+                            Ok(report) => {
+                                bus.emit(json!({
+                                    "type": "recording.started",
+                                    "callId": cid,
+                                    "recording": report,
+                                }));
+                            }
+                            Err(err) => {
+                                bus.emit(json!({
+                                    "type": "session.error",
+                                    "message": format!("failed to start recording: {err}"),
+                                }));
+                            }
                         }
                     }
                     let _ = session_dir;
@@ -4123,9 +4488,12 @@ async fn handle_control_event(
                         video_capture: None,
                         media_closed_at: None,
                         media_closed_err: None,
+                        media_attach_failed: false,
                         inspector,
                         last_snapshot_at: Instant::now(),
                         stopping: false,
+                        pending_hangup: false,
+                        hangup_started_at: None,
                         end_waiters: Vec::new(),
                     });
                     if let Some(reply) = req.reply.take() {
@@ -4152,23 +4520,28 @@ async fn handle_control_event(
                         }
                         return;
                     };
+                    bus.publish_media(None);
                     let mut inspector = CallMediaInspector::new(control.format.sample_rate);
                     if let Some(rec_root) = &options.record_dir {
-                        let rec_dir = if rec_root.exists() && rec_root.is_dir() {
-                            rec_root.join(format!(
-                                "{}-{}",
-                                chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                                wechat_call_client::inspect::sanitize_filename_part(&cid)
-                            ))
-                        } else {
-                            rec_root.clone()
-                        };
-                        if let Ok(report) = inspector.start_recording(rec_dir) {
-                            bus.emit(json!({
-                                "type": "recording.started",
-                                "callId": cid,
-                                "recording": report,
-                            }));
+                        let rec_dir = rec_root.join(format!(
+                            "{}-{}",
+                            chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+                            wechat_call_client::inspect::sanitize_filename_part(&cid)
+                        ));
+                        match inspector.start_recording(rec_dir) {
+                            Ok(report) => {
+                                bus.emit(json!({
+                                    "type": "recording.started",
+                                    "callId": cid,
+                                    "recording": report,
+                                }));
+                            }
+                            Err(err) => {
+                                bus.emit(json!({
+                                    "type": "session.error",
+                                    "message": format!("failed to start recording: {err}"),
+                                }));
+                            }
                         }
                     }
                     *active_call = Some(ActiveSessionCall {
@@ -4182,9 +4555,12 @@ async fn handle_control_event(
                         video_capture: None,
                         media_closed_at: None,
                         media_closed_err: None,
+                        media_attach_failed: false,
                         inspector,
                         last_snapshot_at: Instant::now(),
                         stopping: false,
+                        pending_hangup: false,
+                        hangup_started_at: None,
                         end_waiters: Vec::new(),
                     });
                     if let Some(reply) = req.reply.take() {
@@ -4248,6 +4624,7 @@ async fn handle_control_event(
             }
         }
         CallEvent::State { call: view } => {
+            let mut deferred_hangup_cmd: Option<CallCommand> = None;
             if let Some(call) = active_call.as_mut().filter(|c| c.call_id == view.call_id) {
                 call.inspector.apply_roster(view);
                 if let Some(media) = call.media.as_mut() {
@@ -4262,29 +4639,79 @@ async fn handle_control_event(
                             last_media_report,
                             last_recording,
                             view.state == CallState::Ended,
-                        );
+                        )
+                        .await;
                     }
                     CallState::Ending => {
+                        call.pending_hangup = false;
                         call.video_capture.take();
                         if call.media_closed_at.is_some() {
                             call.media_closed_at = Some(Instant::now());
                         }
                     }
-                    _ => {}
+                    _ => {
+                        if call.pending_hangup {
+                            call.pending_hangup = false;
+                            let rid = request_id();
+                            deferred_hangup_cmd = Some(
+                                if view.direction == CallDirection::Outgoing
+                                    && matches!(view.state, CallState::Dialing | CallState::Ringing)
+                                {
+                                    CallCommand::Cancel {
+                                        request_id: rid,
+                                        call_id: call.call_id.clone(),
+                                        expected_revision: view.revision,
+                                    }
+                                } else {
+                                    CallCommand::Hangup {
+                                        request_id: rid,
+                                        call_id: call.call_id.clone(),
+                                        expected_revision: view.revision,
+                                    }
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(cmd) = deferred_hangup_cmd {
+                let rid = cmd.request_id().to_owned();
+                let before_seq = bus.current_seq();
+                match send_json(&mut control.socket, &cmd).await {
+                    Ok(()) => {
+                        pending.insert(
+                            rid,
+                            PendingRequest {
+                                kind: PendingKind::Hangup,
+                                event_seq_before: before_seq,
+                                reply: None,
+                                sent_at: Instant::now(),
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        if let Some(call) = active_call.as_mut() {
+                            for waiter in call.end_waiters.drain(..) {
+                                let _ = waiter.send(Err(anyhow!("{err:#}")));
+                            }
+                        }
+                    }
                 }
             }
         }
         CallEvent::Availability { availability } if !availability.busy => {
             if active_call.is_some() {
-                finalize_active_call(active_call, bus, last_media_report, last_recording, true);
+                finalize_active_call(active_call, bus, last_media_report, last_recording, true)
+                    .await;
             }
+            bus.publish_media(None);
             if desired_ready
-                && !*is_ready
+                && !matches!(ready_scope, Some(CallReadyScope::All))
                 && !pending
                     .values()
                     .any(|p| matches!(p.kind, PendingKind::Ready { .. }))
             {
-                // Advertise readiness once if it is desired and not yet active.
+                // Restore full readiness scope once idle.
                 let before = bus.current_seq();
                 let _ = submit_ready(
                     control,
@@ -4292,6 +4719,8 @@ async fn handle_control_event(
                     true,
                     CallReadyScope::All,
                     receive_codec,
+                    false,
+                    false,
                     None,
                     before,
                     None,
@@ -4346,7 +4775,7 @@ async fn handle_control_event(
     }
 }
 
-fn finalize_active_call(
+async fn finalize_active_call(
     active_call: &mut Option<ActiveSessionCall>,
     bus: &Arc<SharedEventBus>,
     last_media_report: &mut Option<MediaInspectionReport>,
@@ -4357,7 +4786,7 @@ fn finalize_active_call(
         return;
     };
     call.video_capture.take();
-    let rec = call.inspector.stop_recording();
+    let rec = stop_inspector_recording(&mut call.inspector).await;
     if let Some(r) = &rec {
         *last_recording = Some(r.clone());
         bus.emit(json!({
@@ -4367,8 +4796,8 @@ fn finalize_active_call(
         }));
     }
     let final_media = call.inspector.report(Instant::now());
-    *last_media_report = Some(final_media.clone());
-    bus.publish_media(Some(final_media));
+    *last_media_report = Some(final_media);
+    bus.publish_media(None);
     for waiter in call.end_waiters.drain(..) {
         let _ = waiter.send(Ok(json!({
             "callId": call.call_id,
@@ -4395,9 +4824,11 @@ async fn handle_ipc_stream<R, W>(
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let mut lines = BufReader::new(reader).lines();
-    let Ok(Some(line)) = lines.next_line().await else {
-        return;
+    let bounded_reader = reader.take((MAX_IPC_LINE_BYTES + 1) as u64);
+    let mut lines = BufReader::new(bounded_reader).lines();
+    let line = match timeout(Duration::from_secs(5), lines.next_line()).await {
+        Ok(Ok(Some(line))) => line,
+        _ => return,
     };
     if line.len() > MAX_IPC_LINE_BYTES {
         let msg = ipc_err(None, "invalid_arguments", "IPC request exceeds size limit");
@@ -4452,25 +4883,48 @@ async fn handle_ipc_stream<R, W>(
             }
         }
         let _ = writer.flush().await;
-        while let Ok(ev) = rx.recv().await {
-            let seq = ev["seq"].as_u64().unwrap_or(0);
-            if seq <= last_sent {
-                continue;
-            }
-            last_sent = seq;
-            let stopped = ev["type"].as_str() == Some("session.stopped");
-            let text = format!("{}\n", serde_json::to_string(&ev).unwrap_or_default());
-            if writer.write_all(text.as_bytes()).await.is_err() {
-                return;
-            }
-            let _ = writer.flush().await;
-            if stopped {
-                return;
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let seq = ev["seq"].as_u64().unwrap_or(0);
+                    if seq <= last_sent {
+                        continue;
+                    }
+                    last_sent = seq;
+                    let stopped = ev["type"].as_str() == Some("session.stopped");
+                    let text = format!("{}\n", serde_json::to_string(&ev).unwrap_or_default());
+                    if writer.write_all(text.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = writer.flush().await;
+                    if stopped {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    for ev in bus.events_after(last_sent, EVENT_BUFFER_CAP) {
+                        let seq = ev["seq"].as_u64().unwrap_or(0);
+                        if seq <= last_sent {
+                            continue;
+                        }
+                        last_sent = seq;
+                        let stopped = ev["type"].as_str() == Some("session.stopped");
+                        let text = format!("{}\n", serde_json::to_string(&ev).unwrap_or_default());
+                        if writer.write_all(text.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        let _ = writer.flush().await;
+                        if stopped {
+                            return;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
-        return;
     }
 
+    let mut stop_flushed_tx: Option<oneshot::Sender<()>> = None;
     let result = if op == "events" {
         let after = req.get("after").and_then(Value::as_u64).unwrap_or(0);
         let limit = req
@@ -4486,10 +4940,18 @@ async fn handle_ipc_stream<R, W>(
         run_wait_request(&bus, &req).await
     } else {
         let (tx, rx) = oneshot::channel();
+        let flushed = if op == "stop" {
+            let (ftx, frx) = oneshot::channel();
+            stop_flushed_tx = Some(ftx);
+            Some(frx)
+        } else {
+            None
+        };
         if cmd_tx
             .send(EngineCommand {
                 request: req,
                 reply: tx,
+                flushed,
             })
             .await
             .is_err()
@@ -4512,6 +4974,13 @@ async fn handle_ipc_stream<R, W>(
         .write_all(format!("{}\n", serde_json::to_string(&envelope).unwrap_or_default()).as_bytes())
         .await;
     let _ = writer.flush().await;
+    if let Some(ftx) = stop_flushed_tx {
+        let _ = ftx.send(());
+    }
+}
+
+fn matches_media_entry(args: &SessionWaitArgs, entry: &(String, MediaInspectionReport)) -> bool {
+    args.call_id.as_deref().is_none_or(|id| id == entry.0) && args.matches_media(&entry.1)
 }
 
 async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<Value> {
@@ -4522,36 +4991,48 @@ async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<
     let mut media_rx = bus.subscribe_media();
 
     let wait_media_only = args.has_media_predicate() && !args.has_event_predicate();
+    let mut matched_event: Option<Value> = None;
+    let mut last_seen = args.after;
 
     // Fast path: check already-buffered events after `args.after`.
     if !wait_media_only {
         for ev in bus.events_after(args.after, EVENT_BUFFER_CAP) {
-            if args.matches_event(&ev)
-                && (!args.has_media_predicate()
-                    || media_rx
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|m| args.matches_media(m)))
-            {
-                return Ok(json!({
-                    "matched": true,
-                    "eventSeq": ev["seq"],
-                    "event": ev,
-                }));
+            if let Some(seq) = ev["seq"].as_u64() {
+                last_seen = last_seen.max(seq);
+            }
+            if args.matches_event(&ev) {
+                if !args.has_media_predicate() {
+                    return Ok(json!({
+                        "matched": true,
+                        "eventSeq": ev["seq"],
+                        "event": ev,
+                    }));
+                }
+                matched_event = Some(ev);
+                if let Some(entry) = media_rx.borrow().clone() {
+                    if matches_media_entry(&args, &entry) {
+                        return Ok(json!({
+                            "matched": true,
+                            "eventSeq": bus.current_seq(),
+                            "event": matched_event,
+                            "media": entry.1,
+                        }));
+                    }
+                }
+                break;
             }
         }
-    } else if let Some(report) = media_rx.borrow().clone() {
-        if args.matches_media(&report) {
+    } else if let Some(entry) = media_rx.borrow().clone() {
+        if matches_media_entry(&args, &entry) {
             return Ok(json!({
                 "matched": true,
                 "eventSeq": bus.current_seq(),
-                "media": report,
+                "media": entry.1,
             }));
         }
     }
 
     let deadline = tokio::time::Instant::now() + max_wait;
-    let mut matched_event: Option<Value> = None;
 
     loop {
         let now = tokio::time::Instant::now();
@@ -4583,6 +5064,10 @@ async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<
                 match ev {
                     Ok(ev) => {
                         let seq = ev["seq"].as_u64().unwrap_or(0);
+                        if seq <= last_seen {
+                            continue;
+                        }
+                        last_seen = seq;
                         if ev["type"].as_str() == Some("session.stopped") {
                             if !wait_media_only && seq > args.after && args.matches_event(&ev) {
                                 return Ok(json!({
@@ -4597,7 +5082,7 @@ async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<
                                 "call session stopped before a matching event arrived",
                             ));
                         }
-                        if !wait_media_only && seq > args.after && args.matches_event(&ev) {
+                        if !wait_media_only && matched_event.is_none() && seq > args.after && args.matches_event(&ev) {
                             if !args.has_media_predicate() {
                                 return Ok(json!({
                                     "matched": true,
@@ -4606,19 +5091,62 @@ async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<
                                 }));
                             }
                             matched_event = Some(ev);
-                            if let Some(report) = media_rx.borrow().clone() {
-                                if args.matches_media(&report) {
+                            if let Some(entry) = media_rx.borrow().clone() {
+                                if matches_media_entry(&args, &entry) {
                                     return Ok(json!({
                                         "matched": true,
                                         "eventSeq": bus.current_seq(),
                                         "event": matched_event,
-                                        "media": report,
+                                        "media": entry.1,
                                     }));
                                 }
                             }
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Re-scan the ring buffer so lagged subscribers do not miss matching events.
+                        for ev in bus.events_after(last_seen, EVENT_BUFFER_CAP) {
+                            let seq = ev["seq"].as_u64().unwrap_or(0);
+                            if seq <= last_seen {
+                                continue;
+                            }
+                            last_seen = seq;
+                            if ev["type"].as_str() == Some("session.stopped") {
+                                if !wait_media_only && args.matches_event(&ev) {
+                                    return Ok(json!({
+                                        "matched": true,
+                                        "eventSeq": seq,
+                                        "event": ev,
+                                    }));
+                                }
+                                return Err(failure(
+                                    3,
+                                    "session_stopped",
+                                    "call session stopped before a matching event arrived",
+                                ));
+                            }
+                            if !wait_media_only && matched_event.is_none() && args.matches_event(&ev) {
+                                if !args.has_media_predicate() {
+                                    return Ok(json!({
+                                        "matched": true,
+                                        "eventSeq": seq,
+                                        "event": ev,
+                                    }));
+                                }
+                                matched_event = Some(ev);
+                                if let Some(entry) = media_rx.borrow().clone() {
+                                    if matches_media_entry(&args, &entry) {
+                                        return Ok(json!({
+                                            "matched": true,
+                                            "eventSeq": bus.current_seq(),
+                                            "event": matched_event,
+                                            "media": entry.1,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err(failure(3, "session_stopped", "call session closed"));
                     }
@@ -4628,13 +5156,13 @@ async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<
                 if changed.is_err() {
                     return Err(failure(3, "session_stopped", "call session closed"));
                 }
-                if let Some(report) = media_rx.borrow().clone() {
-                    if args.matches_media(&report) && (wait_media_only || matched_event.is_some()) {
+                if let Some(entry) = media_rx.borrow().clone() {
+                    if matches_media_entry(&args, &entry) && (wait_media_only || matched_event.is_some()) {
                         return Ok(json!({
                             "matched": true,
                             "eventSeq": bus.current_seq(),
                             "event": matched_event,
-                            "media": report,
+                            "media": entry.1,
                         }));
                     }
                 }
@@ -5095,7 +5623,6 @@ mod tests {
             snapshot_interval: 0,
             stats_interval: 150,
             idle_timeout: 60,
-            exit_with_parent: false,
         };
 
         let runner = tokio::spawn(async move {
@@ -5253,5 +5780,115 @@ mod tests {
             "calls.availability must not trigger repeated call.ready commands"
         );
         server.abort();
+    }
+
+    #[test]
+    fn cli_parses_negative_rms_protocol_enums_and_run_only_exit_with_parent() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(subcommand)]
+            cmd: SessionCommand,
+        }
+
+        let parsed = Wrapper::try_parse_from([
+            "session",
+            "wait",
+            "--min-rms-db",
+            "-35.5",
+            "--state",
+            "offered",
+            "--peer-status",
+            "invited",
+            "--peer-status",
+            "cancelled",
+            "--participant-status",
+            "undefined",
+            "--membership",
+            "unknown",
+        ])
+        .expect("valid wait args should parse");
+        match parsed.cmd {
+            SessionCommand::Wait(args) => {
+                assert_eq!(args.min_rms_db, Some(-35.5));
+                assert_eq!(args.states, vec!["offered"]);
+                assert_eq!(args.peer_statuses, vec!["invited", "cancelled"]);
+                assert_eq!(args.participant_status.as_deref(), Some("undefined"));
+                assert_eq!(args.membership.as_deref(), Some("unknown"));
+            }
+            _ => panic!("expected wait command"),
+        }
+
+        // `--exit-with-parent` is accepted on foreground `run` and rejected on detached `start`.
+        assert!(Wrapper::try_parse_from(["session", "run", "--exit-with-parent"]).is_ok());
+        assert!(Wrapper::try_parse_from(["session", "start", "--exit-with-parent"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_preserves_buffered_event_for_later_media_and_enforces_call_id() {
+        let bus = SharedEventBus::new(None, None).unwrap();
+        let ev_seq = bus.emit(json!({
+            "type": "call.state",
+            "call": { "callId": "call-2", "state": "connected" }
+        }));
+        assert_eq!(ev_seq, 1);
+
+        // Publish stale/other-call media first; a combined wait for call-2 must not match it,
+        // and must preserve the already-buffered `call.state` until call-2's media arrives.
+        let mut wrong_inspector = CallMediaInspector::new(16_000);
+        let now = Instant::now();
+        let tone: Vec<i16> = (0..320)
+            .map(|i| ((std::f64::consts::TAU * 440.0 * i as f64 / 16_000.0).sin() * 10000.0) as i16)
+            .collect();
+        for _ in 0..12 {
+            wrong_inspector.observe_receive_audio(2, None, &tone, now);
+        }
+        let report = wrong_inspector.report(now);
+        bus.publish_media(Some(("call-1".into(), report.clone())));
+
+        let bus_c = bus.clone();
+        let wait_task = tokio::spawn(async move {
+            run_wait_request(
+                &bus_c,
+                &json!({
+                    "after": 0,
+                    "timeout": 3,
+                    "callId": "call-2",
+                    "states": ["connected"],
+                    "audioFrames": 10
+                }),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(!wait_task.is_finished(), "must not match call-1 media");
+        bus.publish_media(Some(("call-2".into(), report)));
+
+        let matched = wait_task.await.unwrap().unwrap();
+        assert_eq!(matched["matched"], true);
+        assert_eq!(matched["event"]["call"]["callId"], "call-2");
+        assert!(matched.get("media").is_some());
+    }
+
+    #[tokio::test]
+    async fn ipc_stream_rejects_oversized_line_without_unbounded_buffering() {
+        let bus = SharedEventBus::new(None, None).unwrap();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+        let oversized = format!("{}\n", "x".repeat(MAX_IPC_LINE_BYTES + 256));
+        let (mut client_sock, server_sock) = tokio::io::duplex(4096);
+        let handler = tokio::spawn(async move {
+            let (r, w) = tokio::io::split(server_sock);
+            handle_ipc_stream(r, w, bus, cmd_tx, None).await;
+        });
+        let write_task = tokio::spawn(async move {
+            let _ = client_sock.write_all(oversized.as_bytes()).await;
+            let mut reply = String::new();
+            let _ = client_sock.read_to_string(&mut reply).await;
+            reply
+        });
+        handler.await.unwrap();
+        let reply = write_task.await.unwrap();
+        assert!(reply.contains("exceeds size limit"), "got reply: {reply}");
     }
 }

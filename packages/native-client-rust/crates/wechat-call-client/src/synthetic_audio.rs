@@ -235,6 +235,12 @@ impl ContinuousTone {
     }
 }
 
+enum FfmpegAudioEvent {
+    Frame(Vec<i16>),
+    Eof,
+    Error(String),
+}
+
 enum FilePcmBackend {
     Memory {
         samples: Vec<i16>,
@@ -243,8 +249,10 @@ enum FilePcmBackend {
         finished_emitted: bool,
     },
     Ffmpeg {
-        child: Child,
-        stdout: std::process::ChildStdout,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        child: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
+        rx: std::sync::mpsc::Receiver<FfmpegAudioEvent>,
+        worker: Option<std::thread::JoinHandle<()>>,
         eof: bool,
         finished_emitted: bool,
     },
@@ -296,16 +304,85 @@ impl FilePcmBackend {
             .stderr(Stdio::null())
             .spawn()
             .context("failed to start ffmpeg audio file reader")?;
-        let stdout = child.stdout.take().context("missing ffmpeg audio stdout")?;
+        let mut stdout = child.stdout.take().context("missing ffmpeg audio stdout")?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<FfmpegAudioEvent>(32);
+        let frame_samples = format.samples_per_frame();
+        let stop_bg = stop.clone();
+        let child_bg = child_slot.clone();
+        let worker = std::thread::Builder::new()
+            .name("wx-audio-file-ffmpeg".into())
+            .spawn(move || {
+                let mut raw = vec![0u8; frame_samples * 2];
+                let mut produced_any = false;
+                loop {
+                    if stop_bg.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    let mut filled = 0usize;
+                    let mut hit_eof = false;
+                    let mut io_err: Option<String> = None;
+                    while filled < raw.len() {
+                        match stdout.read(&mut raw[filled..]) {
+                            Ok(0) => {
+                                hit_eof = true;
+                                break;
+                            }
+                            Ok(n) => filled += n,
+                            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(err) => {
+                                io_err = Some(err.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    if filled > 0 {
+                        produced_any = true;
+                        raw[filled..].fill(0);
+                        let samples: Vec<i16> = raw
+                            .chunks_exact(2)
+                            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+                            .collect();
+                        if tx.send(FfmpegAudioEvent::Frame(samples)).is_err() {
+                            break;
+                        }
+                    }
+                    if let Some(err) = io_err {
+                        let _ = tx.send(FfmpegAudioEvent::Error(format!(
+                            "ffmpeg audio read failed: {err}"
+                        )));
+                        break;
+                    }
+                    if hit_eof {
+                        let exit_ok = child_bg
+                            .lock()
+                            .ok()
+                            .and_then(|mut guard| guard.as_mut().and_then(|c| c.wait().ok()))
+                            .is_none_or(|status| status.success());
+                        if !exit_ok || (loop_forever && !produced_any) {
+                            let _ = tx.send(FfmpegAudioEvent::Error(
+                                "ffmpeg audio decoder exited with an error".into(),
+                            ));
+                        } else {
+                            let _ = tx.send(FfmpegAudioEvent::Eof);
+                        }
+                        break;
+                    }
+                }
+            })
+            .context("failed to start ffmpeg audio reader thread")?;
         Ok(Self::Ffmpeg {
-            child,
-            stdout,
+            stop,
+            child: child_slot,
+            rx,
+            worker: Some(worker),
             eof: false,
             finished_emitted: false,
         })
     }
 
-    fn next_frame(&mut self, count: usize) -> (Vec<i16>, bool) {
+    fn next_frame(&mut self, count: usize) -> Result<(Vec<i16>, bool)> {
         match self {
             Self::Memory {
                 samples,
@@ -319,7 +396,7 @@ impl FilePcmBackend {
                     if newly_finished {
                         *finished_emitted = true;
                     }
-                    return (frame, newly_finished);
+                    return Ok((frame, newly_finished));
                 }
                 let mut written = 0;
                 while written < count {
@@ -329,7 +406,7 @@ impl FilePcmBackend {
                         } else {
                             let newly_finished = !*finished_emitted;
                             *finished_emitted = true;
-                            return (frame, newly_finished);
+                            return Ok((frame, newly_finished));
                         }
                     }
                     let take = (count - written).min(samples.len() - *cursor);
@@ -338,41 +415,37 @@ impl FilePcmBackend {
                     *cursor += take;
                     written += take;
                 }
-                (frame, false)
+                Ok((frame, false))
             }
             Self::Ffmpeg {
-                stdout,
+                rx,
                 eof,
                 finished_emitted,
                 ..
             } => {
-                let mut raw = vec![0u8; count * 2];
                 if *eof {
-                    return (vec![0i16; count], false);
+                    return Ok((vec![0i16; count], false));
                 }
-                let mut filled = 0;
-                while filled < raw.len() {
-                    match stdout.read(&mut raw[filled..]) {
-                        Ok(0) => {
-                            *eof = true;
-                            break;
-                        }
-                        Ok(n) => filled += n,
-                        Err(_) => {
-                            *eof = true;
-                            break;
-                        }
+                match rx.try_recv() {
+                    Ok(FfmpegAudioEvent::Frame(mut samples)) => {
+                        samples.resize(count, 0);
+                        Ok((samples, false))
                     }
+                    Ok(FfmpegAudioEvent::Eof)
+                    | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        *eof = true;
+                        let newly_finished = !*finished_emitted;
+                        if newly_finished {
+                            *finished_emitted = true;
+                        }
+                        Ok((vec![0i16; count], newly_finished))
+                    }
+                    Ok(FfmpegAudioEvent::Error(msg)) => {
+                        *eof = true;
+                        bail!("{msg}");
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => Ok((vec![0i16; count], false)),
                 }
-                let samples = raw
-                    .chunks_exact(2)
-                    .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
-                    .collect();
-                let newly_finished = *eof && !*finished_emitted;
-                if newly_finished {
-                    *finished_emitted = true;
-                }
-                (samples, newly_finished)
             }
         }
     }
@@ -380,9 +453,23 @@ impl FilePcmBackend {
 
 impl Drop for FilePcmBackend {
     fn drop(&mut self) {
-        if let Self::Ffmpeg { child, .. } = self {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Self::Ffmpeg {
+            stop,
+            child,
+            worker,
+            ..
+        } = self
+        {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Ok(mut guard) = child.lock() {
+                if let Some(mut proc) = guard.take() {
+                    let _ = proc.kill();
+                    let _ = proc.wait();
+                }
+            }
+            if let Some(handle) = worker.take() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -465,6 +552,7 @@ pub struct CallAudioIo {
     output_spec: AudioSinkSpec,
     producer: ActiveProducer,
     local: Option<LocalAudio>,
+    open_input_device: Option<Option<String>>,
 }
 
 impl CallAudioIo {
@@ -473,20 +561,24 @@ impl CallAudioIo {
         output: AudioSinkSpec,
         format: AudioFormat,
     ) -> Result<Self> {
-        let local = if input.uses_device() || output.uses_device() {
+        let input_device = match &input {
+            AudioSourceSpec::Device(id) => id.clone(),
+            _ => None,
+        };
+        let (local, open_input_device) = if input.uses_device() || output.uses_device() {
             let opts = AudioDeviceOptions {
-                input_device: match &input {
-                    AudioSourceSpec::Device(id) => id.clone(),
-                    _ => None,
-                },
+                input_device: input_device.clone(),
                 output_device: match &output {
                     AudioSinkSpec::Device(id) => id.clone(),
                     _ => None,
                 },
             };
-            Some(LocalAudio::open(&opts).await?)
+            (
+                Some(LocalAudio::open(&opts).await?),
+                input.uses_device().then_some(input_device),
+            )
         } else {
-            None
+            (None, None)
         };
         let producer = build_producer(&input, format)?;
         Ok(Self {
@@ -494,6 +586,7 @@ impl CallAudioIo {
             output_spec: output,
             producer,
             local,
+            open_input_device,
         })
     }
 
@@ -507,28 +600,38 @@ impl CallAudioIo {
 
     /// Hot-swap the outgoing audio source mid-call without dropping the call.
     pub async fn set_input(&mut self, input: AudioSourceSpec, format: AudioFormat) -> Result<()> {
-        if input.uses_device() && self.local.is_none() {
-            let opts = AudioDeviceOptions {
-                input_device: match &input {
-                    AudioSourceSpec::Device(id) => id.clone(),
-                    _ => None,
-                },
-                output_device: match &self.output_spec {
-                    AudioSinkSpec::Device(id) => id.clone(),
-                    _ => None,
-                },
-            };
-            self.local = Some(LocalAudio::open(&opts).await?);
-        }
         let producer = build_producer(&input, format)?;
-        self.producer = producer;
-        self.input_spec = input;
-        if !self.input_spec.uses_device() && !self.output_spec.uses_device() {
+        if input.uses_device() {
+            let desired_device = match &input {
+                AudioSourceSpec::Device(id) => id.clone(),
+                _ => None,
+            };
+            let need_reopen =
+                self.local.is_none() || self.open_input_device.as_ref() != Some(&desired_device);
+            if need_reopen {
+                let opts = AudioDeviceOptions {
+                    input_device: desired_device.clone(),
+                    output_device: match &self.output_spec {
+                        AudioSinkSpec::Device(id) => id.clone(),
+                        _ => None,
+                    },
+                };
+                if let Some(mut old) = self.local.take() {
+                    old.request_stop();
+                    let _ = old.stop().await;
+                }
+                self.local = Some(LocalAudio::open(&opts).await?);
+                self.open_input_device = Some(desired_device);
+            }
+        } else if !self.output_spec.uses_device() {
             if let Some(mut old) = self.local.take() {
                 old.request_stop();
                 let _ = old.stop().await;
             }
+            self.open_input_device = None;
         }
+        self.producer = producer;
+        self.input_spec = input;
         Ok(())
     }
 
@@ -552,7 +655,7 @@ impl CallAudioIo {
             ActiveProducer::Silence => (vec![0i16; count], false),
             ActiveProducer::Continuous(tone) => (tone.next_frame(), false),
             ActiveProducer::Pulsed(tone) => (tone.next_frame()?, false),
-            ActiveProducer::File(file) => file.next_frame(count),
+            ActiveProducer::File(file) => file.next_frame(count)?,
             ActiveProducer::Device => {
                 let local = self
                     .local

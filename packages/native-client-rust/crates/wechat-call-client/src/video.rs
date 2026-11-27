@@ -821,6 +821,14 @@ fn spawn_capture(
             ]);
         }
         CameraSource::Color(spec) => {
+            ensure!(
+                !spec.is_empty()
+                    && spec.len() <= 32
+                    && spec
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'#' | b'@' | b'.')),
+                "invalid color specification: {spec}"
+            );
             cmd.args([
                 "-re",
                 "-f",
@@ -2043,5 +2051,31 @@ mod tests {
             FLAG_KEYFRAME | FLAG_CODEC_CONFIG | FLAG_ROTATE_90
         );
         assert!(resumed.bytes.ends_with(&[0x65, 0x99]));
+    }
+
+    #[test]
+    fn camera_source_parse_accepts_synthetic_patterns_and_rejects_filter_injection() {
+        assert_eq!(CameraSource::parse("smpte").unwrap(), CameraSource::Smpte);
+        assert_eq!(
+            CameraSource::parse("color:red").unwrap(),
+            CameraSource::Color("red".into())
+        );
+        assert_eq!(
+            CameraSource::parse("color:#00ff00@0.5").unwrap(),
+            CameraSource::Color("#00ff00@0.5".into())
+        );
+        for bad in [
+            "color:",
+            "color:red:duration=1",
+            "color:red,testsrc",
+            "color:-x",
+            "color:red;echo",
+            &format!("color:{}", "a".repeat(33)),
+        ] {
+            assert!(
+                CameraSource::parse(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
     }
 }

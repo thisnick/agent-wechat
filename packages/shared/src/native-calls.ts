@@ -48,6 +48,11 @@ export type {
 export const NATIVE_CALL_MAX_FRAME_BYTES = 64 * 1024;
 export const NATIVE_CALL_MAX_VIDEO_FRAME_BYTES = 512 * 1024;
 export const NATIVE_CALL_PROTOCOL_VERSION = 3;
+export const NATIVE_CALL_CONTROL_PROTOCOL_VERSION = 4;
+const NATIVE_CALL_CONTROL_SUPPORTED_VERSIONS = [
+  NATIVE_CALL_CONTROL_PROTOCOL_VERSION,
+  NATIVE_CALL_PROTOCOL_VERSION,
+] as const;
 export const NATIVE_CALL_VIDEO_FLAG_KEYFRAME = 0x0001;
 export const NATIVE_CALL_VIDEO_FLAG_CODEC_CONFIG = 0x0002;
 export const NATIVE_CALL_VIDEO_FLAG_ROTATE_90 = 0x0004;
@@ -375,13 +380,14 @@ function parseCallEvent(data: unknown, byteLimit = CONTROL_BYTES): CallEvent | n
   try { value = JSON.parse(data); } catch { throw new NativeCallError("invalid_event"); }
   if (!object(value) || typeof value.type !== "string" || value.type.length === 0 || value.type.length > 128 || /[\u0000-\u001f\u007f]/.test(value.type)) throw new NativeCallError("invalid_event");
   if (value.type === "protocol.error") throw new NativeCallError(["unsupported_protocol_version", "invalid_protocol_version"].includes(String(value.code)) ? String(value.code) : "invalid_event");
-  if (["hello", "media.ready"].includes(String(value.type)) && (value.protocolVersion ?? 1) !== NATIVE_CALL_PROTOCOL_VERSION) throw new NativeCallError("unsupported_protocol_version");
+  if (value.type === "hello" && !NATIVE_CALL_CONTROL_SUPPORTED_VERSIONS.includes(Number(value.protocolVersion ?? 1) as 3 | 4)) throw new NativeCallError("unsupported_protocol_version");
+  if (value.type === "media.ready" && (value.protocolVersion ?? 1) !== NATIVE_CALL_PROTOCOL_VERSION) throw new NativeCallError("unsupported_protocol_version");
   let valid = false;
   switch (value.type) {
     case "hello":
       if (value.currentPendingOffer === undefined) value.currentPendingOffer = null;
       if (value.conferenceInvitations === undefined) value.conferenceInvitations = [];
-      valid = value.protocolVersion === NATIVE_CALL_PROTOCOL_VERSION && idValue(value.clientId) && object(value.capabilities)
+      valid = NATIVE_CALL_CONTROL_SUPPORTED_VERSIONS.includes(Number(value.protocolVersion) as 3 | 4) && idValue(value.clientId) && object(value.capabilities)
       && Object.entries(value.capabilities).every(([key, enabled]) => idValue(key) && typeof enabled === "boolean")
       && availabilityValue(value.availability) && (value.currentOffer === null || offerValue(value.currentOffer))
       && (value.currentPendingOffer === null || pendingOfferValue(value.currentPendingOffer))
@@ -504,7 +510,7 @@ export class NativeCallsClient {
       try {
         const socket = this.options.webSocketFactory(target.url, { headers: target.headers, maxPayload: CONTROL_BYTES });
         this.socket = socket; socket.binaryType = "arraybuffer";
-        socket.onopen = () => { try { socket.send(JSON.stringify({ type: "call.hello", supportedProtocolVersions: [NATIVE_CALL_PROTOCOL_VERSION] })); } catch { this.fail(new NativeCallError("send_failed")); } };
+        socket.onopen = () => { try { socket.send(JSON.stringify({ type: "call.hello", supportedProtocolVersions: [...NATIVE_CALL_CONTROL_SUPPORTED_VERSIONS] })); } catch { this.fail(new NativeCallError("send_failed")); } };
         socket.onmessage = event => { try { this.receive(parseCallEvent(event.data)); } catch (error) { this.fail(error instanceof NativeCallError ? error : new NativeCallError("invalid_event")); } };
         socket.onerror = () => this.fail(new NativeCallError("connection_failed", this.pending.size > 0));
         socket.onclose = () => this.fail(new NativeCallError("closed", this.pending.size > 0));

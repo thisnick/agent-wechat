@@ -20,7 +20,7 @@ put bearer tokens in URLs.
 | --- | --- | --- |
 | GET | `/v1/accounts/{account}/calls/current` | JSON snapshot |
 | POST | `/v1/accounts/{account}/calls/tickets` | Single-use WebSocket ticket (`socket`: `control` or `media`, plus `callId` for `media`) |
-| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages (protocol 3) |
+| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages (protocol 4, with v3 fallback) |
 | WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON track lifecycle + binary `WXCM` v3 audio/video frames |
 
 ```bash
@@ -172,22 +172,25 @@ promotion is unavailable in this version.
 Within five seconds of opening the control socket, announce supported versions:
 
 ```json
-{"type": "call.hello", "supportedProtocolVersions": [3]}
+{"type": "call.hello", "supportedProtocolVersions": [4, 3]}
 ```
 
 Wait for the server's `hello` and check `protocolVersion` before sending commands.
-The daemon supports version 3 only. An omitted announcement means version 1;
-there is no compatibility fallback. A mismatch returns this before closing with
-WebSocket code 1002:
+The daemon supports versions 4 and 3 on the control socket, selecting the
+highest mutually supported version. Version 4 adds `call.peer_status` and
+expects clients to ignore unknown future event types after `hello`; legacy
+version 3 clients do not receive `call.peer_status`. An omitted announcement
+means version 1; there is no v1/v2 compatibility fallback. A mismatch returns
+this before closing with WebSocket code 1002:
 
 ```json
-{"type":"protocol.error","code":"unsupported_protocol_version","clientVersions":[2],"serverVersions":[3]}
+{"type":"protocol.error","code":"unsupported_protocol_version","clientVersions":[2],"serverVersions":[3,4]}
 ```
 
 Empty, null, duplicate or malformed version lists return
 `invalid_protocol_version`. The CLI, shared SDK and OpenClaw plugin announce
-version 3 and reject an unsupported server. Media attachment negotiates
-independently.
+versions 4 and 3 and reject an unsupported server. Media attachment negotiates
+independently (protocol 3 / `WXCM` v3).
 
 ## Client messages
 
@@ -752,9 +755,11 @@ answered, `rejected`, `busy`, `no_response`, or `left`), using the same
 }
 ```
 
-Repeated unchanged status codes produce no event. Clients should ignore unknown
-future server event `type` names on both the control and media sockets so
-additive server messages do not disconnect active calls.
+Repeated unchanged status codes produce no event. `call.peer_status` is emitted
+on protocol 4 control connections (and suppressed on legacy protocol 3
+connections). Clients should ignore unknown future server event `type` names on
+both the control and media sockets after handshake completion so additive server
+messages do not disconnect active calls.
 
 ### Track generations and errors
 

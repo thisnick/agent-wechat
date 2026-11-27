@@ -1560,11 +1560,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Some(calls_cli::CallsCommand::Session {
                     command:
                         Some(calls_cli::session::SessionCommand::Run {
-                            options:
-                                calls_cli::session::SessionRunOptions {
-                                    exit_with_parent: true,
-                                    ..
-                                },
+                            exit_with_parent: true,
                             ..
                         }),
                 }),

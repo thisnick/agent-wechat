@@ -4,7 +4,7 @@ use crate::{
     audio::ReceiveAudio,
     transport::{
         debug_call, encode_segment, map_ws_send_error, open_socket_with_limit, receive,
-        receive_event, send_json, CallEndpoint, ControlClient, Socket, MEDIA_SOCKET_LIMIT,
+        receive_strict_event, send_json, CallEndpoint, ControlClient, Socket, MEDIA_SOCKET_LIMIT,
         STARTUP_TIMEOUT, WRITE_TIMEOUT,
     },
     video::{CapturedVideoFrame, ReceiveVideo},
@@ -134,7 +134,7 @@ impl MediaClient {
             },
         )
         .await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "media"))
+        let event = timeout(STARTUP_TIMEOUT, receive_strict_event(&mut socket, "media"))
             .await
             .context("media attachment timed out")??;
         if let CallEvent::Error { code } = &event {

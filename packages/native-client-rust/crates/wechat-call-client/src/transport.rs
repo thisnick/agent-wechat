@@ -25,8 +25,9 @@ use tokio_tungstenite::{
 use wechat_call_contracts::call_types::{
     CallAudioFormat, CallCapabilities, CallClientHello, CallCommand, CallCommandStatus,
     CallConferenceInvitation, CallEvent, CallInvitationResult, CallOffer, CallParticipantControl,
-    CallParticipantStatus, CallPendingOffer, CallTrack, CallVideoCapabilities, CallView,
-    CallsAvailability, CALL_PROTOCOL_VERSION,
+    CallParticipantStatus, CallPendingOffer, CallState, CallTrack, CallVideoCapabilities, CallView,
+    CallsAvailability, CALL_CONTROL_PROTOCOL_VERSION, CALL_CONTROL_SUPPORTED_VERSIONS,
+    CALL_PROTOCOL_VERSION,
 };
 
 pub type Socket = WebSocketStream<reqwest::Upgraded>;
@@ -288,14 +289,16 @@ pub fn parse_call_event_str(text: &str) -> Result<Option<CallEvent>> {
             serde_json::to_value(code)?
         );
     }
-    if kind == "hello"
-        && value["protocolVersion"].as_u64().unwrap_or(1) != u64::from(CALL_PROTOCOL_VERSION)
-    {
-        bail!(
-            "unsupported call protocol version: client [{}], daemon [{}]",
-            CALL_PROTOCOL_VERSION,
-            value["protocolVersion"].as_u64().unwrap_or(1)
-        );
+    if kind == "hello" {
+        let server_version = value["protocolVersion"].as_u64().unwrap_or(1);
+        if !CALL_CONTROL_SUPPORTED_VERSIONS
+            .iter()
+            .any(|supported| u64::from(*supported) == server_version)
+        {
+            bail!(
+                "unsupported call protocol version: client {CALL_CONTROL_SUPPORTED_VERSIONS:?}, daemon [{server_version}]"
+            );
+        }
     }
     if !is_known_call_event_type(kind) {
         debug_call(
@@ -306,6 +309,24 @@ pub fn parse_call_event_str(text: &str) -> Result<Option<CallEvent>> {
     }
     let event = serde_json::from_value(value).context("invalid call event")?;
     Ok(Some(event))
+}
+
+/// Receive one event strictly (used during initial `hello`/`media.ready`
+/// handshakes so unknown event types fail closed prior to handshake completion).
+pub async fn receive_strict_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
+    let Message::Text(text) = receive(socket, label).await? else {
+        bail!("unexpected binary control message");
+    };
+    let Some(event) = parse_call_event_str(&text)? else {
+        bail!("unexpected unknown event before handshake");
+    };
+    if call_debug_enabled() {
+        match event_json(&event) {
+            Ok(line) => debug_call(label, format_args!("<- {line}")),
+            Err(error) => debug_call(label, format_args!("could not format event: {error}")),
+        }
+    }
+    Ok(event)
 }
 
 pub async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
@@ -380,6 +401,7 @@ pub struct ControlClient {
     pub tracks: BTreeMap<(String, u32), CallTrack>,
     pub call: Option<CallView>,
     pub peer_status: Option<CallParticipantStatus>,
+    peer_status_call_id: Option<String>,
     pub format: CallAudioFormat,
     pub video_capabilities: Option<CallVideoCapabilities>,
 }
@@ -390,15 +412,21 @@ impl ControlClient {
         send_json(
             &mut socket,
             &CallClientHello::Hello {
-                supported_protocol_versions: vec![CALL_PROTOCOL_VERSION],
+                supported_protocol_versions: vec![
+                    CALL_CONTROL_PROTOCOL_VERSION,
+                    CALL_PROTOCOL_VERSION,
+                ],
             },
         )
         .await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "control"))
-            .await
-            .context("call socket hello timed out")??;
+        let event = timeout(
+            STARTUP_TIMEOUT,
+            receive_strict_event(&mut socket, "control"),
+        )
+        .await
+        .context("call socket hello timed out")??;
         let CallEvent::Hello {
-            protocol_version: CALL_PROTOCOL_VERSION,
+            protocol_version,
             conference_invitations,
             client_id,
             capabilities,
@@ -412,6 +440,9 @@ impl ControlClient {
         else {
             bail!("unsupported call socket hello");
         };
+        if !CALL_CONTROL_SUPPORTED_VERSIONS.contains(protocol_version) {
+            bail!("unsupported call socket hello");
+        }
         Ok((
             Self {
                 socket,
@@ -426,6 +457,7 @@ impl ControlClient {
                 tracks: BTreeMap::new(),
                 call: current_call.clone(),
                 peer_status: None,
+                peer_status_call_id: None,
                 format: *audio_format,
                 video_capabilities: video_capabilities.clone(),
             },
@@ -496,11 +528,12 @@ impl ControlClient {
             }
             CallEvent::State { call } => {
                 if self
-                    .call
-                    .as_ref()
-                    .is_some_and(|old| old.call_id != call.call_id)
+                    .peer_status_call_id
+                    .as_deref()
+                    .is_some_and(|id| id != call.call_id)
                 {
                     self.peer_status = None;
+                    self.peer_status_call_id = None;
                 }
                 if self
                     .call
@@ -509,19 +542,20 @@ impl ControlClient {
                 {
                     self.call = Some(call.clone());
                 }
-                if call.state == wechat_call_contracts::call_types::CallState::Ended {
+                if call.state == CallState::Ended {
                     self.tracks.retain(|(id, _), _| id != &call.call_id);
                 }
             }
             CallEvent::PeerStatus {
                 call_id, status, ..
             } => {
-                if self
+                let matches_or_new_call = self
                     .call
                     .as_ref()
-                    .is_none_or(|call| call.call_id == *call_id)
-                {
+                    .is_none_or(|call| call.call_id == *call_id || call.state == CallState::Ended);
+                if matches_or_new_call {
                     self.peer_status = Some(*status);
+                    self.peer_status_call_id = Some(call_id.clone());
                 }
             }
             CallEvent::Control {
@@ -548,6 +582,8 @@ impl ControlClient {
                 self.offer = None;
                 if !availability.busy {
                     self.tracks.clear();
+                    self.peer_status = None;
+                    self.peer_status_call_id = None;
                 }
             }
             _ => {}

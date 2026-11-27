@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub const CALL_PROTOCOL_VERSION: u32 = 3;
+/// Control-socket protocol version that adds direct-call `call.peer_status`
+/// events and expects clients to ignore unknown future event types after `hello`.
+pub const CALL_CONTROL_PROTOCOL_VERSION: u32 = 4;
+/// Protocol versions accepted by the daemon on `/calls/socket` (v3 suppresses
+/// `call.peer_status` for compatibility with older v3 clients).
+pub const CALL_CONTROL_SUPPORTED_VERSIONS: &[u32] =
+    &[CALL_PROTOCOL_VERSION, CALL_CONTROL_PROTOCOL_VERSION];
 
 /// Fixed track ID for outgoing call audio.
 pub const AUDIO_SEND_TRACK_ID: u32 = 1;
@@ -24,9 +31,9 @@ pub enum CallClientHello {
     /// seconds of opening the control socket, before any command.
     #[serde(rename = "call.hello")]
     Hello {
-        /// One to eight distinct positive version numbers. The daemon speaks a
-        /// single version and answers `protocol.error` when the list does not
-        /// include it.
+        /// One to eight distinct positive version numbers. The daemon selects
+        /// the highest supported version (v4 or v3 on `/calls/socket`, v3 on
+        /// `/media`) and answers `protocol.error` when the list includes none.
         #[serde(rename = "supportedProtocolVersions")]
         supported_protocol_versions: Vec<u32>,
     },

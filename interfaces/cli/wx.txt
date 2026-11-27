@@ -213,7 +213,7 @@ wx calls session reject <CALL_ID> | position 1 | Incoming call ID to reject; omi
 wx calls session run | - | Run a headless call session in the foreground, optionally driven over NDJSON stdin/stdout
 wx calls session run --audio | takes <AUDIO>, default silence | Outgoing audio source: silence, tone[:HZ[:AMP[:ON_MS:OFF_MS]]], file:PATH[:loop|:once], or device[:ID]
 wx calls session run --dir | takes <DIR> | Explicit private directory for this session's socket, event log, snapshots and recordings
-wx calls session run --exit-with-parent | switch | Stop gracefully when the parent process that started this session exits
+wx calls session run --exit-with-parent | switch | Stop gracefully when the parent process that started this foreground session exits
 wx calls session run --idle-timeout | takes <IDLE_TIMEOUT>, default 600 | Stop automatically after this many idle seconds with no active call or commands (0 disables)
 wx calls session run --name | takes <NAME>, default default | Session name used to address this session from other wx calls session commands
 wx calls session run --no-ipc | switch | Disable the local IPC socket (for isolated --stdio runs)
@@ -233,7 +233,6 @@ wx calls session snapshot --track | takes <TRACK> | Receive video track ID; omit
 wx calls session start | - | Start a detached headless call session in the background and wait until ready
 wx calls session start --audio | takes <AUDIO>, default silence | Outgoing audio source: silence, tone[:HZ[:AMP[:ON_MS:OFF_MS]]], file:PATH[:loop|:once], or device[:ID]
 wx calls session start --dir | takes <DIR> | Explicit private directory for this session's socket, event log, snapshots and recordings
-wx calls session start --exit-with-parent | switch | Stop gracefully when the parent process that started this session exits
 wx calls session start --idle-timeout | takes <IDLE_TIMEOUT>, default 600 | Stop automatically after this many idle seconds with no active call or commands (0 disables)
 wx calls session start --name | takes <NAME>, default default | Session name used to address this session from other wx calls session commands
 wx calls session start --output | takes <OUTPUT>, default null | Incoming audio sink: null (headless metering/recording only) or device[:ID]
@@ -270,14 +269,14 @@ wx calls session wait --dominant-hz | takes <DOMINANT_HZ> | Wait until received 
 wx calls session wait --event | takes <EVENTS>, repeatable | Match events whose type equals one of these values (repeatable)
 wx calls session wait --group | takes <GROUP> | Match conference.invitations events containing an invitation for this group ID
 wx calls session wait --hz-tolerance | takes <HZ_TOLERANCE>, default 25 | Frequency tolerance in Hz used with --dominant-hz
-wx calls session wait --membership | takes <MEMBERSHIP>, values invited|joined|left | Match participant.updated events with this membership (invited, joined, left)
+wx calls session wait --membership | takes <MEMBERSHIP>, values invited|joined|left|unknown | Match participant.updated events with this membership (invited, joined, left, unknown)
 wx calls session wait --mic | takes <MIC>, values true|false | Match participant.updated events where microphoneEnabled equals this value
 wx calls session wait --min-rms-db | takes <MIN_RMS_DB> | Wait until received audio RMS level reaches at least this dBFS value (e.g. -35)
 wx calls session wait --participant | takes <PARTICIPANT> | Match participant.updated, call.control, or call.peer_status for this participant or contact ID
-wx calls session wait --participant-status | takes <PARTICIPANT_STATUS>, values joined|ringing|acknowledged|left|rejected|busy|no_response|exited|unknown | Match participant.updated events with this status kind
-wx calls session wait --peer-status | takes <PEER_STATUSES>, repeatable, values joined|ringing|acknowledged|left|rejected|busy|no_response|exited|unknown | Match call.peer_status events reaching one of these kinds (repeatable)
+wx calls session wait --participant-status | takes <PARTICIPANT_STATUS>, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | Match participant.updated events with this status kind
+wx calls session wait --peer-status | takes <PEER_STATUSES>, repeatable, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | Match call.peer_status events reaching one of these kinds (repeatable)
 wx calls session wait --session | takes <SESSION>, default default | Named session to target (defaults to "default")
-wx calls session wait --state | takes <STATES>, repeatable, values dialing|ringing|connecting|connected|ending|ended|uncertain | Match call.state events reaching one of these states (repeatable)
+wx calls session wait --state | takes <STATES>, repeatable, values offered|dialing|ringing|connecting|connected|ending|ended|uncertain | Match call.state events reaching one of these states (repeatable)
 wx calls session wait --timeout | takes <TIMEOUT>, default 30 | Seconds to wait before failing with a timeout error
 wx calls session wait --track | takes <TRACK> | Restrict --audio-frames, --min-rms-db, --dominant-hz, or --video-frames to this track ID
 wx calls session wait --video-frames | takes <VIDEO_FRAMES> | Wait until received video frame count reaches at least this value

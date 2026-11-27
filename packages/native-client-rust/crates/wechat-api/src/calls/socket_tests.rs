@@ -17,8 +17,9 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 use wechat_core::call_types::{
-    CallCapabilities, CallTicketResponse, AUDIO_SEND_TRACK_ID, CALL_PROTOCOL_VERSION,
-    VIDEO_RECEIVE_TRACK_BASE, VIDEO_SEND_TRACK_ID,
+    CallCapabilities, CallTicketResponse, AUDIO_SEND_TRACK_ID, CALL_CONTROL_PROTOCOL_VERSION,
+    CALL_CONTROL_SUPPORTED_VERSIONS, CALL_PROTOCOL_VERSION, VIDEO_RECEIVE_TRACK_BASE,
+    VIDEO_SEND_TRACK_ID,
 };
 use wechat_core::{
     calls::{
@@ -317,7 +318,10 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
         assert_eq!(error["type"], "protocol.error");
         assert_eq!(error["code"], code);
         assert_eq!(error["clientVersions"], versions);
-        assert_eq!(error["serverVersions"], json!([CALL_PROTOCOL_VERSION]));
+        assert_eq!(
+            error["serverVersions"],
+            json!(CALL_CONTROL_SUPPORTED_VERSIONS)
+        );
         assert!(
             matches!(socket.next().await.unwrap().unwrap(), ClientMessage::Close(Some(frame)) if u16::from(frame.code) == 1002)
         );
@@ -337,6 +341,85 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
         json_event(&mut socket).await["protocolVersion"],
         CALL_PROTOCOL_VERSION
     );
+    let mut v4_socket = f.raw_socket("/v1/accounts/one/calls/socket", OWNER).await;
+    command(
+        &mut v4_socket,
+        json!({"type":"call.hello","supportedProtocolVersions":[3,4]}),
+    )
+    .await;
+    assert_eq!(
+        json_event(&mut v4_socket).await["protocolVersion"],
+        CALL_CONTROL_PROTOCOL_VERSION
+    );
+}
+
+#[tokio::test]
+async fn control_socket_suppresses_peer_status_for_v3_and_delivers_it_for_v4() {
+    let f = Fixture::new(true).await;
+    let mut v3 = f.raw_socket("/v1/accounts/one/calls/socket", OWNER).await;
+    command(
+        &mut v3,
+        json!({"type":"call.hello","supportedProtocolVersions":[3]}),
+    )
+    .await;
+    assert_eq!(
+        json_event(&mut v3).await["protocolVersion"],
+        CALL_PROTOCOL_VERSION
+    );
+
+    let mut v4 = f.raw_socket("/v1/accounts/one/calls/socket", OWNER).await;
+    command(
+        &mut v4,
+        json!({"type":"call.hello","supportedProtocolVersions":[4,3]}),
+    )
+    .await;
+    assert_eq!(
+        json_event(&mut v4).await["protocolVersion"],
+        CALL_CONTROL_PROTOCOL_VERSION
+    );
+
+    ready(&mut v4, "r1").await;
+    command(
+        &mut v4,
+        json!({"type":"call.dial","requestId":"d1","callType":"voice","target":{"kind":"direct","contactId":"peer-1"}}),
+    )
+    .await;
+    let connected_v4 = until(&mut v4, |ev| {
+        ev["type"] == "call.state" && ev["call"]["state"] == "connected"
+    })
+    .await;
+    let call_id = connected_v4["call"]["callId"]
+        .as_str()
+        .expect("v4 callId")
+        .to_owned();
+    let _ = until(&mut v3, |ev| {
+        ev["type"] == "call.state" && ev["call"]["state"] == "connected"
+    })
+    .await;
+
+    let sink = f.backend.sink.lock().unwrap().clone().expect("active sink");
+    sink.peer_status(3).await.unwrap();
+    sink.peer_microphone(true).await.unwrap();
+
+    // v4 receives call.peer_status followed by call.control.
+    let peer_status_v4 = until(&mut v4, |ev| ev["type"] == "call.peer_status").await;
+    assert_eq!(peer_status_v4["callId"], call_id);
+    assert_eq!(peer_status_v4["status"]["kind"], "acknowledged");
+    let control_v4 = until(&mut v4, |ev| ev["type"] == "call.control").await;
+    assert_eq!(control_v4["control"]["muted"], true);
+
+    // Legacy v3 skips call.peer_status completely and receives call.control cleanly.
+    loop {
+        let ev = json_event(&mut v3).await;
+        assert_ne!(
+            ev["type"], "call.peer_status",
+            "legacy v3 client must never receive call.peer_status"
+        );
+        if ev["type"] == "call.control" {
+            assert_eq!(ev["control"]["muted"], true);
+            break;
+        }
+    }
 }
 
 #[tokio::test]

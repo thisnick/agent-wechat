@@ -146,6 +146,7 @@ struct PersonalControl {
     identity: VoiceRoom,
     peer: String,
     origin: ControlOrigin,
+    peer_status: Option<u32>,
     peer_joined: Option<bool>,
     terminal: Option<RemoteTermination>,
     invitation_pending: bool,
@@ -246,8 +247,14 @@ impl NativePersonalSession {
     /// (for example `2` invited, `3` acknowledged/ringing, `1` joined, `4` left,
     /// `6` busy, `7` rejected, `8` no response).
     pub fn peer_member_status(&self) -> Option<u32> {
-        let room = self.active.as_ref()?;
-        room.members.get(&room.peer).map(|member| member.status)
+        self.active
+            .as_ref()
+            .and_then(|room| room.members.get(&room.peer).map(|member| member.status))
+            .or_else(|| {
+                self.control
+                    .as_ref()
+                    .and_then(|control| control.peer_status)
+            })
     }
     /// Current authenticated remote microphone state while joined. This is
     /// independent of membership, codec selection and whether media is audible.
@@ -457,6 +464,7 @@ impl NativePersonalSession {
             },
             peer: peer.to_owned(),
             origin: ControlOrigin::Outgoing { invite_id },
+            peer_status: None,
             peer_joined: None,
             terminal: None,
             invitation_pending: false,
@@ -486,11 +494,11 @@ impl NativePersonalSession {
                     .is_none_or(|peer| peer.member != own_member),
             "Initial personal member identity mismatch"
         );
-        let peer_joined = members.get(peer).is_some_and(|peer| peer.status == 1);
-        let pending = members
-            .get(peer)
-            .is_some_and(|peer| matches!(peer.status, 2 | 3));
+        let peer_status = members.get(peer).map(|peer| peer.status);
+        let peer_joined = peer_status == Some(1);
+        let pending = matches!(peer_status, Some(2 | 3));
         let control = self.control.as_mut().expect("allocated control");
+        control.peer_status = peer_status;
         control.peer_joined = Some(peer_joined);
         control.invitation_pending = pending;
         if pending {
@@ -798,11 +806,9 @@ impl NativePersonalSession {
         if let Some(action) = terminal {
             next.cookies = response.cookies.unwrap_or_default();
             let control = self.control.as_mut().expect("personal control");
-            control.peer_joined = Some(
-                next.members
-                    .get(&next.peer)
-                    .is_some_and(|member| member.status == 1),
-            );
+            let peer_status = next.members.get(&next.peer).map(|member| member.status);
+            control.peer_status = peer_status;
+            control.peer_joined = Some(peer_status == Some(1));
             control.invitation_pending = invitation_pending;
             control.pending_recipients = pending_recipients;
             control.terminal = Some(action);
@@ -827,15 +833,14 @@ impl NativePersonalSession {
         if media_result.is_ok() {
             next.cookies = response.cookies.unwrap_or_default();
         }
-        let joined = next
-            .members
-            .get(&next.peer)
-            .is_some_and(|member| member.status == 1);
-        self.control
+        let peer_status = next.members.get(&next.peer).map(|member| member.status);
+        let joined = peer_status == Some(1);
+        let control = self
+            .control
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Missing allocated control"))?
-            .peer_joined = Some(joined);
-        let control = self.control.as_mut().expect("personal control");
+            .ok_or_else(|| anyhow::anyhow!("Missing allocated control"))?;
+        control.peer_status = peer_status;
+        control.peer_joined = Some(joined);
         control.invitation_pending = invitation_pending;
         control.pending_recipients = pending_recipients;
         self.phase = if (joined || !invitation_pending) && local_status == 1 {
@@ -2538,6 +2543,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(session.control.as_ref().unwrap().terminal, Some(action));
+            assert_eq!(session.peer_member_status(), peer);
             assert!(session.active.is_none());
             assert!(!session.media_ready(&state, authority()).unwrap());
             if local {

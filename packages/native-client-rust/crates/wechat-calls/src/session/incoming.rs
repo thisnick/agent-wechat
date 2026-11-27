@@ -188,6 +188,7 @@ impl NativeIncomingSession {
             identity: room,
             peer: expected_caller.to_owned(),
             origin: ControlOrigin::Incoming,
+            peer_status: None,
             peer_joined: None,
             terminal: None,
             invitation_pending: false,

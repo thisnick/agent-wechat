@@ -809,7 +809,14 @@ impl RawVideoWriter {
             } else {
                 10.0
             };
+            let abs_raw =
+                std::fs::canonicalize(&self.raw_path).unwrap_or_else(|_| self.raw_path.clone());
             let mp4_path = self.raw_path.with_extension("mp4");
+            let abs_mp4 = abs_raw.with_extension("mp4");
+            let mut input_arg = std::ffi::OsString::from("file:");
+            input_arg.push(abs_raw.as_os_str());
+            let mut output_arg = std::ffi::OsString::from("file:");
+            output_arg.push(abs_mp4.as_os_str());
             let input_fmt = match self.codec {
                 CallVideoCodec::Jpeg => "mjpeg",
                 CallVideoCodec::H265 => "hevc",
@@ -826,7 +833,7 @@ impl RawVideoWriter {
                 input_fmt,
                 "-i",
             ])
-            .arg(&self.raw_path);
+            .arg(&input_arg);
             match self.codec {
                 CallVideoCodec::Jpeg => {
                     cmd.args([
@@ -845,13 +852,40 @@ impl RawVideoWriter {
                     cmd.args(["-c:v", "copy", "-movflags", "+faststart", "-y"]);
                 }
             }
-            cmd.arg(&mp4_path)
+            cmd.arg(&output_arg)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            if let Ok(status) = cmd.status() {
-                if status.success() && mp4_path.is_file() {
-                    return Ok(mp4_path);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            if let Ok(mut child) = cmd.spawn() {
+                let deadline = Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            if status.success() && mp4_path.is_file() {
+                                return Ok(mp4_path);
+                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            if Instant::now() >= deadline {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                let _ = std::fs::remove_file(&mp4_path);
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        Err(_) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -953,8 +987,22 @@ impl CallRecorder {
         codec: CallVideoCodec,
         bytes: &[u8],
     ) -> Option<PathBuf> {
-        if !self.video_rx_tracks.contains_key(&track_id) {
-            let stem = track_file_stem("video-rx-track", track_id, label);
+        let needs_new = self
+            .video_rx_tracks
+            .get(&track_id)
+            .is_none_or(|existing| existing.codec != codec);
+        if needs_new {
+            let codec_tag = match codec {
+                CallVideoCodec::Jpeg => "mjpeg",
+                CallVideoCodec::H265 => "h265",
+                CallVideoCodec::H264 => "h264",
+            };
+            let base_stem = track_file_stem("video-rx-track", track_id, label);
+            let stem = if self.video_rx_tracks.contains_key(&track_id) {
+                format!("{base_stem}-{codec_tag}")
+            } else {
+                base_stem
+            };
             if let Ok(writer) = RawVideoWriter::create(&self.dir, &stem, codec) {
                 self.video_rx_tracks.insert(track_id, writer);
             }
@@ -1126,9 +1174,14 @@ impl CallMediaInspector {
         Ok(report)
     }
 
-    pub fn stop_recording(&mut self) -> Option<RecordingReport> {
-        let recorder = self.recorder.take()?;
-        let report = recorder.finish().ok()?;
+    /// Take the active [`CallRecorder`] so callers in async runtimes can run
+    /// [`CallRecorder::finish`] on a blocking thread pool, then pass the result
+    /// back into [`Self::record_finished_report`].
+    pub fn take_recorder(&mut self) -> Option<CallRecorder> {
+        self.recorder.take()
+    }
+
+    pub fn record_finished_report(&mut self, report: RecordingReport) {
         for (&id, path) in &report.audio_rx_tracks {
             if let Some(track) = self.audio_receive.get_mut(&id) {
                 track.recording_path = Some(PathBuf::from(path));
@@ -1139,7 +1192,13 @@ impl CallMediaInspector {
                 track.recording_path = Some(PathBuf::from(path));
             }
         }
-        self.last_recording = Some(report.clone());
+        self.last_recording = Some(report);
+    }
+
+    pub fn stop_recording(&mut self) -> Option<RecordingReport> {
+        let recorder = self.take_recorder()?;
+        let report = recorder.finish().ok()?;
+        self.record_finished_report(report.clone());
         Some(report)
     }
 
@@ -1497,5 +1556,34 @@ mod tests {
         let r2 = video.report(now + Duration::from_millis(100));
         assert_eq!(r2.mean_rgb, Some([20.0, 220.0, 20.0]));
         assert!(r2.motion_delta.unwrap() > 40.0);
+    }
+
+    #[test]
+    fn recorder_finishes_safely_in_leading_dash_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "wx-inspect-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let rec_dir = base.join("-dash-rec");
+        let mut recorder = CallRecorder::start(rec_dir.clone(), 16_000, 1).unwrap();
+        let samples = sine_samples(440.0, 0.25, 320);
+        recorder.record_tx_audio(&samples);
+        recorder.record_rx_mixed_audio(&samples);
+        let img = image::RgbImage::from_fn(32, 24, |_, _| image::Rgb([10, 200, 30]));
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        recorder.record_rx_track_video(65_538, Some("peer"), CallVideoCodec::Jpeg, jpeg.get_ref());
+        let report = recorder.finish().unwrap();
+        assert!(!report.active);
+        assert!(Path::new(report.manifest.as_deref().unwrap()).is_file());
+        let video_out = report.video_rx_tracks.get(&65_538).unwrap();
+        assert!(Path::new(video_out).is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -295,13 +295,19 @@ fn asyncapi() -> Value {
             );
         }
     }
-    let protocol = SOCKETS[0].protocol_version;
+    let control_protocol = SOCKETS[0].protocol_version;
+    let media_protocol = SOCKETS[1].protocol_version;
+    let description = if control_protocol == media_protocol {
+        format!("Call commands, events and audio on two WebSockets of the agent-wechat daemon. Both speak call protocol version {control_protocol}. The daemon's HTTP routes are described in openapi.json.")
+    } else {
+        format!("Call commands, events and audio on two WebSockets of the agent-wechat daemon. Control negotiates protocol version {control_protocol} (with legacy v{media_protocol} fallback); media speaks protocol version {media_protocol}. The daemon's HTTP routes are described in openapi.json.")
+    };
     json!({
         "asyncapi": "3.0.0",
         "info": {
             "title": "agent-wechat calls WebSocket API",
-            "version": protocol.to_string(),
-            "description": format!("Call commands, events and audio on two WebSockets of the agent-wechat daemon. Both speak call protocol version {protocol}. The daemon's HTTP routes are described in openapi.json."),
+            "version": control_protocol.to_string(),
+            "description": description,
             "license": {"name": env!("CARGO_PKG_LICENSE")},
         },
         "servers": {"daemon": {

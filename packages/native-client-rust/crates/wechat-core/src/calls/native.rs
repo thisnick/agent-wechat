@@ -644,7 +644,7 @@ impl CallBackend for NativeCallBackend {
         let inner = self.inner.clone();
         Box::pin(async move {
             let worker = active(&inner, &request.identity)?;
-            if !worker.current()
+            if !worker.authorized()
                 || !request.is_current()
                 || request.generation != worker.generation.load(Ordering::Acquire)
             {
@@ -653,20 +653,26 @@ impl CallBackend for NativeCallBackend {
             if request.format != CallAudioFormat::default() || request.samples.len() != 320 {
                 return Err(service_error(CallErrorCode::InvalidRequest));
             }
+            if worker.media_stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
             match worker.audio.try_send(QueuedAudio {
                 request,
                 queued: Instant::now(),
             }) {
                 Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Disconnected(_))
-                    if worker.media_stop.load(Ordering::Acquire) =>
-                {
-                    // Media worker is already stopping; absorb late PCM while the
-                    // control actor transitions the call to Ending/Ended instead of
-                    // dropping the control client prematurely.
-                    return Ok(());
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    // Media worker already exited or is exiting while authority is still valid;
+                    // absorb late PCM until the control actor finishes Ending/Ended teardown
+                    // instead of dropping the control client prematurely.
+                    if worker.authorized() {
+                        return Ok(());
+                    }
+                    return Err(service_error(CallErrorCode::Stale));
                 }
-                Err(_) => return Err(service_error(CallErrorCode::Capacity)),
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    return Err(service_error(CallErrorCode::Capacity));
+                }
             }
             worker
                 .metrics
@@ -692,23 +698,33 @@ impl CallBackend for NativeCallBackend {
         let inner = self.inner.clone();
         Box::pin(async move {
             let worker = active(&inner, &request.identity)?;
-            if !worker.current()
+            if !worker.authorized()
                 || !request.is_current()
                 || request.generation != worker.video_generation.load(Ordering::Acquire)
             {
                 return Err(service_error(CallErrorCode::Stale));
             }
-            if !worker.camera_enabled.load(Ordering::Acquire) {
+            if !worker.camera_enabled.load(Ordering::Acquire)
+                || worker.media_stop.load(Ordering::Acquire)
+            {
                 return Ok(());
             }
-            worker
-                .video
-                .try_send(QueuedVideo {
-                    request,
-                    queued: Instant::now(),
-                })
-                .map_err(|_| service_error(CallErrorCode::Capacity))?;
-            Ok(())
+            match worker.video.try_send(QueuedVideo {
+                request,
+                queued: Instant::now(),
+            }) {
+                Ok(()) => Ok(()),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    if worker.authorized() {
+                        Ok(())
+                    } else {
+                        Err(service_error(CallErrorCode::Stale))
+                    }
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    Err(service_error(CallErrorCode::Capacity))
+                }
+            }
         })
     }
     fn clear_video(&self, identity: CallIdentity, generation: u32) -> BackendFuture<()> {
@@ -1542,6 +1558,15 @@ fn run_control(
             inner.config.direct_camera_off_grace,
             inner.config.direct_camera_off_recovery_grace,
         );
+    }
+    if worker.muted.load(Ordering::Acquire) {
+        if let Ok(mut queue) = worker.direct_commands.lock() {
+            let (reply, _) = oneshot::channel();
+            queue.push_back(DirectCommand {
+                sets_camera: false,
+                reply,
+            });
+        }
     }
     worker.joined_commands_ready.store(true, Ordering::Release);
     let control_result = (|| -> Result<()> {
