@@ -1,10 +1,10 @@
 ---
 title: 语音与视频通话
 description: CLI 语音与视频通话、群会议控制，以及 OpenClaw 设置。
-sourceHash: "b7f39e6e1fd2"
+sourceHash: "6286a3d298ae"
 ---
 
-使用 `wx` 通过本机的麦克风、扬声器和摄像头，发起或加入单聊或群会议的语音与视频通话。OpenClaw 设置（仅语音）请参考[设置通话](/openclaw/calling/)。
+使用 `wx` 通过本机的麦克风、扬声器和摄像头，发起或加入单聊或群会议的语音与视频通话；也可以使用 `wx calls session` 以无头方式驱动通话，用于脚本和自动化。OpenClaw 设置（仅语音）请参考[设置通话](/openclaw/calling/)。
 
 ## 检查可用性 \{#check-availability}
 
@@ -72,6 +72,48 @@ Bob   [..........] -60dB joined mic off
 使用 `i` 搜索联系人，或输入 `invite CONTACT_ID OTHER_ID` 发出邀请。提交邀请并不代表对方已经加入。邀请只能在会议中使用；无法把单聊升级为会议。按 `d` 后，可用 `d input NUMBER`、`d output NUMBER` 或 `d default` 切换设备。准备设备时当前音频会继续运行，但切换时可能会短暂中断。输入 `cancel` 可关闭选择器。
 
 鉴权、所有权、二进制 `WXCM` 音视频帧和编解码器协商，请参考[通话 API](../calls-api/)与[媒体参考](../calls-media/)。
+
+## 用于自动化的无头会话 \{#headless-sessions-for-automation}
+
+`wx calls session` 会在后台运行通话客户端（或使用 `wx calls session run --stdio` 在前台运行），不显示终端界面，也不使用真实的麦克风、扬声器和摄像头。每个账号启动一个会话，用连续的命令驱动它，等待事件或媒体阈值，然后检查录制或快照。
+
+| 命令 | 行为 |
+| --- | --- |
+| `wx calls session start --name NAME --ready` | 启动后台会话，使用模拟音频（`--audio`）和视频（`--video`） |
+| `wx calls session dial --session NAME CONTACT [--video]` | 发起单聊语音通话或视频通话 |
+| `wx calls session answer / reject / hangup --session NAME` | 应答或拒绝来电，或挂断当前通话 |
+| `wx calls session conference start / join / invite` | 发起或加入群会议，或邀请联系人加入群会议 |
+| `wx calls session mute / unmute / camera on\|off` | 开关本地麦克风或摄像头，并通知对方 |
+| `wx calls session audio SOURCE` / `video SOURCE` | 通话中实时切换外发音频或视频 |
+| `wx calls session wait --session NAME [FILTERS]` | 阻塞等待，直到某个事件（`--event`、`--state`、`--peer-status`、`--control-kind`、`--participant`）或媒体指标（`--audio-frames`、`--dominant-hz`、`--video-frames`）匹配 |
+| `wx calls session status / events / snapshot / record` | 查看状态、读取 NDJSON 事件、保存解码后的 JPEG/PNG 帧，或录制 WAV/视频 |
+| `wx calls session stop NAME` | 挂断所有进行中的通话，完成录制并退出 |
+
+模拟音源和视频源不需要麦克风、扬声器或摄像头：
+
+- **音频（`--audio`）**：`silence`（默认）、`tone[:HZ[:AMP[:ON_MS:OFF_MS]]]`（纯正弦音或脉冲音）、`file:PATH[:loop|:once]`，或 `device[:ID]`。
+- **输出（`--output`）**：`null`（默认；只进行电平测量和录制，不打开扬声器），或 `device[:ID]`。
+- **视频（`--video`）**：`test`（动态 `testsrc2`，默认）、`smpte`（彩条）、`color:NAME|#RRGGBB`、`file:PATH`、`off`、`auto`，或设备路径。
+
+```sh
+wx --account alice calls session start --name alice --audio tone:440 --video test --record-dir /tmp/alice-rec --json
+wx --account bob calls session start --name bob --ready --audio tone:880 --video color:green --json
+
+BOB_SEQ=$(wx calls session status --session bob --json | jq -r .session.eventSeq)
+ALICE_SEQ=$(wx calls session dial --session alice wxid_bob --video --json | jq -r .eventSeq)
+wx calls session wait --session bob --after "$BOB_SEQ" --event call.offered --json
+wx calls session wait --session alice --after "$ALICE_SEQ" --peer-status acknowledged --json
+wx calls session answer --session bob --json
+
+wx calls session wait --session bob --audio-frames 20 --dominant-hz 440 --video-frames 5 --json
+wx calls session snapshot --session bob --out /tmp/bob-frame.jpg --json
+wx calls session hangup --session alice --json
+wx calls session stop alice && wx calls session stop bob
+```
+
+`wait` 会扫描序号大于 `--after`（默认 `0`）的已缓存事件。在处理多个通话的会话中，请把上一条命令返回的 `eventSeq`（或 `status` 中的 `session.eventSeq`）传给 `--after`，这样 `wait` 只匹配较新的事件。
+
+会话会在 `--idle-timeout` 秒无活动后自动停止（默认 `600`；传入 `0` 可关闭）。进行中的通话、待应答的来电、待处理的命令、收到的控制事件，以及正在运行的 `wait` 或 `events --follow` 命令，都会让会话保持运行。
 
 :::note[使用提示]
 当前版本将原生通话限制为 20 分钟；更长的通话仍需验证。直接升级为会议和屏幕共享暂不可用。离开只会结束你自己的参与，不会结束房间。通话以未确定状态结束时，请先核实，再发起下一次通话。
