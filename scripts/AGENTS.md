@@ -13,6 +13,7 @@ from the working directory.
 | --- | --- |
 | A test or tool for one package | That package: `packages/client-ui/scripts/`, `packages/openclaw-extension/test/smoke/` or `packages/native-client-rust/scripts/`. Never `packages/cli/scripts/`: npm publishes that folder. |
 | CI runner setup, caching and artifact handoff | `ci/` |
+| Remote Boat sandbox setup and incremental build runner | `boat/` (see `scripts/boat/boat.md`) |
 | Versioning, release builds, packaging, release notes and publication | `release/` |
 | A smoke test that spans packages or checks a built executable, npm package, image or service unit | `smoke/` |
 | Translation checks | `i18n/` (`pnpm i18n`) |
@@ -25,7 +26,7 @@ repeat it or add a `native-` prefix. Put a script's unit test beside it as
 
 ## Paths
 
-Scripts in `ci/`, `release/` and `smoke/` sit two levels below the repository
+Scripts in `ci/`, `boat/`, `release/` and `smoke/` sit two levels below the repository
 root. Build paths from the script's own location at that depth:
 
 | Language | Repository root |
@@ -52,7 +53,7 @@ to its job:
 | Tests | Workflow and job |
 | --- | --- |
 | `release/*.test.mjs`, except `preflight`, `merge` and `image` | `ci.yml` `release-tools`; `release/crates.test.mjs` also runs in `rust-crates.yml` |
-| `ci/*.test.*`, `release/build.test.py`, `release/{preflight,merge,image}.test.mjs`, `smoke/media-assertions.test.mjs` | `ci.yml` `helpers` |
+| `ci/*.test.*`, `boat/*.test.mjs`, `release/build.test.py`, `release/{preflight,merge,image}.test.mjs`, `smoke/media-assertions.test.mjs` | `ci.yml` `helpers` |
 | `interfaces/*.test.mjs` | `interfaces.yml` |
 | `i18n/*.test.mjs` | `ci.yml` `ts` and `docs` |
 
@@ -82,6 +83,8 @@ through their unit tests.
 | `ci/wait-artifact.mjs NAME --target T --job JOB` | Reads the current workflow run's jobs and artifacts through the GitHub API with `GH_TOKEN` until job `JOB` for target `T` succeeds and `NAME` is listed, or that job fails. Needs `GITHUB_REPOSITORY`, `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`, so it only works inside a workflow job. |
 | `ci/claude-review-comment.mjs` | Creates or replaces the Claude review summary comment on a pull request. Only `claude-code-review.yml` calls it, through `actions/github-script`. |
 | `ci/ui-videos-comment.mjs` | Commits recorded UI videos under `refs/ui-videos/pr-<number>`, keeping earlier ones, and creates or updates the UI videos comment on a pull request. Only the `videos` job of `ui-screenshots.yml` calls it, through `actions/github-script`. |
+| `boat/run.mjs` | Creates, forks, resumes, stops, or deletes remote Boat sandboxes and runs commands inside them (use `--dry-run` to inspect without calling `boat`). |
+| `boat/setup.sh` | Runs inside a Boat sandbox to install missing apt packages, pinned Rust/Node/pnpm toolchains, and workspace dependencies. |
 
 ## Smoke tests
 
