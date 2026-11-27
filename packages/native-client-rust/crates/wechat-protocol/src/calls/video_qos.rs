@@ -14,7 +14,10 @@ use crate::calls::video_packet::{
 use std::collections::BTreeMap;
 
 const NACK_MAX_GAP: u64 = 32;
-const NACK_MAX_HISTORY: u64 = 48;
+/// Gaps further than this many packets behind the newest are forgotten. It covers
+/// NACK_TRACK_MS at a few hundred packets per second, so a retransmission arriving after a
+/// keyframe burst is still accepted.
+const NACK_MAX_HISTORY: u64 = 256;
 /// The wait before a missing packet is NACKed follows measured arrival jitter, bounded to
 /// this range, as the official receiver does.
 const NACK_MIN_REORDER_DELAY_MS: u64 = 20;

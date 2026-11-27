@@ -471,6 +471,40 @@ mod tests {
     }
 
     #[test]
+    fn arq_responses_fill_only_requested_gaps_and_count_once() {
+        let mut rx = VideoStreamReceiver::new(0);
+        let mut tx = RsmVideoPacketizer::new(7, 2)
+            .with_orientation(1)
+            .with_chunk_bytes(80)
+            .unwrap();
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..180u16).map(|i| (i & 0xff) as u8));
+        let pkts = tx
+            .packetize(VideoWireCodec::H264, &p_frame, 1_000, 15, 300)
+            .unwrap();
+        assert_eq!(pkts.len(), 3);
+
+        // An unrequested retransmission (nothing is missing yet) is ignored entirely.
+        let unrequested = rx.ingest_rsm_arq_response(2, &pkts[0], 10);
+        assert!(unrequested.frames.is_empty());
+
+        // Packet 1 is lost; once packet 2 reveals the gap, its retransmission completes the frame.
+        assert!(rx.ingest_rsm(2, &pkts[0], 20).frames.is_empty());
+        assert!(rx.ingest_rsm(2, &pkts[2], 25).frames.is_empty());
+        let recovered = rx.ingest_rsm_arq_response(2, &pkts[1], 80);
+        assert_eq!(recovered.frames.len(), 1);
+        assert!(!recovered.frames[0].prior_frames_dropped);
+
+        // A duplicate of the same retransmission no longer matches a gap and is ignored.
+        assert!(rx
+            .ingest_rsm_arq_response(2, &pkts[1], 90)
+            .frames
+            .is_empty());
+        let report = rx.snapshot_p2s(7, 1, 0x1d, 1_100);
+        assert_eq!(report.recv_arq_resp_pkgs, 1);
+    }
+
+    #[test]
     fn video_tx_pacer_paces_bursts_emits_orientation_vf_and_handles_exhaustion() {
         let (tx, rx) = mpsc::channel();
         let mut pacer = VideoTxPacer::new(3, 1);
