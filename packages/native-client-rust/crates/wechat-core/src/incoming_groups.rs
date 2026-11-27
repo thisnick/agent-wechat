@@ -5,6 +5,20 @@ use anyhow::ensure;
 use wechat_profile::{GroupProjection, RawFields, SqlValue};
 use wechat_protocol::{protobuf as p, ContactRecord, MetadataReply};
 
+/// Groups refreshed per pass. Each group makes up to three sequential metadata
+/// requests (contact, member roster, detail), so 5 groups caps one pass at at
+/// most 15 requests — comparable to `contact_remarks::LOOKUPS_PER_PASS` (10)
+/// and `big_xml::EXPANSIONS_PER_PASS` (4) — while returning to the account loop
+/// between passes so sync projection, sends and other queues are not starved.
+const GROUPS_PER_PASS: usize = 5;
+/// A failing refresh moves to `incoming-group-held:` after this many attempts
+/// and emits `group.refresh_blocked`.
+const MAX_ATTEMPTS: u8 = 3;
+/// Initial retry delay in seconds after a failed refresh attempt; doubles on
+/// the next failure (5 s, then 10 s before moving to `held:` on attempt 3) so
+/// one failing group does not block healthy groups queued behind it.
+const RETRY_BACKOFF_BASE_SECONDS: i64 = 5;
+
 #[derive(Serialize, Deserialize)]
 struct Refresh {
     group: String,
@@ -21,6 +35,33 @@ struct Refresh {
     detail_raw: Option<Vec<u8>>,
     #[serde(default)]
     contact_revision: Option<Vec<u8>>,
+    #[serde(default)]
+    not_before: i64,
+}
+impl Refresh {
+    fn has_owned_responses(&self) -> bool {
+        self.contact_raw.is_some()
+            && (!self.members || self.roster_raw.is_some())
+            && (!self.detail || self.detail_raw.is_some())
+    }
+}
+struct GroupRefreshSession<'a> {
+    permit: &'a mut crate::account_network::AccountNetworkPermit,
+    fence: &'a SessionFence,
+    desired: Option<&'a [u8]>,
+}
+fn retry_backoff_seconds(attempts: u8) -> i64 {
+    let shift = u32::from(attempts.saturating_sub(1)).min(8);
+    RETRY_BACKOFF_BASE_SECONDS << shift
+}
+fn is_session_ended(error: &anyhow::Error) -> bool {
+    wechat_protocol::AccountInterrupted::find(error).is_some()
+        || error.chain().any(|cause| {
+            matches!(
+                cause.to_string().as_str(),
+                "session_superseded" | "push_session_superseded" | "account runtime stopped"
+            )
+        })
 }
 fn key(receipt: &str) -> String {
     format!(
@@ -89,8 +130,10 @@ impl Core {
                 roster_raw: None,
                 detail_raw: None,
                 contact_revision: None,
+                not_before: 0,
             };
             self.save_incoming_group(account, &key, &job)?;
+            self.wake_account(account);
         }
         Ok(true)
     }
@@ -131,6 +174,139 @@ impl Core {
             .save_push_authorization(account, &sealed, &expected, epoch)?;
         Ok(raw)
     }
+    fn group_read_with_permit<F>(
+        &self,
+        account: &str,
+        epoch: Option<&[u8]>,
+        session: Option<&mut GroupRefreshSession<'_>>,
+        read: F,
+    ) -> Result<Vec<u8>>
+    where
+        F: FnOnce(&Arc<dyn crate::upstream::Upstream>, &mut AccountState) -> Result<Vec<u8>>,
+    {
+        let (active_fence, active_desired, permit) = match session {
+            Some(session) => (
+                session.fence.clone(),
+                session.desired.map(ToOwned::to_owned),
+                Some(&mut *session.permit),
+            ),
+            None => (
+                self.session_fence(account)?,
+                self.store.runtime(account, "desired")?,
+                None,
+            ),
+        };
+        let mut state = self.session_state(account, &active_fence)?;
+        let expected = self
+            .store
+            .runtime(account, "account-state")?
+            .context("auth_required")?;
+        ensure!(
+            self.store.runtime(account, "logout-epoch")?.as_deref() == epoch
+                && self
+                    .store
+                    .saved_login_authorization_current(account, &expected, epoch)?,
+            "authorization_generation_changed"
+        );
+        let before_bytes = zeroize::Zeroizing::new(serde_json::to_vec(&state)?);
+        let upstream = self.account_upstream(account)?;
+        let raw = match permit {
+            Some(permit) => permit.transfer(self, account, || read(&upstream, &mut state))?,
+            None => read(&upstream, &mut state)?,
+        };
+        ensure!(
+            self.store.runtime(account, "logout-epoch")?.as_deref() == epoch,
+            "authorization_generation_changed"
+        );
+        ensure!(!self.stopping.load(Ordering::SeqCst), "session_superseded");
+        let returned_bytes = zeroize::Zeroizing::new(serde_json::to_vec(&state)?);
+        if returned_bytes.as_slice() == before_bytes.as_slice() {
+            self.session_state(account, &active_fence)?;
+            ensure!(
+                self.store.runtime(account, "desired")?.as_deref() == active_desired.as_deref(),
+                "session_superseded"
+            );
+            self.check_state_profile(account, &state)?;
+            self.persisted_native_state(account, &state)?;
+        } else {
+            self.save_network_state(
+                account,
+                &state,
+                &expected,
+                &active_fence,
+                active_desired.as_deref(),
+            )?;
+        }
+        Ok(raw)
+    }
+    fn finish_incoming_group(&self, account: &str, key: &str, job: &Refresh) -> Result<()> {
+        self.apply_incoming_group(account, key, job)?;
+        // Retain all verified response bodies for offline local repair.
+        let retained_key = key.replace("pending:", "receipt:");
+        self.store.put_runtime(
+            account,
+            &retained_key,
+            &sealed_receipt(self, account, &retained_key, job)?,
+        )?;
+        self.store.append_event_once(
+            account,
+            &format!("group-refreshed:{}", job.source),
+            "group.updated",
+            &json!({
+                "groupId": job.group,
+                "origin": job.origin,
+                "source": "remote_sync_refresh",
+                "membersRefreshed": job.members,
+                "announcementRefreshed": job.detail,
+                "profileProjection": "partial"
+            }),
+        )?;
+        // Store the source receipt so retention can match this marker
+        // against unfinished sync batches.
+        self.store
+            .put_runtime(account, &done(&job.source), job.source.as_bytes())?;
+        // Keep the completed job until its original command has been
+        // revisited, so a restart cannot lose this local recovery work.
+        self.resume_incoming_group_source(account, job)?;
+        self.store.clear_runtime(account, key)?;
+        Ok(())
+    }
+    fn has_due_incoming_group_refreshes(&self, account: &str, now: i64) -> Result<bool> {
+        let current_epoch = self.store.runtime(account, "logout-epoch")?;
+        for (key, sealed) in self.store.incoming_group_refreshes(account)? {
+            let job: Refresh =
+                serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
+            if job.not_before <= now && job.epoch == current_epoch {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Seconds until the earliest backed-off current-epoch group refresh is
+    /// due, capped to `max_seconds`. Ignores jobs already due so a network
+    /// outage keeps its normal tick interval instead of retrying every second.
+    pub(super) fn next_incoming_group_retry_delay(
+        &self,
+        account: &str,
+        max_seconds: u64,
+    ) -> Result<Option<u64>> {
+        let max_seconds = max_seconds.max(1);
+        let now = chrono::Utc::now().timestamp();
+        let current_epoch = self.store.runtime(account, "logout-epoch")?;
+        let mut earliest: Option<u64> = None;
+        for (key, sealed) in self.store.incoming_group_refreshes(account)? {
+            let job: Refresh =
+                serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
+            if job.epoch != current_epoch || job.not_before <= now {
+                continue;
+            }
+            let wait = u64::try_from(job.not_before - now)
+                .unwrap_or(max_seconds)
+                .clamp(1, max_seconds);
+            earliest = Some(earliest.map_or(wait, |prev| prev.min(wait)));
+        }
+        Ok(earliest)
+    }
     /// A normal worker may fetch missing metadata. Local repair passes false
     /// and uses only responses already owned by the journal.
     pub(super) fn refresh_incoming_groups(
@@ -138,123 +314,207 @@ impl Core {
         account: &str,
         allow_fetch: bool,
     ) -> Result<usize> {
-        for (key, sealed) in self
-            .store
-            .incoming_group_refreshes(account)?
-            .into_iter()
-            .take(1)
-        {
-            let mut job: Refresh =
-                serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
-            if allow_fetch {
-                job.attempts = job.attempts.saturating_add(1);
-                self.save_incoming_group(account, &key, &job)?;
+        self.refresh_incoming_groups_with_permit(account, allow_fetch, None, None, None)
+    }
+    pub(super) fn refresh_incoming_groups_with_permit(
+        &self,
+        account: &str,
+        allow_fetch: bool,
+        permit: Option<&mut crate::account_network::AccountNetworkPermit>,
+        fence: Option<&SessionFence>,
+        desired: Option<&[u8]>,
+    ) -> Result<usize> {
+        let mut session = match (permit, fence) {
+            (Some(permit), Some(fence)) => Some(GroupRefreshSession {
+                permit,
+                fence,
+                desired,
+            }),
+            _ => None,
+        };
+        let rows = self.store.incoming_group_refreshes(account)?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        if !allow_fetch {
+            // Local repair never fetches, increments attempts or holds jobs; it
+            // only finishes refreshes whose responses are already owned.
+            let mut applied = 0usize;
+            for (key, sealed) in rows {
+                let job: Refresh =
+                    serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
+                if !job.has_owned_responses() {
+                    continue;
+                }
+                let outcome = (|| -> Result<()> {
+                    self.account_state(account)?;
+                    ensure!(
+                        job.epoch == self.store.runtime(account, "logout-epoch")?,
+                        "authorization_generation_changed"
+                    );
+                    self.finish_incoming_group(account, &key, &job)
+                })();
+                if outcome.is_ok() {
+                    applied += 1;
+                }
             }
-            let outcome = (|| -> Result<bool> {
+            return Ok(applied);
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let current_epoch = self.store.runtime(account, "logout-epoch")?;
+        let mut ready = Vec::new();
+        for (key, sealed) in rows {
+            let job: Refresh =
+                serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
+            if job.not_before <= now {
+                ready.push((key, job));
+            }
+        }
+        if ready.is_empty() {
+            return Ok(0);
+        }
+        // Prefer current-epoch fresh jobs over retries while keeping FIFO order
+        // within each tier so one failing group does not block healthy ones.
+        ready.sort_by_key(|(_, job)| (job.epoch != current_epoch, job.attempts, job.not_before));
+
+        let mut applied = 0usize;
+        let mut hit_error = false;
+        for (processed, (key, mut job)) in ready.into_iter().take(GROUPS_PER_PASS).enumerate() {
+            if processed > 0 {
+                if let Some(active) = session.as_mut() {
+                    self.yield_sync_writer(account, active.permit, active.fence, active.desired)?;
+                }
+            } else if let Some(active) = session.as_ref() {
+                self.check_sync_replay_session(account, active.fence, active.desired)?;
+            }
+
+            job.attempts = job.attempts.saturating_add(1);
+            self.save_incoming_group(account, &key, &job)?;
+
+            let outcome = (|| -> Result<()> {
                 self.account_state(account)?;
                 ensure!(
                     job.epoch == self.store.runtime(account, "logout-epoch")?,
                     "authorization_generation_changed"
                 );
-                if allow_fetch {
-                    let current = self.group_revision(account, &job.group)?;
-                    if job.contact_raw.is_some()
-                        && current != job.contact_revision
-                        && current.as_deref() != Some(key.as_bytes())
-                    {
-                        // Keep the replaced bodies for investigation, outside
-                        // the refresh queue: a key under `incoming-group-pending:`
-                        // would be picked up as a new job that is always
-                        // superseded again, refetching on every tick (#722).
-                        let prior = superseded(&key, job.attempts);
-                        self.store.put_runtime(
-                            account,
-                            &prior,
-                            &sealed_receipt(self, account, &prior, &job)?,
-                        )?;
-                        job.contact_raw = None;
-                        job.roster_raw = None;
-                        job.detail_raw = None;
-                        // A failed refetch must not save the same bodies again.
-                        self.save_incoming_group(account, &key, &job)?;
-                    }
+                let current = self.group_revision(account, &job.group)?;
+                if job.contact_raw.is_some()
+                    && current != job.contact_revision
+                    && current.as_deref() != Some(key.as_bytes())
+                {
+                    // Keep the replaced bodies for investigation, outside
+                    // the refresh queue: a key under `incoming-group-pending:`
+                    // would be picked up as a new job that is always
+                    // superseded again, refetching on every tick (#722).
+                    let prior = superseded(&key, job.attempts);
+                    self.store.put_runtime(
+                        account,
+                        &prior,
+                        &sealed_receipt(self, account, &prior, &job)?,
+                    )?;
+                    job.contact_raw = None;
+                    job.roster_raw = None;
+                    job.detail_raw = None;
+                    // A failed refetch must not save the same bodies again.
+                    self.save_incoming_group(account, &key, &job)?;
                 }
                 if job.contact_raw.is_none() {
-                    if !allow_fetch {
-                        return Ok(false);
-                    }
                     job.contact_revision = self.group_revision(account, &job.group)?;
-                    job.contact_raw =
-                        Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.account_upstream(account)?
-                                .lookup_contacts_raw(state, std::slice::from_ref(&job.group))
-                        })?);
+                    let raw = self.group_read_with_permit(
+                        account,
+                        job.epoch.as_deref(),
+                        session.as_mut(),
+                        |upstream, state| {
+                            upstream.lookup_contacts_raw(state, std::slice::from_ref(&job.group))
+                        },
+                    )?;
+                    job.contact_raw = Some(raw);
                     self.save_incoming_group(account, &key, &job)?;
                 }
                 if job.members && job.roster_raw.is_none() {
-                    if !allow_fetch {
-                        return Ok(false);
-                    }
-                    job.roster_raw =
-                        Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.account_upstream(account)?
-                                .lookup_room_raw(state, &job.group, 0)
-                        })?);
+                    let raw = self.group_read_with_permit(
+                        account,
+                        job.epoch.as_deref(),
+                        session.as_mut(),
+                        |upstream, state| upstream.lookup_room_raw(state, &job.group, 0),
+                    )?;
+                    job.roster_raw = Some(raw);
                     self.save_incoming_group(account, &key, &job)?;
                 }
                 if job.detail && job.detail_raw.is_none() {
-                    if !allow_fetch {
-                        return Ok(false);
-                    }
-                    job.detail_raw =
-                        Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.account_upstream(account)?
-                                .group_detail_raw(state, &job.group)
-                        })?);
+                    let raw = self.group_read_with_permit(
+                        account,
+                        job.epoch.as_deref(),
+                        session.as_mut(),
+                        |upstream, state| upstream.group_detail_raw(state, &job.group),
+                    )?;
+                    job.detail_raw = Some(raw);
                     self.save_incoming_group(account, &key, &job)?;
                 }
-                self.apply_incoming_group(account, &key, &job)?;
-                // Retain all verified response bodies for offline local repair.
-                let retained_key = key.replace("pending:", "receipt:");
-                self.store.put_runtime(
-                    account,
-                    &retained_key,
-                    &sealed_receipt(self, account, &retained_key, &job)?,
-                )?;
-                self.store.append_event_once(account,&format!("group-refreshed:{}",job.source),"group.updated",&json!({"groupId":job.group,"origin":job.origin,"source":"remote_sync_refresh","membersRefreshed":job.members,"announcementRefreshed":job.detail,"profileProjection":"partial"}))?;
-                // Store the source receipt so retention can match this marker
-                // against unfinished sync batches.
-                self.store
-                    .put_runtime(account, &done(&job.source), job.source.as_bytes())?;
-                // Keep the completed job until its original command has been
-                // revisited, so a restart cannot lose this local recovery work.
-                self.resume_incoming_group_source(account, &job)?;
-                self.store.clear_runtime(account, &key)?;
-                Ok(true)
+                self.finish_incoming_group(account, &key, &job)
             })();
+
             match outcome {
-                Ok(true) => return Ok(1),
-                Ok(false) => return Ok(0),
-                Err(_) if job.attempts >= 3 && allow_fetch => {
-                    // Keep any fetched bodies under `receipt:` for 7-day
-                    // investigation, and store only the source receipt under
-                    // `held:` so retention can match unfinished sync batches.
-                    let retained_key = key.replace("pending:", "receipt:");
-                    self.store.put_runtime(
-                        account,
-                        &retained_key,
-                        &sealed_receipt(self, account, &retained_key, &job)?,
-                    )?;
-                    let held_key = key.replace("pending:", "held:");
-                    self.store
-                        .put_runtime(account, &held_key, job.source.as_bytes())?;
-                    self.store.clear_runtime(account, &key)?;
-                    self.store.append_event_once(account,&format!("group-refresh-held:{}",job.source),"group.refresh_blocked",&json!({"groupId":job.group,"source":"remote_sync","reason":"metadata_refresh_unavailable","retryable":false}))?;
+                Ok(()) => applied += 1,
+                Err(error) => {
+                    let auth_rejected = wechat_protocol::is_session_rejected(&error)
+                        || super::session_auth::authentication_required(&error);
+                    let session_ended = is_session_ended(&error)
+                        || session.as_ref().is_some_and(|active| {
+                            self.check_sync_replay_session(account, active.fence, active.desired)
+                                .is_err()
+                        });
+                    if auth_rejected || session_ended {
+                        job.attempts = job.attempts.saturating_sub(1);
+                        let _ = self.save_incoming_group(account, &key, &job);
+                        return Err(error);
+                    }
+                    hit_error = true;
+                    if job.attempts >= MAX_ATTEMPTS {
+                        // Keep any fetched bodies under `receipt:` for 7-day
+                        // investigation, and store only the source receipt under
+                        // `held:` so retention can match unfinished sync batches.
+                        let retained_key = key.replace("pending:", "receipt:");
+                        self.store.put_runtime(
+                            account,
+                            &retained_key,
+                            &sealed_receipt(self, account, &retained_key, &job)?,
+                        )?;
+                        let held_key = key.replace("pending:", "held:");
+                        self.store
+                            .put_runtime(account, &held_key, job.source.as_bytes())?;
+                        self.store.clear_runtime(account, &key)?;
+                        self.store.append_event_once(
+                            account,
+                            &format!("group-refresh-held:{}", job.source),
+                            "group.refresh_blocked",
+                            &json!({
+                                "groupId": job.group,
+                                "source": "remote_sync",
+                                "reason": "metadata_refresh_unavailable",
+                                "retryable": false
+                            }),
+                        )?;
+                    } else if error.to_string() != "group_refresh_superseded" {
+                        let fail_now = chrono::Utc::now().timestamp();
+                        job.not_before = fail_now + retry_backoff_seconds(job.attempts);
+                        self.save_incoming_group(account, &key, &job)?;
+                    }
+                    if error.to_string() != "group_refresh_superseded" {
+                        break;
+                    }
                 }
-                Err(_) => return Ok(0),
             }
         }
-        Ok(0)
+
+        if applied > 0
+            && !hit_error
+            && self.has_due_incoming_group_refreshes(account, chrono::Utc::now().timestamp())?
+        {
+            self.wake_account(account);
+        }
+        Ok(applied)
     }
     fn resume_incoming_group_source(&self, account: &str, job: &Refresh) -> Result<()> {
         let Some(source) = job.source.strip_prefix("projected:") else {
@@ -662,9 +922,18 @@ mod tests {
         let legacy = format!("{key}:superseded:1");
         core.store.put_runtime("one", &legacy, b"legacy").unwrap();
 
-        // The superseded bodies are saved once; the refetch fails.
+        // The superseded bodies are saved once; the refetch fails and backs off.
         assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let sealed = core.store.runtime("one", &key).unwrap().unwrap();
+        let mut backed_off: Refresh =
+            serde_json::from_slice(&core.vault.open_record("one", &key, &sealed).unwrap()).unwrap();
+        assert!(backed_off.not_before > 0);
+        // While backed off, another immediate pass makes no upstream call.
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        backed_off.not_before = 0;
+        core.save_incoming_group("one", &key, &backed_off).unwrap();
         // The retry refetches without saving the same bodies again, then applies.
         assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 4);
@@ -710,7 +979,12 @@ mod tests {
         Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
             .unwrap()
             .upstream = Arc::new(FailingServer);
-        for _ in 0..3 {
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let mut retry = load_pending_job(&core, &key);
+                retry.not_before = 0;
+                core.save_incoming_group("one", &key, &retry).unwrap();
+            }
             assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
         }
         assert!(core
@@ -909,6 +1183,660 @@ mod tests {
         let self_member = core.group_member("one", ROOM, "synthetic_self").unwrap();
         assert_eq!(self_member["member"]["roomDisplayName"], Value::Null);
         assert_eq!(self_member["member"]["displayName"], "Self Nick");
+    }
+
+    fn room_contact(room: &str, name: &str, signals: bool) -> Vec<u8> {
+        let mut f = vec![
+            p::bytes(1, &p::bytes(1, room.as_bytes())),
+            p::bytes(2, &p::bytes(1, name.as_bytes())),
+            p::bytes(3, b""),
+            p::bytes(4, b""),
+            p::uint(5, 0),
+            p::bytes(6, &p::uint(1, 0)),
+            p::uint(7, u64::from(u32::MAX)),
+            p::uint(8, 2),
+            p::uint(9, 3),
+            p::uint(17, 0),
+            p::uint(85, 1),
+        ];
+        if signals {
+            f.extend([p::uint(53, 7), p::bytes(57, &p::uint(1, 2)), p::uint(64, 3)]);
+        }
+        p::message(&f).unwrap()
+    }
+
+    fn room_contact_reply(room: &str, name: &str) -> Vec<u8> {
+        p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(2, 1),
+            p::bytes(3, &room_contact(room, name, false)),
+            p::bytes(4, &[0]),
+        ])
+        .unwrap()
+    }
+
+    fn room_roster_reply() -> Vec<u8> {
+        let self_member = p::message(&[
+            p::bytes(1, b"synthetic_self"),
+            p::bytes(2, b"Self Nick"),
+            p::bytes(3, b"Self Room Display"),
+            p::uint(6, 1),
+            p::bytes(7, b"opaque"),
+        ])
+        .unwrap();
+        let peer_member = p::message(&[
+            p::bytes(1, b"peer"),
+            p::bytes(2, b"Peer Nick"),
+            p::uint(6, 0),
+        ])
+        .unwrap();
+        p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(3, 7),
+            p::bytes(
+                4,
+                &p::message(&[
+                    p::uint(1, 2),
+                    p::bytes(2, &self_member),
+                    p::bytes(2, &peer_member),
+                ])
+                .unwrap(),
+            ),
+            p::bytes(5, b"peer"),
+            p::uint(6, 2),
+            p::bytes(7, &p::bytes(1, b"synthetic_self")),
+            p::bytes(7, &p::bytes(1, b"peer")),
+            p::uint(8, 1),
+            p::bytes(9, &p::bytes(1, b"synthetic_self")),
+        ])
+        .unwrap()
+    }
+
+    fn room_detail_reply(announcement: &str) -> Vec<u8> {
+        p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::bytes(2, announcement.as_bytes()),
+            p::uint(3, 3),
+            p::bytes(4, b"synthetic_self"),
+            p::uint(5, 100),
+            p::bytes(12, b"<announcement>Synthetic XML</announcement>"),
+        ])
+        .unwrap()
+    }
+
+    fn queue_room(core: &Core, room: &str, receipt: &str) -> String {
+        let command = SyncCommand {
+            id: 2,
+            payload: room_contact(room, &format!("Initial {room}"), true),
+        };
+        core.apply_sync_command("one", &command, receipt, "live")
+            .unwrap();
+        key(receipt)
+    }
+
+    fn load_pending_job(core: &Core, job_key: &str) -> Refresh {
+        let sealed = core.store.runtime("one", job_key).unwrap().unwrap();
+        serde_json::from_slice(&core.vault.open_record("one", job_key, &sealed).unwrap()).unwrap()
+    }
+
+    fn waker_fired(waker: &tokio::sync::Notify) -> bool {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_millis(20), waker.notified())
+                    .await
+                    .is_ok()
+            })
+    }
+
+    type RosterHook = Box<dyn Fn(&str) + Send + Sync>;
+
+    struct BatchServer {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        looked_up: Arc<Mutex<Vec<String>>>,
+        fail_room: Option<String>,
+        on_roster: Option<RosterHook>,
+    }
+    impl crate::upstream::Upstream for BatchServer {
+        fn kind(&self) -> crate::upstream::UpstreamKind {
+            crate::upstream::UpstreamKind::Native
+        }
+        fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let room = &ids[0];
+            self.looked_up.lock().unwrap().push(room.clone());
+            if self.fail_room.as_deref() == Some(room.as_str()) {
+                bail!("synthetic_network_error");
+            }
+            Ok(room_contact_reply(room, &format!("Fresh {room}")))
+        }
+        fn lookup_room_raw(&self, _: &mut AccountState, room: &str, _: u32) -> Result<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(hook) = &self.on_roster {
+                hook(room);
+            }
+            Ok(room_roster_reply())
+        }
+        fn group_detail_raw(&self, _: &mut AccountState, room: &str) -> Result<Vec<u8>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(room_detail_reply(&format!("Notice {room}")))
+        }
+    }
+
+    #[test]
+    fn enqueue_wakes_account_and_batch_refreshes_up_to_limit_then_finishes_rest() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let waker = core.account_waker("one");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let looked_up = Arc::new(Mutex::new(Vec::new()));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(BatchServer {
+            calls: calls.clone(),
+            looked_up: looked_up.clone(),
+            fail_room: None,
+            on_roster: None,
+        });
+
+        let total = GROUPS_PER_PASS + 2;
+        let rooms: Vec<String> = (0..total)
+            .map(|i| format!("synthetic-batch-{i}@chatroom"))
+            .collect();
+        // First enqueue wakes the account loop; re-enqueuing the same receipt does not.
+        queue_room(&core, &rooms[0], "batch-receipt-0");
+        assert!(waker_fired(&waker));
+        let record =
+            wechat_protocol::wire::decode_contact_record(&room_contact(&rooms[0], "Dup", true))
+                .unwrap();
+        assert!(core
+            .queue_incoming_group("one", &record, "batch-receipt-0", "live")
+            .unwrap());
+        assert!(!waker_fired(&waker));
+
+        for (index, room) in rooms.iter().enumerate().skip(1) {
+            queue_room(&core, room, &format!("batch-receipt-{index}"));
+        }
+        // Drain the enqueue wake before testing pass-level wakes.
+        assert!(waker_fired(&waker));
+        assert_eq!(
+            core.store.incoming_group_refreshes("one").unwrap().len(),
+            total
+        );
+
+        // Pass 1 applies GROUPS_PER_PASS groups and wakes because due jobs remain.
+        assert_eq!(
+            core.refresh_incoming_groups("one", true).unwrap(),
+            GROUPS_PER_PASS
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), GROUPS_PER_PASS * 3);
+        assert_eq!(
+            core.store.incoming_group_refreshes("one").unwrap().len(),
+            total - GROUPS_PER_PASS
+        );
+        assert!(waker_fired(&waker));
+
+        // Pass 2 finishes the remaining groups and does not wake once drained.
+        assert_eq!(
+            core.refresh_incoming_groups("one", true).unwrap(),
+            total - GROUPS_PER_PASS
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), total * 3);
+        assert!(core
+            .store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .is_empty());
+        assert!(!waker_fired(&waker));
+
+        for room in &rooms {
+            let info = core.group_info("one", room).unwrap();
+            assert_eq!(info["name"], format!("Fresh {room}"));
+            assert_eq!(info["announcement"], format!("Notice {room}"));
+            assert_eq!(
+                core.group_member("one", room, "peer").unwrap()["state"],
+                "present"
+            );
+        }
+    }
+
+    #[test]
+    fn network_error_stops_pass_backs_off_failing_group_and_holds_after_three_failures() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let waker = core.account_waker("one");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let looked_up = Arc::new(Mutex::new(Vec::new()));
+        let failing = "synthetic-err-2@chatroom".to_owned();
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(BatchServer {
+            calls: calls.clone(),
+            looked_up: looked_up.clone(),
+            fail_room: Some(failing.clone()),
+            on_roster: None,
+        });
+
+        let keys: Vec<String> = (0..5)
+            .map(|i| {
+                queue_room(
+                    &core,
+                    &format!("synthetic-err-{i}@chatroom"),
+                    &format!("err-{i}"),
+                )
+            })
+            .collect();
+        assert!(waker_fired(&waker));
+
+        // Pass 1 applies groups 0 and 1, fails on group 2 and stops without touching 3 or 4.
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 2);
+        assert_eq!(
+            *looked_up.lock().unwrap(),
+            vec![
+                "synthetic-err-0@chatroom",
+                "synthetic-err-1@chatroom",
+                "synthetic-err-2@chatroom",
+            ]
+        );
+        assert!(!waker_fired(&waker));
+        let failed_once = load_pending_job(&core, &keys[2]);
+        assert_eq!(failed_once.attempts, 1);
+        assert!(failed_once.not_before > 0);
+        assert_eq!(load_pending_job(&core, &keys[3]).attempts, 0);
+        assert_eq!(load_pending_job(&core, &keys[4]).attempts, 0);
+
+        // While group 2 is backed off, healthy groups 3 and 4 run without being blocked.
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 2);
+        assert_eq!(core.store.incoming_group_refreshes("one").unwrap().len(), 1);
+        assert!(!waker_fired(&waker));
+
+        // Second failure keeps the job queued with a longer backoff and no held event yet.
+        let mut retry2 = load_pending_job(&core, &keys[2]);
+        let first_backoff = retry2.not_before;
+        retry2.not_before = 0;
+        core.save_incoming_group("one", &keys[2], &retry2).unwrap();
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
+        let failed_twice = load_pending_job(&core, &keys[2]);
+        assert_eq!(failed_twice.attempts, 2);
+        assert!(failed_twice.not_before >= first_backoff + RETRY_BACKOFF_BASE_SECONDS);
+        assert!(!waker_fired(&waker));
+        assert!(!core
+            .store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "group.refresh_blocked"));
+
+        // Third failure moves the job to held: and emits group.refresh_blocked.
+        let mut retry3 = failed_twice;
+        retry3.not_before = 0;
+        core.save_incoming_group("one", &keys[2], &retry3).unwrap();
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
+        assert!(core
+            .store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .is_empty());
+        assert!(core
+            .store
+            .runtime("one", &keys[2].replace("pending:", "held:"))
+            .unwrap()
+            .is_some());
+        let held_events: Vec<_> = core
+            .store
+            .events("one", 0, 200)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "group.refresh_blocked")
+            .collect();
+        assert_eq!(held_events.len(), 1);
+        assert_eq!(held_events[0].data["groupId"], failing);
+        assert!(!waker_fired(&waker));
+    }
+
+    #[test]
+    fn allow_fetch_false_never_calls_upstream_and_finishes_owned_jobs() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let calls = Arc::new(AtomicUsize::new(0));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(BatchServer {
+            calls: calls.clone(),
+            looked_up: Arc::new(Mutex::new(Vec::new())),
+            fail_room: None,
+            on_roster: None,
+        });
+
+        let k0 = queue_room(&core, "synthetic-local-0@chatroom", "local-0");
+        let k1 = queue_room(&core, "synthetic-local-1@chatroom", "local-1");
+        let k2 = queue_room(&core, "synthetic-local-2@chatroom", "local-2");
+        let mut owned = load_pending_job(&core, &k1);
+        owned.contact_revision = core
+            .group_revision("one", "synthetic-local-1@chatroom")
+            .unwrap();
+        owned.contact_raw = Some(room_contact_reply(
+            "synthetic-local-1@chatroom",
+            "Owned title",
+        ));
+        owned.roster_raw = Some(room_roster_reply());
+        owned.detail_raw = Some(room_detail_reply("Owned notice"));
+        core.save_incoming_group("one", &k1, &owned).unwrap();
+
+        assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            core.group_info("one", "synthetic-local-1@chatroom")
+                .unwrap()["name"],
+            "Owned title"
+        );
+        assert_eq!(core.store.incoming_group_refreshes("one").unwrap().len(), 2);
+        assert_eq!(load_pending_job(&core, &k0).attempts, 0);
+        assert_eq!(load_pending_job(&core, &k2).attempts, 0);
+    }
+
+    #[test]
+    fn supersede_handling_works_partway_through_a_batch() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let looked_up = Arc::new(Mutex::new(Vec::new()));
+        let core_slot: Arc<Mutex<Option<std::sync::Weak<Core>>>> = Arc::new(Mutex::new(None));
+        let core_for_hook = core_slot.clone();
+        let bumped = Arc::new(AtomicBool::new(false));
+        let bumped_hook = bumped.clone();
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(BatchServer {
+            calls: calls.clone(),
+            looked_up: looked_up.clone(),
+            fail_room: None,
+            on_roster: Some(Box::new(move |room| {
+                if room == "synthetic-sup-4@chatroom" && !bumped_hook.swap(true, Ordering::SeqCst) {
+                    if let Some(core) = core_for_hook
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                    {
+                        core.mark_group_revision("one", room, "concurrent-mid-fetch")
+                            .unwrap();
+                    }
+                }
+            })),
+        });
+        *core_slot.lock().unwrap() = Some(Arc::downgrade(&core));
+
+        // Part A: pre-superseded job partway through a batch archives once and refetches cleanly.
+        let _k0 = queue_room(&core, "synthetic-sup-0@chatroom", "sup-0");
+        let k1 = queue_room(&core, "synthetic-sup-1@chatroom", "sup-1");
+        let _k2 = queue_room(&core, "synthetic-sup-2@chatroom", "sup-2");
+        let mut stale = load_pending_job(&core, &k1);
+        stale.contact_revision = core
+            .group_revision("one", "synthetic-sup-1@chatroom")
+            .unwrap();
+        stale.contact_raw = Some(room_contact_reply(
+            "synthetic-sup-1@chatroom",
+            "Stale title",
+        ));
+        stale.roster_raw = Some(room_roster_reply());
+        stale.detail_raw = Some(room_detail_reply("Stale notice"));
+        core.save_incoming_group("one", &k1, &stale).unwrap();
+        core.mark_group_revision("one", "synthetic-sup-1@chatroom", "concurrent-before")
+            .unwrap();
+
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 3);
+        assert!(core
+            .store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            core.group_info("one", "synthetic-sup-1@chatroom").unwrap()["name"],
+            "Fresh synthetic-sup-1@chatroom"
+        );
+        let saved: Vec<_> = core
+            .store
+            .runtime_prefix("one", "incoming-group-superseded:", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(saved, [superseded(&k1, 1)]);
+
+        // Part B: mid-fetch supersede on group 4 does not block groups 3 and 5,
+        // keeps group 4 queued without overwriting, and refetches on the next pass.
+        let _k3 = queue_room(&core, "synthetic-sup-3@chatroom", "sup-3");
+        let k4 = queue_room(&core, "synthetic-sup-4@chatroom", "sup-4");
+        let _k5 = queue_room(&core, "synthetic-sup-5@chatroom", "sup-5");
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 2);
+        assert_eq!(core.store.incoming_group_refreshes("one").unwrap().len(), 1);
+        assert_eq!(
+            core.group_info("one", "synthetic-sup-4@chatroom").unwrap()["name"],
+            "Initial synthetic-sup-4@chatroom"
+        );
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 1);
+        assert!(core
+            .store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            core.group_info("one", "synthetic-sup-4@chatroom").unwrap()["name"],
+            "Fresh synthetic-sup-4@chatroom"
+        );
+        let saved: Vec<_> = core
+            .store
+            .runtime_prefix("one", "incoming-group-superseded:", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert!(saved.contains(&superseded(&k4, 2)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_with_permit_releases_account_lock_during_fetch_and_aborts_on_disconnect() {
+        let (began_tx, began_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        struct BlockingServer {
+            began: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl crate::upstream::Upstream for BlockingServer {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+                Ok(room_contact_reply(&ids[0], "Blocked title"))
+            }
+            fn lookup_room_raw(&self, _: &mut AccountState, _: &str, _: u32) -> Result<Vec<u8>> {
+                if let Some(tx) = self.began.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                self.resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok(room_roster_reply())
+            }
+            fn group_detail_raw(&self, _: &mut AccountState, _: &str) -> Result<Vec<u8>> {
+                Ok(room_detail_reply("Blocked notice"))
+            }
+        }
+
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(BlockingServer {
+            began: Mutex::new(Some(began_tx)),
+            resume: Mutex::new(resume_rx),
+        });
+        let job_key = queue_room(&core, "synthetic-lock@chatroom", "lock-0");
+        let guard = core.lock_account("one").await.unwrap();
+        let fence = core.session_fence("one").unwrap();
+        let worker = core.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let mut permit = crate::account_network::AccountNetworkPermit {
+                guard: Some(guard),
+                runtime: tokio::runtime::Handle::current(),
+            };
+            worker.refresh_incoming_groups_with_permit(
+                "one",
+                true,
+                Some(&mut permit),
+                Some(&fence),
+                Some(b"connected"),
+            )
+        });
+
+        began_rx.await.unwrap();
+        // Account lock must be released during blocking metadata RPCs.
+        let concurrent_guard =
+            tokio::time::timeout(std::time::Duration::from_secs(1), core.lock_account("one"))
+                .await
+                .unwrap()
+                .unwrap();
+        core.store
+            .put_runtime("one", "desired", b"disconnected")
+            .unwrap();
+        drop(concurrent_guard);
+
+        resume_tx.send(()).unwrap();
+        assert!(task.await.unwrap().is_err());
+        // Disconnecting mid-fetch must not hold the job or burn its retry budget.
+        let remaining = load_pending_job(&core, &job_key);
+        assert_eq!(remaining.attempts, 0);
+        assert!(core
+            .store
+            .runtime("one", &job_key.replace("pending:", "held:"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn retry_delay_tracks_earliest_backed_off_current_epoch_job() {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        assert_eq!(
+            core.next_incoming_group_retry_delay("one", 5).unwrap(),
+            None
+        );
+
+        // Ready jobs (not_before <= now) do not shorten the normal tick interval.
+        let k0 = queue_room(&core, "synthetic-delay-0@chatroom", "delay-0");
+        assert_eq!(
+            core.next_incoming_group_retry_delay("one", 5).unwrap(),
+            None
+        );
+
+        // Backed-off jobs clamp to [1, max_seconds].
+        let now = chrono::Utc::now().timestamp();
+        let mut far = load_pending_job(&core, &k0);
+        far.not_before = now + 20;
+        core.save_incoming_group("one", &k0, &far).unwrap();
+        assert_eq!(
+            core.next_incoming_group_retry_delay("one", 5).unwrap(),
+            Some(5)
+        );
+
+        let k1 = queue_room(&core, "synthetic-delay-1@chatroom", "delay-1");
+        let mut soon = load_pending_job(&core, &k1);
+        soon.not_before = now + 2;
+        core.save_incoming_group("one", &k1, &soon).unwrap();
+        let delay = core
+            .next_incoming_group_retry_delay("one", 5)
+            .unwrap()
+            .unwrap();
+        assert!((1..=2).contains(&delay), "unexpected delay: {delay}");
+
+        // Old-epoch backed-off jobs are ignored.
+        core.store
+            .put_runtime("one", "logout-epoch", b"later-epoch")
+            .unwrap();
+        assert_eq!(
+            core.next_incoming_group_retry_delay("one", 5).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn auth_rejected_propagates_without_holding_and_current_epoch_runs_before_old_epoch() {
+        struct RejectAfterFirst {
+            reject_room: String,
+        }
+        impl crate::upstream::Upstream for RejectAfterFirst {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+                if ids[0] == self.reject_room {
+                    return Err(wechat_protocol::ServiceRejected::new(
+                        wechat_protocol::Service::Contact,
+                        wechat_protocol::ServiceRejected::SESSION_REJECTED,
+                    )
+                    .into());
+                }
+                Ok(room_contact_reply(&ids[0], &format!("Fresh {}", ids[0])))
+            }
+            fn lookup_room_raw(&self, _: &mut AccountState, _: &str, _: u32) -> Result<Vec<u8>> {
+                Ok(room_roster_reply())
+            }
+            fn group_detail_raw(&self, _: &mut AccountState, room: &str) -> Result<Vec<u8>> {
+                Ok(room_detail_reply(&format!("Notice {room}")))
+            }
+        }
+
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let rejected_room = "synthetic-reject@chatroom";
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(RejectAfterFirst {
+            reject_room: rejected_room.into(),
+        });
+
+        // Queue an old-epoch job first (lower rowid), rotate logout-epoch, then
+        // queue a healthy current-epoch job and one that triggers -13 rejection.
+        let old_key = queue_room(&core, "synthetic-old-epoch@chatroom", "old-epoch-0");
+        core.store
+            .put_runtime("one", "logout-epoch", b"current-epoch")
+            .unwrap();
+        let healthy_room = "synthetic-current-ok@chatroom";
+        let _healthy_key = queue_room(&core, healthy_room, "current-ok");
+        let reject_key = queue_room(&core, rejected_room, "current-reject");
+
+        // Current-epoch healthy job runs before the older-rowid old-epoch job;
+        // then -13 propagates without burning attempts or moving the job to held:.
+        let err = core.refresh_incoming_groups("one", true).unwrap_err();
+        assert!(wechat_protocol::is_session_rejected(&err));
+        assert_eq!(
+            core.group_info("one", healthy_room).unwrap()["name"],
+            format!("Fresh {healthy_room}")
+        );
+        assert_eq!(load_pending_job(&core, &reject_key).attempts, 0);
+        assert_eq!(load_pending_job(&core, &old_key).attempts, 0);
+        assert!(core
+            .store
+            .runtime("one", &reject_key.replace("pending:", "held:"))
+            .unwrap()
+            .is_none());
+        assert!(!core
+            .store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "group.refresh_blocked"));
     }
 }
 

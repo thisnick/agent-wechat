@@ -566,6 +566,41 @@ impl Engine {
                 notify(&tx, &account, 1)?;
                 tx.commit()?;
             }
+            Control::SeedGroups { account, count } => {
+                ensure!((1..=200).contains(&count), "invalid_group_seed_count");
+                seed(&mut db, &account)?;
+                let tx = db.transaction()?;
+                let existing: u64 = tx.query_row(
+                    "SELECT COUNT(*) FROM groups WHERE account=?1",
+                    [&account],
+                    |r| r.get(0),
+                )?;
+                let members = serde_json::to_string(&["sim_mei", "sim_daniel"])?;
+                let mut rooms = Vec::with_capacity(count as usize);
+                for offset in 1..=u64::from(count) {
+                    let number = existing + offset;
+                    let room = format!("simseed_{number:04}@chatroom");
+                    let name = format!("Seeded group {number}");
+                    // Version 2 emits member (53) and detail (64) version signals so
+                    // the hub queues a background refresh after projecting the sync record.
+                    tx.execute(
+                        "INSERT INTO groups(account,room,name,members,version) VALUES(?1,?2,?3,?4,2)",
+                        params![account, room, name, members],
+                    )?;
+                    append(
+                        &tx,
+                        &account,
+                        &SyncCommand {
+                            id: 2,
+                            payload: groups::contact(&tx, &account, &room)?,
+                        },
+                    )?;
+                    rooms.push(room);
+                }
+                notify(&tx, &account, 1)?;
+                tx.commit()?;
+                return Ok(json!({"ok":true,"clock":clock(&db)?,"groups":rooms}));
+            }
             Control::MetadataFault {
                 account,
                 kind,
@@ -1847,5 +1882,77 @@ mod tests {
             .members
             .iter()
             .all(|member| member.room_display_name.is_none()));
+    }
+
+    #[test]
+    fn seed_groups_appends_versioned_contacts_and_serves_rosters_and_details() {
+        let scratch = wechat_platform::private_tempdir("simulator-seed-groups-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        assert!(engine
+            .control(Control::SeedGroups {
+                account: "personal".into(),
+                count: 0,
+            })
+            .is_err());
+        assert!(engine
+            .control(Control::SeedGroups {
+                account: "personal".into(),
+                count: 201,
+            })
+            .is_err());
+        let seeded = engine
+            .control(Control::SeedGroups {
+                account: "personal".into(),
+                count: 5,
+            })
+            .unwrap();
+        let rooms: Vec<String> = seeded["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(rooms.len(), 5);
+        let session = login(&engine, "personal");
+        let batch: SyncBatch = serde_json::from_value(
+            engine
+                .request(Request::Sync {
+                    session: session.clone(),
+                    cursor: vec![],
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        // 4 base contacts + 1 initial message + 5 seeded group ModContact records.
+        assert_eq!(batch.commands.len(), 10);
+        for room in &rooms {
+            let contact = refreshed_contact(&engine, &session, room);
+            let fields = p::decode(&contact.raw).unwrap();
+            assert_eq!(p::scalar(&fields, 53).unwrap(), 2);
+            assert_eq!(p::scalar(&fields, 64).unwrap(), 2);
+            let roster_raw: Vec<u8> = serde_json::from_value(
+                engine
+                    .request(Request::Room {
+                        session: session.clone(),
+                        room: room.clone(),
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            let roster = wechat_protocol::wire::decode_room(&roster_raw, room).unwrap();
+            assert_eq!(roster.version, 2);
+            assert_eq!(roster.members.len(), 3);
+            let detail_raw: Vec<u8> = serde_json::from_value(
+                engine
+                    .request(Request::GroupDetail {
+                        session: session.clone(),
+                        room: room.clone(),
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            let detail = wechat_protocol::decode_group_detail(&detail_raw, room).unwrap();
+            assert_eq!(detail.version, 2);
+        }
     }
 }

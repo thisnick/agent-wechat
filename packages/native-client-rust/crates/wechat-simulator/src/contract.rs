@@ -274,6 +274,13 @@ pub enum Control {
         #[serde(default)]
         announcement: Option<String>,
     },
+    /// Seed synthetic joined groups with versioned contact records in the
+    /// account's sync stream so the hub must fetch their member lists after
+    /// login.
+    SeedGroups {
+        account: String,
+        count: u32,
+    },
     /// The account's next `count` valid lookups of one metadata kind, for any
     /// group or contact, fail as if the network dropped them. `count` 0 clears
     /// the fault. The state reports what remains.
