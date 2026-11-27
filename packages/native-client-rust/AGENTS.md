@@ -58,4 +58,5 @@ and reason. Retention reads lifetimes from that list.
 - `scripts/smoke/soak.mjs` repeats activity against the simulator and fails on a
   key of no kind, queued work that never drains, per-entity notes that keep
   growing, traffic notes that grow faster over time, leftover admission copies,
-  or requests while idle. Run it after changing sync, refresh or retention code.
+  or requests while idle. Let CI run it on pull requests and nightly
+  (`soak.yml`) instead of running it locally unless reproducing a soak failure.

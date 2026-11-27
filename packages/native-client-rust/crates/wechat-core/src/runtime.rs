@@ -113,6 +113,39 @@ struct TickOutcome {
     retry_delay: Option<u64>,
 }
 
+fn poll_heartbeat_due(next_poll_heartbeat: Option<Instant>, now: Instant) -> bool {
+    next_poll_heartbeat.is_none_or(|deadline| now >= deadline)
+}
+
+fn next_worker_tick_schedule(
+    outcome: TickOutcome,
+    next_poll_heartbeat: Option<Instant>,
+    now: Instant,
+) -> (u64, Option<Instant>) {
+    if outcome.push_connected {
+        return (outcome.retry_delay.map_or(5, |retry| retry.min(5)), None);
+    }
+    if let Some(interval) = outcome.heartbeat_interval {
+        let next_deadline = now + Duration::from_secs(interval);
+        let delay = outcome
+            .retry_delay
+            .map_or(interval, |retry| retry.min(interval));
+        return (delay, Some(next_deadline));
+    }
+    let remaining = next_poll_heartbeat
+        .map(|deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .as_secs()
+                .clamp(1, 30)
+        })
+        .unwrap_or(5);
+    let delay = outcome
+        .retry_delay
+        .map_or(remaining, |retry| retry.min(remaining));
+    (delay, next_poll_heartbeat)
+}
+
 pub struct Core {
     pub store: Arc<Store>,
     pub(crate) shared: Arc<CoreShared>,
@@ -2434,34 +2467,19 @@ impl Core {
                     }
                     let _ = core.recover_read_projections(&account.id).await;
                     let allow_poll_heartbeat =
-                        next_poll_heartbeat.is_none_or(|deadline| Instant::now() >= deadline);
+                        poll_heartbeat_due(next_poll_heartbeat, Instant::now());
                     match core
                         .tick_with_poll_heartbeat(&account.id, allow_poll_heartbeat)
                         .await
                     {
                         Ok(outcome) => {
-                            if outcome.push_connected {
-                                next_poll_heartbeat = None;
-                                delay = outcome.retry_delay.map_or(5, |retry| retry.min(5));
-                            } else if let Some(interval) = outcome.heartbeat_interval {
-                                next_poll_heartbeat =
-                                    Some(Instant::now() + Duration::from_secs(interval));
-                                delay = outcome
-                                    .retry_delay
-                                    .map_or(interval, |retry| retry.min(interval));
-                            } else {
-                                let remaining = next_poll_heartbeat
-                                    .map(|deadline| {
-                                        deadline
-                                            .saturating_duration_since(Instant::now())
-                                            .as_secs()
-                                            .clamp(1, 30)
-                                    })
-                                    .unwrap_or(5);
-                                delay = outcome
-                                    .retry_delay
-                                    .map_or(remaining, |retry| retry.min(remaining));
-                            }
+                            let (next_delay, next_deadline) = next_worker_tick_schedule(
+                                outcome,
+                                next_poll_heartbeat,
+                                Instant::now(),
+                            );
+                            delay = next_delay;
+                            next_poll_heartbeat = next_deadline;
                         }
                         Err(error) => {
                             let code = if authentication_required(&error) {
@@ -4977,5 +4995,144 @@ pub(crate) mod tests {
         assert_eq!(cancelled.state, "cancelled");
         assert!(store.runtime("one", &key).unwrap().is_none());
         assert!(core.qr("one", &op.id).is_err());
+    }
+    #[test]
+    fn worker_tick_schedule_covers_push_heartbeat_and_early_wake_branches() {
+        let t0 = Instant::now();
+        // No deadline yet allows an initial polling heartbeat.
+        assert!(poll_heartbeat_due(None, t0));
+
+        // Polling heartbeat arms the next deadline and honors shorter retry delays.
+        let (delay, deadline) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: Some(30),
+                retry_delay: None,
+            },
+            None,
+            t0,
+        );
+        assert_eq!(delay, 30);
+        assert_eq!(deadline, Some(t0 + Duration::from_secs(30)));
+        assert!(!poll_heartbeat_due(deadline, t0 + Duration::from_secs(10)));
+        assert!(poll_heartbeat_due(deadline, t0 + Duration::from_secs(30)));
+
+        let (delay, deadline_with_retry) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: Some(30),
+                retry_delay: Some(10),
+            },
+            None,
+            t0,
+        );
+        assert_eq!(delay, 10);
+        assert_eq!(deadline_with_retry, Some(t0 + Duration::from_secs(30)));
+
+        // Early wake before the deadline keeps the deadline and sleeps the smaller
+        // of remaining heartbeat time or retry delay (without overshooting deadline).
+        let (delay, kept) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: None,
+                retry_delay: None,
+            },
+            deadline,
+            t0 + Duration::from_secs(12),
+        );
+        assert_eq!(delay, 18);
+        assert_eq!(kept, deadline);
+
+        let (delay, kept) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: None,
+                retry_delay: Some(5),
+            },
+            deadline,
+            t0 + Duration::from_secs(12),
+        );
+        assert_eq!(delay, 5);
+        assert_eq!(kept, deadline);
+
+        let (delay, kept) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: None,
+                retry_delay: Some(25),
+            },
+            deadline,
+            t0 + Duration::from_secs(20),
+        );
+        assert_eq!(delay, 10);
+        assert_eq!(kept, deadline);
+
+        // Sub-second remaining time clamps to 1s so the loop never busy-spins, and
+        // once elapsed the next tick is allowed to send a polling heartbeat again.
+        let (delay, kept) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: None,
+                retry_delay: None,
+            },
+            deadline,
+            t0 + Duration::from_millis(29_500),
+        );
+        assert_eq!(delay, 1);
+        assert_eq!(kept, deadline);
+        assert!(poll_heartbeat_due(
+            kept,
+            t0 + Duration::from_millis(29_500) + Duration::from_secs(delay)
+        ));
+
+        // Early wake with no armed deadline falls back to 5s.
+        let (delay, kept) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: false,
+                heartbeat_interval: None,
+                retry_delay: None,
+            },
+            None,
+            t0,
+        );
+        assert_eq!(delay, 5);
+        assert_eq!(kept, None);
+
+        // Push-connected ticks clear any polling deadline and clamp retry delay to 5s.
+        let (delay, cleared) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: true,
+                heartbeat_interval: None,
+                retry_delay: None,
+            },
+            deadline,
+            t0 + Duration::from_secs(5),
+        );
+        assert_eq!(delay, 5);
+        assert_eq!(cleared, None);
+
+        let (delay, cleared) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: true,
+                heartbeat_interval: None,
+                retry_delay: Some(2),
+            },
+            deadline,
+            t0 + Duration::from_secs(5),
+        );
+        assert_eq!(delay, 2);
+        assert_eq!(cleared, None);
+
+        let (delay, cleared) = next_worker_tick_schedule(
+            TickOutcome {
+                push_connected: true,
+                heartbeat_interval: None,
+                retry_delay: Some(10),
+            },
+            deadline,
+            t0 + Duration::from_secs(5),
+        );
+        assert_eq!(delay, 5);
+        assert_eq!(cleared, None);
     }
 }
