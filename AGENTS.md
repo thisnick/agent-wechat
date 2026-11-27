@@ -157,6 +157,6 @@ bash scripts/generate-types.sh --check
 pnpm interfaces --check
 ```
 
-Use `pnpm generate-types` after changing exported Rust types. CI runs tests and builds independently on native x64/ARM64 Linux workers. Prefer CI or an already configured remote builder for release/image builds; do not require local cross-compilers. Build images with `pnpm build:image:amd64` or `pnpm build:image:arm64` on a suitable worker. Builds never authorize deployment. For end-to-end changes, test the built image and CLI against an isolated container in addition to unit tests. The public CLI entry point is `wx`; `pnpm cli` runs the local build.
+Use `pnpm generate-types` after changing exported Rust types. CI runs tests and builds independently on native x64/ARM64 Linux workers. Prefer CI or an already configured remote builder for release/image builds; do not require local cross-compilers. Build images with `pnpm build:image:amd64` or `pnpm build:image:arm64` on a suitable worker. Builds never authorize deployment. For end-to-end changes, test the built image and CLI against an isolated container in addition to unit tests. The public CLI entry point is `wx`; `pnpm cli` runs the local build. To offload builds or tests to a Boat sandbox, see `scripts/boat/boat.md`.
 
 For user-facing changes, add a `.changeset/*.md` file with the affected package and appropriate patch/minor/major bump. Keep package docs and README commands aligned with the shipped CLI. Do not document stubs, unverified behavior, or planned features as working.
