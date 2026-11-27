@@ -102,9 +102,10 @@ impl Core {
                 // Events are the daemon's only account log; a no-op pass stays
                 // silent, and each distinct failure reason is recorded once.
                 let reason = error.to_string();
+                let digest = format!("{:x}", Sha256::digest(reason.as_bytes()));
                 let _ = self.store.append_event_once(
                     account,
-                    &format!("profile-wal-conversion-skipped:{reason}"),
+                    &format!("profile-wal-conversion-skipped:{digest}"),
                     "profile.wal-conversion-skipped",
                     &json!({"reason":reason}),
                 );
@@ -443,12 +444,35 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn conversion_waits_out_a_busy_account_lock_without_touching_the_profile() {
-        let (_temp, core, _store) = created_profile().await;
+        let (_temp, core, store) = created_profile().await;
         let (location, keys) = core.profile_location_keys("one").unwrap();
         set_mode(&location, &keys, "DELETE");
         let guard = core.lock_account("one").await.unwrap();
         core.recover_managed_profiles().unwrap();
+        core.recover_managed_profiles().unwrap();
         assert!(modes(&location, &keys).iter().all(|m| m == "delete"));
+        let skipped = store
+            .runtime_prefix("one", "event:profile-wal-conversion-skipped:", 10)
+            .unwrap();
+        let expected_key = format!(
+            "event:profile-wal-conversion-skipped:{:x}",
+            Sha256::digest(b"account_busy")
+        );
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, expected_key);
+        assert!(matches!(
+            wechat_store::runtime_keys::runtime_kind(&skipped[0].0),
+            wechat_store::runtime_keys::RuntimeLookup::Kind(_)
+        ));
+        assert_eq!(
+            store
+                .events("one", 0, 200)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "profile.wal-conversion-skipped")
+                .count(),
+            1
+        );
         drop(guard);
         core.recover_managed_profiles().unwrap();
         assert!(modes(&location, &keys).iter().all(|m| m == "wal"));

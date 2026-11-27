@@ -45,8 +45,10 @@ If you delete an attachment's file, fetching that attachment returns `media_not_
 | Sticker jobs (packs, Saved stickers, sends, pack downloads) | unfinished, or not yet in the profile, plus a day | a short receipt; the newest five downloads of each pack keep what adding the pack again needs to reuse the file |
 | Voice note audio | until the profile holds the same audio | read from the profile |
 | Group and contact changes, recalls | unfinished, or not yet in the profile, plus a day | a short receipt, for 365 days |
-| Duplicate checks for messages and events | 30 days | removed |
-| Raw WeChat replies kept for troubleshooting | 7 days | removed |
+| Sign-in QR images | the sign-in attempt is running | removed when sign-in finishes or is cancelled, or after a restart |
+| Sign-in idempotency keys (`POST /login-attempts`) | 7 days, or while the sign-in attempt is running | removed; reusing the same `Idempotency-Key` later starts a new sign-in |
+| Duplicate checks and sync progress markers (messages, contacts, groups, events) | 30 days, or while the related update is unfinished | removed |
+| Raw WeChat replies and applied sync commands | 7 days, or while their batch or update is unfinished | removed; skipped commands and recall commands stay |
 | Attachments never downloaded, except voice notes | 7 days, or while a download is queued | removed; listing the message's media again brings them back |
 | Sticker store previews (pack icons, covers and sticker thumbnails) | a day, or while a download is queued or running | removed; browsing the store again lists new ones |
 

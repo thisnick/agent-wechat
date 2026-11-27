@@ -580,10 +580,10 @@ impl Core {
         let mut rejected_slots = 0;
         let mut apply = |record: &ContactRecord, exact_lookup: bool| -> Result<()> {
             self.invalidate_contact_pinning(account, record, id)?;
-            ensure!(
-                !self.contact_pin_superseded(account, record, id)?,
-                "contact_pin_projection_superseded"
-            );
+            if self.contact_pin_superseded(account, record, id)? {
+                self.store.discard_metadata(account, id)?;
+                bail!("contact_pin_projection_superseded");
+            }
             self.invalidate_contact_privacy(account, record, id)?;
             self.invalidate_contact_notifications(account, record, id)?;
             let mut patch = self.upstream.contact_patch(record)?;
@@ -648,10 +648,11 @@ impl Core {
         let kind = match receipt.body {
             ReceiptBody::Contacts { requested, reply } => {
                 for record in &reply.value.contacts {
-                    let index = requested
-                        .iter()
-                        .position(|id| id == &record.username)
-                        .context("unrequested_metadata_identity")?;
+                    let Some(index) = requested.iter().position(|name| name == &record.username)
+                    else {
+                        self.store.discard_metadata(account, id)?;
+                        bail!("unrequested_metadata_identity");
+                    };
                     if reply.value.results.is_empty() || reply.value.results.get(index) == Some(&0)
                     {
                         apply(record, true)?;
@@ -709,10 +710,10 @@ impl Core {
                 profile_revision,
             } => {
                 let current = self.group_revision(account, &reply.value.room_id)?;
-                ensure!(
-                    current == profile_revision || current.as_deref() == Some(id.as_bytes()),
-                    "group_projection_superseded"
-                );
+                if current != profile_revision && current.as_deref() != Some(id.as_bytes()) {
+                    self.store.discard_metadata(account, id)?;
+                    bail!("group_projection_superseded");
+                }
                 self.project_metadata_roster(&location, &keys, &reply, &options, complete)?;
                 self.mark_group_revision(account, &reply.value.room_id, id)?;
                 self.store.append_event_once(account,&format!("group-members:{id}"),"group.updated",&json!({"groupId":reply.value.room_id,"source":"metadata_refresh","membersRefreshed":true,"profileProjection":"partial"}))?;
@@ -725,10 +726,10 @@ impl Core {
                 profile_revision,
             } => {
                 let current = self.group_revision(account, &group_id)?;
-                ensure!(
-                    current == profile_revision || current.as_deref() == Some(id.as_bytes()),
-                    "group_projection_superseded"
-                );
+                if current != profile_revision && current.as_deref() != Some(id.as_bytes()) {
+                    self.store.discard_metadata(account, id)?;
+                    bail!("group_projection_superseded");
+                }
                 self.project_group_detail(account, &group_id, &raw, 0, id)?;
                 self.mark_group_revision(account, &group_id, id)?;
                 self.store.append_event_once(account,&format!("group-detail:{id}"),"group.updated",&json!({"groupId":group_id,"source":"metadata_refresh","profileProjection":"partial"}))?;
@@ -2062,12 +2063,152 @@ mod tests {
         );
         assert_eq!(direct_pinned(&core), true);
         assert_eq!(saved_sort(&core), SqlValue::Integer("400".into()));
+        // A permanently superseded receipt is retired instead of looping in recovery.
+        assert!(core.store.pending_metadata("one").unwrap().is_empty());
+        assert_eq!(core.recover_metadata("one").unwrap(), 0);
+        let step = core
+            .store
+            .retention_step("one", wechat_store::unix_seconds(), 0)
+            .unwrap();
+        assert!(step.runtime_removed >= 1);
         assert!(core
             .store
-            .pending_metadata("one")
+            .runtime("one", "metadata-receipt:pin-stale")
             .unwrap()
-            .iter()
-            .any(|(id, _)| id == "pin-stale"));
+            .is_none());
+    }
+    #[test]
+    fn superseded_group_metadata_receipts_retire_instead_of_looping_in_recovery() {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let room = "synthetic@chatroom";
+        let prior = core.group_revision("one", room).unwrap();
+        let stage = |id: &str, body: ReceiptBody| {
+            let receipt = MetadataReceipt {
+                body,
+                received_at: Some(100),
+            };
+            core.store
+                .stage_metadata(
+                    "one",
+                    id,
+                    &core
+                        .vault
+                        .seal(
+                            "one",
+                            &format!("metadata:{id}"),
+                            &serde_json::to_vec(&receipt).unwrap(),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+        };
+        stage(
+            "stale-roster",
+            ReceiptBody::Roster {
+                reply: MetadataReply {
+                    value: RoomRoster {
+                        room_id: room.into(),
+                        version: 1,
+                        owner: None,
+                        members: vec![],
+                        full_member_ids: None,
+                        administrator_ids: None,
+                    },
+                    raw: vec![],
+                },
+                complete: false,
+                profile_revision: prior.clone(),
+            },
+        );
+        stage(
+            "stale-detail",
+            ReceiptBody::GroupDetail {
+                group_id: room.into(),
+                raw: vec![],
+                profile_revision: prior,
+            },
+        );
+        // A newer group update moves the revision forward.
+        core.mark_group_revision("one", room, "newer-group-change")
+            .unwrap();
+        let events_before = core.store.events("one", 0, 200).unwrap().len();
+        assert_eq!(core.recover_metadata("one").unwrap(), 0);
+        assert!(core.store.pending_metadata("one").unwrap().is_empty());
+        assert_eq!(
+            core.store.events("one", 0, 200).unwrap().len(),
+            events_before
+        );
+        let step = core
+            .store
+            .retention_step("one", wechat_store::unix_seconds(), 0)
+            .unwrap();
+        assert_eq!(step.runtime_removed, 2);
+        assert!(core
+            .store
+            .runtime("one", "metadata-receipt:stale-roster")
+            .unwrap()
+            .is_none());
+        assert!(core
+            .store
+            .runtime("one", "metadata-receipt:stale-detail")
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn unrequested_contact_metadata_receipt_retires_instead_of_looping_in_recovery() {
+        let (_temp, core) = pin_fixture();
+        let record = wechat_protocol::wire::decode_contact_record(
+            &direct_contact(u64::from(u32::MAX), 259, false).payload,
+        )
+        .unwrap();
+        let receipt = MetadataReceipt {
+            body: ReceiptBody::Contacts {
+                requested: vec!["other".into()],
+                reply: MetadataReply {
+                    value: ContactLookup {
+                        contacts: vec![record],
+                        results: vec![0],
+                    },
+                    raw: vec![],
+                },
+            },
+            received_at: Some(100),
+        };
+        core.store
+            .stage_metadata(
+                "one",
+                "unrequested-contact",
+                &core
+                    .vault
+                    .seal(
+                        "one",
+                        "metadata:unrequested-contact",
+                        &serde_json::to_vec(&receipt).unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            core.apply_metadata_receipt("one", "unrequested-contact", false)
+                .unwrap_err()
+                .to_string(),
+            "unrequested_metadata_identity"
+        );
+        assert!(core.store.pending_metadata("one").unwrap().is_empty());
+        assert_eq!(core.recover_metadata("one").unwrap(), 0);
+        assert_eq!(
+            core.store
+                .retention_step("one", wechat_store::unix_seconds(), 0)
+                .unwrap()
+                .runtime_removed,
+            1
+        );
+        assert!(core
+            .store
+            .runtime("one", "metadata-receipt:unrequested-contact")
+            .unwrap()
+            .is_none());
     }
     #[test]
     fn received_direct_mute_is_saved_before_event_and_replay_preserves_newer_state() {
