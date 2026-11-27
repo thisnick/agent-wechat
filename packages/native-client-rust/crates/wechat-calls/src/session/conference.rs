@@ -505,10 +505,11 @@ impl ConferenceSession {
             &reply,
         )?;
         let fields = fields(&reply)?;
+        // Proto3 omits zero-valued scalar fields (`own_member == 0` on the creator).
         ensure!(
             number(&fields, 1, None)? == identity.room
                 && number(&fields, 2, None)? == identity.room_key
-                && number(&fields, 3, None)? == u64::from(identity.own_member),
+                && number(&fields, 3, Some(0))? == u64::from(identity.own_member),
             "Conference microphone response context mismatch"
         );
         if let Some(av) = p::optional_data(&fields, 4)? {

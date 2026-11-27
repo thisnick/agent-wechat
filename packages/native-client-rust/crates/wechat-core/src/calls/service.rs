@@ -540,6 +540,13 @@ impl BackendSink {
             .ok_or_else(|| error(CallErrorCode::Closed))?
             .peer_control(&self.ticket, CallControl::Camera { enabled })
     }
+    /// Publish a verified peer signaling status code for this exact direct call/authority.
+    pub async fn peer_status(&self, code: u32) -> Result<()> {
+        self.service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?
+            .peer_status(&self.ticket, CallParticipantStatus::from_code(code))
+    }
     pub async fn uncertain(&self) -> Result<()> {
         self.service
             .upgrade()
@@ -626,6 +633,7 @@ struct LiveCall {
     sample_clock: u64,
     muted: bool,
     controls: Vec<CallParticipantControl>,
+    last_peer_status: Option<CallParticipantStatus>,
     cancellation_requested: bool,
 }
 struct MediaPeer {
@@ -1391,6 +1399,7 @@ impl CallService {
             state: CallState::Offered,
             participants: vec![],
             controls: vec![],
+            last_peer_status: None,
             revision: 1,
             send_generation: 1,
             receive_generation: 1,
@@ -2070,6 +2079,7 @@ impl CallService {
                         state: CallState::Dialing,
                         participants: vec![],
                         controls: vec![],
+                        last_peer_status: None,
                         revision: 1,
                         send_generation: 1,
                         receive_generation: 1,
@@ -2500,6 +2510,38 @@ impl CallService {
             call_id: call.identity.call_id().into(),
             participant_id: call.peer.clone(),
             control,
+        };
+        let authority = call.authority.clone();
+        let failed: Vec<_> = s
+            .clients
+            .iter()
+            .filter(|(_, peer)| peer.authority == authority)
+            .filter_map(|(id, peer)| {
+                peer.events
+                    .try_send(event.clone())
+                    .err()
+                    .map(|_| id.clone())
+            })
+            .collect();
+        for id in failed {
+            self.drop_client(&mut s, &id);
+        }
+        Ok(())
+    }
+    fn peer_status(&self, ticket: &Ticket, status: CallParticipantStatus) -> Result<()> {
+        let mut s = self.lock()?;
+        if !self.ticket_current(&s, ticket) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let call = s.call.as_mut().expect("current call");
+        if call.peer.ends_with("@chatroom") || call.last_peer_status == Some(status) {
+            return Ok(());
+        }
+        call.last_peer_status = Some(status);
+        let event = CallEvent::PeerStatus {
+            call_id: call.identity.call_id().into(),
+            participant_id: call.peer.clone(),
+            status,
         };
         let authority = call.authority.clone();
         let failed: Vec<_> = s

@@ -1732,3 +1732,78 @@ async fn attach_media_replays_pre_attach_video_gop_and_requests_keyframe_on_gap(
         VIDEO_RECEIVE_TRACK_BASE
     );
 }
+
+#[tokio::test]
+async fn direct_call_peer_status_emits_deduplicated_events_without_mutating_call_view() {
+    let (backend, mut attempts) = FakeBackend::new();
+    let service = Arc::new(CallService::new(backend));
+    let mut owner = ready(&service, "a", "owner").await;
+    let mut observer = service.connect("a", "observer", true).await.unwrap();
+    let _ = observer.events.recv().await;
+
+    service
+        .command(&owner.client_id, dial("dial-peer-status"))
+        .await
+        .unwrap();
+    let (status, call_id, _, _) = result(&mut owner, "dial-peer-status").await;
+    assert_eq!(status, CallCommandStatus::Accepted);
+    let call_id = call_id.unwrap();
+    let attempt = next_attempt(&mut attempts).await;
+
+    // Emit acknowledged (3), repeat 3 (deduplicated), then joined (1), then left (4).
+    attempt.sink.peer_status(3).await.unwrap();
+    attempt.sink.peer_status(3).await.unwrap();
+    attempt.sink.peer_status(1).await.unwrap();
+    attempt.sink.peer_status(4).await.unwrap();
+
+    async fn collect_peer_statuses(
+        events: &mut tokio::sync::mpsc::Receiver<CallEvent>,
+    ) -> Vec<(String, String, u32, CallParticipantStatusKind)> {
+        let mut seen = Vec::new();
+        while seen.len() < 3 {
+            match tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                CallEvent::PeerStatus {
+                    call_id: id,
+                    participant_id,
+                    status,
+                } => seen.push((id, participant_id, status.code, status.kind)),
+                _ => continue,
+            }
+        }
+        seen
+    }
+
+    let owner_seen = collect_peer_statuses(&mut owner.events).await;
+    let observer_seen = collect_peer_statuses(&mut observer.events).await;
+    let expected = vec![
+        (
+            call_id.clone(),
+            "synthetic-contact".into(),
+            3,
+            CallParticipantStatusKind::Acknowledged,
+        ),
+        (
+            call_id.clone(),
+            "synthetic-contact".into(),
+            1,
+            CallParticipantStatusKind::Joined,
+        ),
+        (
+            call_id.clone(),
+            "synthetic-contact".into(),
+            4,
+            CallParticipantStatusKind::Left,
+        ),
+    ];
+    assert_eq!(owner_seen, expected);
+    assert_eq!(observer_seen, expected);
+
+    // CallView remains unchanged (no new serialized fields added).
+    let snap = service.current("a", "observer").await.unwrap();
+    let view_json = serde_json::to_value(snap.current_call.unwrap()).unwrap();
+    assert!(view_json.get("peerStatus").is_none());
+}

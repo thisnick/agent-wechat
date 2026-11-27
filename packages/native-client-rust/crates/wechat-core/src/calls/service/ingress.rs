@@ -357,6 +357,7 @@ impl CallService {
             muted: false,
             participants: vec![],
             controls: vec![],
+            last_peer_status: None,
             cancellation_requested: false,
         });
         self.broadcast(&mut s);

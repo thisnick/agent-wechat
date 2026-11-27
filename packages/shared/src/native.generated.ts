@@ -1028,7 +1028,19 @@ participantId: string,
 /**
  * The control and its new value.
  */
-control: CallControl, } | { "type": "calls.availability",
+control: CallControl, } | { "type": "call.peer_status",
+/**
+ * ID of the direct call.
+ */
+callId: string,
+/**
+ * Contact ID of the other party.
+ */
+participantId: string,
+/**
+ * Signaling status reported by the service.
+ */
+status: CallParticipantStatus, } | { "type": "calls.availability",
 /**
  * The new availability.
  */

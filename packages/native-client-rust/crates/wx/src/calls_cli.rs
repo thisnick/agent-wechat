@@ -43,6 +43,9 @@ mod levels;
 #[path = "calls_cli_video.rs"]
 mod video;
 
+#[path = "calls_cli_session.rs"]
+pub(crate) mod session;
+
 #[derive(Subcommand)]
 pub(crate) enum CallsCommand {
     /// List local microphone, speaker and camera devices without connecting to a daemon.
@@ -78,6 +81,11 @@ pub(crate) enum CallsCommand {
         audio: AudioOptions,
         #[command(flatten)]
         media: IncomingMediaOptions,
+    },
+    /// Run and drive headless call sessions with synthetic media, event waits, recording and inspection.
+    Session {
+        #[command(subcommand)]
+        command: Option<session::SessionCommand>,
     },
 }
 
@@ -163,7 +171,13 @@ pub(crate) struct IncomingMediaOptions {
     muted: bool,
 }
 
-pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
+pub(crate) async fn run(
+    remote: &Remote,
+    spawn: &session::SessionSpawnContext,
+    command: CallsCommand,
+    json: bool,
+    parent: Option<crate::parent_watch::ParentWatch>,
+) -> Result<()> {
     debug_call("session", format_args!("debug enabled"));
     match command {
         CallsCommand::Devices => devices(json).await,
@@ -172,6 +186,10 @@ pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
             super::Output::new(json).print(&value)
         }
         CallsCommand::Monitor { .. } if json => observe(remote).await,
+        CallsCommand::Session { command: Some(cmd) } => {
+            session::run_with_daemon(remote, spawn, cmd, json, parent).await
+        }
+        CallsCommand::Session { command: None } => anyhow::bail!("choose a session subcommand"),
         command => audio::run(remote, command, json).await,
     }
 }

@@ -341,6 +341,9 @@ pub(super) fn run(
         }
         Ok(())
     })();
+    if let ControlAdmission::Owner(sink) = &transport.admission {
+        let _ = transport.runtime.block_on(sink.ending());
+    }
     stop.store(true, Ordering::Release);
     transport.worker.media_stop.store(true, Ordering::Release);
     let mut report = thread

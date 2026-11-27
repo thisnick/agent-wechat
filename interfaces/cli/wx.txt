@@ -122,6 +122,165 @@ wx calls monitor --camera-off | switch | Start video calls with the camera turne
 wx calls monitor --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
 wx calls monitor --muted | switch | Start with the microphone muted; toggle with m before or during the call
 wx calls monitor --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls session | - | Run and drive headless call sessions with synthetic media, event waits, recording and inspection
+wx calls session answer | - | Answer the current incoming direct call offer in a running session
+wx calls session answer --audio | takes <AUDIO> | Override the outgoing audio source for this call
+wx calls session answer --camera-off | switch | Start a video call with the camera turned off
+wx calls session answer --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session answer --muted | switch | Start with the microphone muted
+wx calls session answer --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session answer --video-source | takes <VIDEO_SOURCE> | Override the outgoing video source for this call
+wx calls session answer <CALL_ID> | position 1 | Incoming call ID to answer; omit to answer the current offer
+wx calls session audio | - | Switch the outgoing audio source (silence, tone:..., file:..., device[:ID]) live
+wx calls session audio --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session audio --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session audio <SOURCE> | position 1, required | Outgoing audio source specification
+wx calls session camera | - | Turn the local camera on or off during a video call
+wx calls session camera --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session camera --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session camera <STATE> | position 1, required, values on|off | Desired camera state: on or off
+wx calls session clear-audio | - | Clear queued outgoing audio and advance the send audio track generation
+wx calls session clear-audio --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session clear-audio --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session conference | - | Start, join, or invite contacts into a group conference from a running session
+wx calls session conference invite | - | Invite one or more contacts into the session's active conference
+wx calls session conference invite --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session conference invite --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session conference invite <CONTACTS> | position 1, required, repeatable | Contact IDs to invite into the active conference
+wx calls session conference join | - | Join a current conference invitation for a group from a running session
+wx calls session conference join --audio | takes <AUDIO> | Override the outgoing audio source for this call
+wx calls session conference join --camera-off | switch | Join with the camera turned off even when --video is passed
+wx calls session conference join --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session conference join --invitation-id | takes <INVITATION_ID> | Exact invitation ID when more than one invitation exists for the group
+wx calls session conference join --muted | switch | Start with the microphone muted
+wx calls session conference join --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session conference join --video | switch | Enable video when joining the conference
+wx calls session conference join --video-source | takes <VIDEO_SOURCE> | Override the outgoing video source for this call
+wx calls session conference join <GROUP> | position 1, required | Group ID, ending in @chatroom, with an active conference invitation
+wx calls session conference start | - | Start a group voice or video conference from a running session
+wx calls session conference start --audio | takes <AUDIO> | Override the outgoing audio source for this call
+wx calls session conference start --camera-off | switch | Start a video conference with the camera turned off
+wx calls session conference start --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session conference start --invite | required, takes <INVITEES>, repeatable | Contact ID to invite; repeat for several
+wx calls session conference start --muted | switch | Start with the microphone muted
+wx calls session conference start --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session conference start --video | switch | Start a video conference instead of voice-only
+wx calls session conference start --video-source | takes <VIDEO_SOURCE> | Override the outgoing video source for this call
+wx calls session conference start <GROUP> | position 1, required | Group ID, ending in @chatroom, to start the conference in
+wx calls session dial | - | Place a direct voice or video call from a running session
+wx calls session dial --audio | takes <AUDIO> | Override the outgoing audio source for this call
+wx calls session dial --camera-off | switch | Start a video call with the camera turned off
+wx calls session dial --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session dial --muted | switch | Start with the microphone muted
+wx calls session dial --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session dial --video | switch | Start a video call instead of a voice call
+wx calls session dial --video-source | takes <VIDEO_SOURCE> | Override the outgoing video source for this call
+wx calls session dial <CONTACT> | position 1, required | Contact ID to call, from wx contacts list
+wx calls session events | - | Read buffered session events or follow live events as NDJSON
+wx calls session events --after | takes <AFTER>, default 0 | Return only events with sequence number strictly greater than this value
+wx calls session events --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session events --follow | switch | Keep streaming new events as NDJSON lines until interrupted or the session stops
+wx calls session events --limit | takes <LIMIT>, default 200 | Maximum number of buffered events to return when not following
+wx calls session events --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session hangup | - | Cancel or hang up the session's active owned call and wait for terminal cleanup
+wx calls session hangup --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session hangup --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session keyframe | - | Request a remote video keyframe from the daemon
+wx calls session keyframe --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session keyframe --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session keyframe --track | takes <TRACK> | Receive video track ID; omit to request on every active receive video track
+wx calls session list | - | List local call sessions and report whether each is running
+wx calls session list --dir | takes <DIR> | Parent directory containing named session folders; defaults to the standard runtime folder
+wx calls session mute | - | Mute the local microphone and notify the peer or conference
+wx calls session mute --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session mute --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session ready | - | Enable or disable readiness for incoming offers and conference invitations
+wx calls session ready --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session ready --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session ready <STATE> | position 1, required, values on|off | Desired readiness state: on or off
+wx calls session record | - | Start or stop recording call audio and video streams
+wx calls session record start | - | Start recording TX/RX WAV audio and RX video for the active call
+wx calls session record start --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session record start --out | takes <OUT> | Output directory for recordings; defaults to a timestamped folder inside the session directory
+wx calls session record start --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session record stop | - | Stop recording and finalize WAV headers, video remuxing and manifest.json
+wx calls session record stop --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session record stop --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session reject | - | Reject the current incoming direct call offer in a running session
+wx calls session reject --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session reject --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session reject <CALL_ID> | position 1 | Incoming call ID to reject; omit to reject the current offer
+wx calls session run | - | Run a headless call session in the foreground, optionally driven over NDJSON stdin/stdout
+wx calls session run --audio | takes <AUDIO>, default silence | Outgoing audio source: silence, tone[:HZ[:AMP[:ON_MS:OFF_MS]]], file:PATH[:loop|:once], or device[:ID]
+wx calls session run --dir | takes <DIR> | Explicit private directory for this session's socket, event log, snapshots and recordings
+wx calls session run --exit-with-parent | switch | Stop gracefully when the parent process that started this session exits
+wx calls session run --idle-timeout | takes <IDLE_TIMEOUT>, default 600 | Stop automatically after this many idle seconds with no active call or commands (0 disables)
+wx calls session run --name | takes <NAME>, default default | Session name used to address this session from other wx calls session commands
+wx calls session run --no-ipc | switch | Disable the local IPC socket (for isolated --stdio runs)
+wx calls session run --output | takes <OUTPUT>, default null | Incoming audio sink: null (headless metering/recording only) or device[:ID]
+wx calls session run --ready | switch | Advertise call readiness immediately so incoming direct offers and conference invitations arrive
+wx calls session run --receive-video-codec | takes <RECEIVE_VIDEO_CODEC>, default jpeg, values jpeg|h265|h264 | Preferred incoming video codec: jpeg (decoded RGB inspection/snapshots), h265, or h264
+wx calls session run --record-dir | takes <RECORD_DIR> | Automatically record each call's TX/RX WAV audio and RX video into this directory
+wx calls session run --snapshot-interval | takes <SNAPSHOT_INTERVAL>, default 0 | Periodically save decoded remote video snapshots every N milliseconds (0 disables)
+wx calls session run --stats-interval | takes <STATS_INTERVAL>, default 1000 | Emit media.stats events every N milliseconds while media is attached (0 disables)
+wx calls session run --stdio | switch | Read NDJSON commands from stdin and emit NDJSON events and replies on stdout
+wx calls session run --video | takes <VIDEO>, default test | Outgoing video source: test, smpte, color:NAME|#RRGGBB, file:PATH, off, auto, or a device path
+wx calls session snapshot | - | Save the latest decoded remote video frame(s) to JPEG or PNG for visual inspection
+wx calls session snapshot --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session snapshot --out | takes <OUT> | Output image file path (.jpg or .png) or directory; defaults to the session snapshots folder
+wx calls session snapshot --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session snapshot --track | takes <TRACK> | Receive video track ID; omit to snapshot all decoded remote video tracks
+wx calls session start | - | Start a detached headless call session in the background and wait until ready
+wx calls session start --audio | takes <AUDIO>, default silence | Outgoing audio source: silence, tone[:HZ[:AMP[:ON_MS:OFF_MS]]], file:PATH[:loop|:once], or device[:ID]
+wx calls session start --dir | takes <DIR> | Explicit private directory for this session's socket, event log, snapshots and recordings
+wx calls session start --exit-with-parent | switch | Stop gracefully when the parent process that started this session exits
+wx calls session start --idle-timeout | takes <IDLE_TIMEOUT>, default 600 | Stop automatically after this many idle seconds with no active call or commands (0 disables)
+wx calls session start --name | takes <NAME>, default default | Session name used to address this session from other wx calls session commands
+wx calls session start --output | takes <OUTPUT>, default null | Incoming audio sink: null (headless metering/recording only) or device[:ID]
+wx calls session start --ready | switch | Advertise call readiness immediately so incoming direct offers and conference invitations arrive
+wx calls session start --receive-video-codec | takes <RECEIVE_VIDEO_CODEC>, default jpeg, values jpeg|h265|h264 | Preferred incoming video codec: jpeg (decoded RGB inspection/snapshots), h265, or h264
+wx calls session start --record-dir | takes <RECORD_DIR> | Automatically record each call's TX/RX WAV audio and RX video into this directory
+wx calls session start --snapshot-interval | takes <SNAPSHOT_INTERVAL>, default 0 | Periodically save decoded remote video snapshots every N milliseconds (0 disables)
+wx calls session start --stats-interval | takes <STATS_INTERVAL>, default 1000 | Emit media.stats events every N milliseconds while media is attached (0 disables)
+wx calls session start --video | takes <VIDEO>, default test | Outgoing video source: test, smpte, color:NAME|#RRGGBB, file:PATH, off, auto, or a device path
+wx calls session status | - | Show the session's current call state, offers, peer status, controls and live media metrics
+wx calls session status --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session status --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session stop | - | Stop a running headless call session cleanly
+wx calls session stop --dir | takes <DIR> | Explicit private session directory to stop instead of resolving by name
+wx calls session stop --no-hangup | switch | Disconnect without first hanging up any active owned call
+wx calls session stop --timeout | takes <TIMEOUT>, default 15 | Seconds to wait for the session process to exit (1 to 120)
+wx calls session stop <NAME> | position 1, default default | Session name to stop (defaults to "default")
+wx calls session unmute | - | Unmute the local microphone and notify the peer or conference
+wx calls session unmute --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session unmute --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session video | - | Switch the outgoing video source (test, smpte, color:..., file:..., off, auto, device) live
+wx calls session video --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session video --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session video <SOURCE> | position 1, required | Outgoing video source specification
+wx calls session wait | - | Block until a matching call event or media threshold is observed, or fail on timeout
+wx calls session wait --after | takes <AFTER>, default 0 | Only consider events with sequence number strictly greater than this value
+wx calls session wait --audio-frames | takes <AUDIO_FRAMES> | Wait until received audio frame count reaches at least this value
+wx calls session wait --call-id | takes <CALL_ID> | Restrict matching to events for this call ID
+wx calls session wait --camera | takes <CAMERA>, values true|false | Match participant.updated events where cameraEnabled equals this value
+wx calls session wait --control-kind | takes <CONTROL_KIND>, values microphone|camera | Match call.control events with this control kind (microphone or camera)
+wx calls session wait --control-value | takes <CONTROL_VALUE>, values true|false | Match call.control events with this muted/enabled boolean value
+wx calls session wait --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory
+wx calls session wait --dominant-hz | takes <DOMINANT_HZ> | Wait until received audio dominant tone frequency is within --hz-tolerance of this Hz value
+wx calls session wait --event | takes <EVENTS>, repeatable | Match events whose type equals one of these values (repeatable)
+wx calls session wait --group | takes <GROUP> | Match conference.invitations events containing an invitation for this group ID
+wx calls session wait --hz-tolerance | takes <HZ_TOLERANCE>, default 25 | Frequency tolerance in Hz used with --dominant-hz
+wx calls session wait --membership | takes <MEMBERSHIP>, values invited|joined|left | Match participant.updated events with this membership (invited, joined, left)
+wx calls session wait --mic | takes <MIC>, values true|false | Match participant.updated events where microphoneEnabled equals this value
+wx calls session wait --min-rms-db | takes <MIN_RMS_DB> | Wait until received audio RMS level reaches at least this dBFS value (e.g. -35)
+wx calls session wait --participant | takes <PARTICIPANT> | Match participant.updated, call.control, or call.peer_status for this participant or contact ID
+wx calls session wait --participant-status | takes <PARTICIPANT_STATUS>, values joined|ringing|acknowledged|left|rejected|busy|no_response|exited|unknown | Match participant.updated events with this status kind
+wx calls session wait --peer-status | takes <PEER_STATUSES>, repeatable, values joined|ringing|acknowledged|left|rejected|busy|no_response|exited|unknown | Match call.peer_status events reaching one of these kinds (repeatable)
+wx calls session wait --session | takes <SESSION>, default default | Named session to target (defaults to "default")
+wx calls session wait --state | takes <STATES>, repeatable, values dialing|ringing|connecting|connected|ending|ended|uncertain | Match call.state events reaching one of these states (repeatable)
+wx calls session wait --timeout | takes <TIMEOUT>, default 30 | Seconds to wait before failing with a timeout error
+wx calls session wait --track | takes <TRACK> | Restrict --audio-frames, --min-rms-db, --dominant-hz, or --video-frames to this track ID
+wx calls session wait --video-frames | takes <VIDEO_FRAMES> | Wait until received video frame count reaches at least this value
 wx calls status | - | Read the daemon's current call state and exit
 wx chats | - | Find chats and change their read state and settings
 wx chats find | - | Find chats matching a name or ID

@@ -56,6 +56,26 @@ impl MediaClient {
         .await
     }
 
+    /// Attach to `/calls/{callId}/media` with background RGB24 JPEG decoding, taking
+    /// `client_id` and `audio_format` directly so the returned future is `Send`.
+    pub async fn attach_parts(
+        endpoint: &CallEndpoint,
+        client_id: &str,
+        audio_format: CallAudioFormat,
+        call_id: &str,
+        owner_token: &str,
+    ) -> Result<Self> {
+        Self::attach_inner(
+            endpoint,
+            client_id,
+            audio_format,
+            call_id,
+            owner_token,
+            false,
+        )
+        .await
+    }
+
     /// Attach to `/calls/{callId}/media` with raw JPEG passthrough (used by Desktop WebView).
     /// Takes `client_id` and `audio_format` directly so the returned future is `Send` for
     /// spawned multi-threaded tasks (holding `&ControlClient` across `.await` is `!Send`).

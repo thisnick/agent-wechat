@@ -576,6 +576,9 @@ enum Command {
     PeerCamera {
         enabled: bool,
     },
+    PeerStatus {
+        code: u32,
+    },
     PeerKeyframeRequested,
     BeginEnd,
     End,
@@ -877,6 +880,15 @@ async fn control(
                 .await
                 .map_err(|error| error.code())?;
             Ok(json!({"enabled":enabled}))
+        }
+        Command::PeerStatus { code } => {
+            backend
+                .active_sink()
+                .map_err(|error| error.code())?
+                .peer_status(code)
+                .await
+                .map_err(|error| error.code())?;
+            Ok(json!({"code":code}))
         }
         Command::PeerKeyframeRequested => {
             backend

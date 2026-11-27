@@ -319,9 +319,10 @@ pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
             .await
         }
         CallsCommand::Conference { command: None }
+        | CallsCommand::Session { .. }
         | CallsCommand::Status
         | CallsCommand::Devices => {
-            unreachable!("status is handled without devices")
+            unreachable!("status and sessions are handled without interactive devices")
         }
     };
     control.close().await;
@@ -1501,7 +1502,9 @@ async fn owned_call(
                         }
                     }
                     Message::Text(text)=>{
-                        let event:CallEvent=serde_json::from_str(&text)?;
+                        let Some(event) = wechat_call_client::transport::parse_call_event_str(&text)? else {
+                            continue;
+                        };
                         match &event {
                             CallEvent::TrackAdded {track,..}|CallEvent::TrackUpdated {track,..} if track.direction()==CallTrackDirection::Send=>{
                                 control.update(&event);

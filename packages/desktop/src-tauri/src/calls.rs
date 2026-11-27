@@ -1422,7 +1422,9 @@ async fn run_account_actor(
                         }
                     }
                     Ok(Message::Text(text)) => {
-                        if let Ok(event) = serde_json::from_str::<CallEvent>(&text) {
+                        if let Ok(Some(event)) =
+                            wechat_call_client::transport::parse_call_event_str(&text)
+                        {
                             match event {
                                 CallEvent::VideoKeyframeRequested { .. } => {
                                     if keyframe_task.is_none() {

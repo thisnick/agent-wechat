@@ -369,11 +369,11 @@ function pendingOfferValue(value: unknown): boolean {
 function errorCode(value: unknown): boolean {
   return typeof value === "string" && ["invalid_request", "busy", "already_claimed", "offer_expired", "not_owner", "unsupported", "media_not_ready", "outcome_unknown", "capacity", "stale", "forbidden", "closed"].includes(value);
 }
-function parseCallEvent(data: unknown, byteLimit = CONTROL_BYTES): CallEvent {
+function parseCallEvent(data: unknown, byteLimit = CONTROL_BYTES): CallEvent | null {
   if (typeof data !== "string" || new TextEncoder().encode(data).byteLength > byteLimit) throw new NativeCallError("invalid_event");
   let value: unknown;
   try { value = JSON.parse(data); } catch { throw new NativeCallError("invalid_event"); }
-  if (!object(value)) throw new NativeCallError("invalid_event");
+  if (!object(value) || typeof value.type !== "string" || value.type.length === 0 || value.type.length > 128 || /[\u0000-\u001f\u007f]/.test(value.type)) throw new NativeCallError("invalid_event");
   if (value.type === "protocol.error") throw new NativeCallError(["unsupported_protocol_version", "invalid_protocol_version"].includes(String(value.code)) ? String(value.code) : "invalid_event");
   if (["hello", "media.ready"].includes(String(value.type)) && (value.protocolVersion ?? 1) !== NATIVE_CALL_PROTOCOL_VERSION) throw new NativeCallError("unsupported_protocol_version");
   let valid = false;
@@ -400,6 +400,7 @@ function parseCallEvent(data: unknown, byteLimit = CONTROL_BYTES): CallEvent {
       && value.results.every(item => object(item) && idValue(item.contactId) && ["submitted", "rejected", "unknown", "uncertain"].includes(String(item.status)) && typeof item.verificationRequired === "boolean"); break;
     case "track.removed": valid = idValue(value.callId) && uint32(value.trackId) && value.trackId > 0 && uint32(value.generation) && value.generation > 0 && idValue(value.reason); break;
     case "call.control": valid = idValue(value.callId) && participantControlValue(value); break;
+    case "call.peer_status": valid = idValue(value.callId) && idValue(value.participantId) && participantStatusValue(value.status); break;
     case "calls.availability": valid = availabilityValue(value.availability); break;
     case "track.added": case "track.updated": valid = idValue(value.callId) && trackValue(value.track); break;
     case "video.keyframe_requested": valid = idValue(value.callId) && uint32(value.trackId) && value.trackId > 0 && uint32(value.generation) && value.generation > 0; break;
@@ -419,6 +420,7 @@ function parseCallEvent(data: unknown, byteLimit = CONTROL_BYTES): CallEvent {
       break;
     }
     case "call.error": valid = errorCode(value.code); break;
+    default: return null;
   }
   if (!valid) throw new NativeCallError("invalid_event");
   return value as CallEvent;
@@ -520,8 +522,12 @@ export class NativeCallsClient {
     return this.opening;
   }
   events(): AsyncIterable<CallEvent> { return this.queue; }
-  private receive(event: CallEvent): void {
+  private receive(event: CallEvent | null): void {
     if (this.closed) return;
+    if (!event) {
+      if (!this.hello) throw new NativeCallError("missing_hello");
+      return;
+    }
     if (!this.hello && event.type !== "hello") throw new NativeCallError("missing_hello");
     if (event.type === "hello") {
       if (this.hello) throw new NativeCallError("duplicate_hello");
@@ -734,6 +740,10 @@ export class NativeCallMediaClient {
     if (this.closed) return;
     if (typeof data === "string") {
       const event = parseCallEvent(data, CONTROL_BYTES);
+      if (!event) {
+        if (!this.readyEvent) throw new Error("Unexpected media event");
+        return;
+      }
       if (event.type === "call.error") { this.fail(new NativeCallError(event.code)); return; }
       if (event.type === "track.removed") {
         if (event.callId !== this.callId || !this.readyEvent) throw new Error("Wrong media call");
