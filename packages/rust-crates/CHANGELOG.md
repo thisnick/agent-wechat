@@ -1,5 +1,37 @@
 # @agent-wechat/rust-crates
 
+## 3.2.1
+
+### Patch Changes
+
+- [#737](https://github.com/thisnick/agent-wechat/pull/737) [`9cf4e29`](https://github.com/thisnick/agent-wechat/commit/9cf4e294fa92a818131115a23585350ee6655df1) Thanks [@thisnick](https://github.com/thisnick)! - Group member lists fill faster after setting up a new profile: background group refreshes now run in batches of 5 per pass, wake the account loop on enqueue and while due groups remain, yield the account writer lock around each metadata request, and back off individual failing groups so one failure does not block healthy ones.
+
+- [#732](https://github.com/thisnick/agent-wechat/pull/732) [`45e9ace`](https://github.com/thisnick/agent-wechat/commit/45e9ace80a901c7e3448837c740dd6aa350ee187) Thanks [@thisnick](https://github.com/thisnick)! - Clear saved group member display names and opaque member fields in `chat_room.ext_buffer` when a roster refresh omits them for returned members, matching the official Linux client while preserving unchanged delta members and unknown extension chunks. Also omit field 2 locally when clearing your own group display name via `MyName`, and update `wechat_profile::NativeMemberPatch` fields to `NativeFieldPatch<T>` (`Keep`, `Clear`, `Set`).
+
+- [#733](https://github.com/thisnick/agent-wechat/pull/733) [`52b49b9`](https://github.com/thisnick/agent-wechat/commit/52b49b97942dd222053b4cb49799932cbe90f933) Thanks [@thisnick](https://github.com/thisnick)! - Expire operational notes in `control.sqlite` that previously grew forever with traffic, and retire permanently superseded metadata receipts (#730).
+
+  - Contact phase markers (`contact-notifications:`, `contact-pinning:`, `contact-pinning-time:`, `contact-privacy-observation:`), non-sync `friend-attention-stage:` markers, and finished or held group refresh markers (`incoming-group-done:`, `incoming-group-held:`) are now removed after 30 days once their owning sync batch, metadata receipt or contact change has finished. Held group refreshes keep their sealed diagnostic response bodies under `incoming-group-receipt:` for 7 days.
+  - Login QR images (`qr:`) and orphaned `metadata-hydrated:` checkpoints are removed once their login or metadata request finishes. Login idempotency keys (`login-key:`), superseded saved-login journals (`saved-login-superseded:`) and raw bytes of applied sync controls (`sync-control:` not paired with `skipped-control:` or referenced by `recall-control:`) are removed after 7 days.
+  - Skipped WAL conversion event receipts (`event:profile-wal-conversion-skipped:`) now hash the error text to bound key size and expire after 30 days.
+  - Permanently superseded or unrequested metadata receipts are retired from `metadata-pending:` instead of looping on every recovery pass and blocking profile exports.
+
+- [#726](https://github.com/thisnick/agent-wechat/pull/726) [`324b065`](https://github.com/thisnick/agent-wechat/commit/324b065a2d3652b4435239986b99ea444fa20a43) Thanks [@thisnick](https://github.com/thisnick)! - Stop a group refresh from repeating forever and stop interrupted starts from keeping database copies on a full disk (#722).
+
+  - When a group changed again while its information was being refreshed, the daemon kept fetching that group's details from WeChat on every pass and wrote ever-longer rows into `control.sqlite`. It now fetches once more and stops. Rows earlier versions left behind are removed by the regular cleanup after seven days, and the database shrinks once there is room to compact it.
+  - Copies that an interrupted start left in `.sqlite-admission-*` folders are now removed before the daemon copies a database again, not only after a start succeeds. A start that failed for lack of disk space used to keep them, so it could never free the space it needed. A copy left while the daemon was already opening the database is still kept until a start succeeds. When the disk is full, the error now says how much free space the check needs.
+
+- [#736](https://github.com/thisnick/agent-wechat/pull/736) [`11d6ba6`](https://github.com/thisnick/agent-wechat/commit/11d6ba6f4da5f25c18453de452f412fa5f2a2787) Thanks [@thisnick](https://github.com/thisnick)! - Fix freezing and blurry incoming video in direct video calls.
+
+  - Large keyframes now assemble. Phones send a big keyframe in several bursts, each with its own timestamp, and the daemon treated every new timestamp as a new frame, so these keyframes never completed and video froze until a smaller one arrived.
+  - Lost video packets are now retransmitted. Our NACKs set byte 6 to a counter, which official senders treat as an unknown format and ignore, so it is now 0 as they expect. Retransmitted packets (`0x67`, sent as Live98 with extension byte 4) are accepted and added to their frame, and P2S reports count them in the ARQ field.
+  - When the other side NACKs our video, the daemon resends the requested packets once from the last 300 ms of sent video, as the official client does.
+  - Incomplete frames are held for 500 ms of sender time, instead of a fixed number of frames, so retransmissions have time to arrive. NACKs wait 20–100 ms depending on jitter, are sent once per gap, and stop after 300 ms.
+  - Live98 NACKs and retransmissions carry a separate counter in the sequence field, so they no longer go through the video replay check, where a repeated value could close the media channel.
+
+  `wechat_protocol::calls::video_packet::encode_video_nack` no longer takes an `arq_seq` argument, `VideoNack::arq_seq` is now `VideoNack::format`, `VideoChannelPayload` has a new `ArqResponse` variant, and the new `wechat_protocol::calls::video_arq` module provides the sender-side retransmission cache.
+
+- [#731](https://github.com/thisnick/agent-wechat/pull/731) [`9076c39`](https://github.com/thisnick/agent-wechat/commit/9076c39d0a9f2a7fdcabeb6d0ddbe9edda73cdd2) Thanks [@thisnick](https://github.com/thisnick)! - Retention of the daemon's internal `control.sqlite` notes now comes from one list of every kind of note, and keeps every note for as long as before. The general way the daemon saves such a note now refuses keys over 16 KiB, which only a bug can produce (#722 grew keys to 86 KB).
+
 ## 3.2.0
 
 ### Minor Changes
