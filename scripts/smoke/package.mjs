@@ -22,7 +22,7 @@ try {
   const { stdout } = await exec(process.platform === 'win32' ? process.execPath : 'npm', [...(process.platform === 'win32' ? [join(process.execPath, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js')] : []), 'pack', '--json', '--pack-destination', temporary], { cwd: staged, maxBuffer: 1024 * 1024 });
   const [packed] = JSON.parse(stdout);
   const names = packed.files.map(file => file.path);
-  for (const required of ['native-release.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'scripts/native-launcher.mjs', 'scripts/native-runtime.mjs', 'scripts/native-install.mjs']) assert.ok(names.includes(required), `Missing ${required}`);
+  for (const required of ['native-release.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'scripts/native-launcher.mjs', 'scripts/native-runtime.mjs', 'scripts/native-install.mjs', 'scripts/native-path.mjs']) assert.ok(names.includes(required), `Missing ${required}`);
   assert.equal(pkg.bin['wx-legacy'], undefined);
   assert.ok(!names.some(name => name.startsWith('dist/') || name === 'LEGACY.md'));
   assert.ok(!names.some(name => name.startsWith('src/') || name.startsWith('test/') || name.startsWith('native/')));
