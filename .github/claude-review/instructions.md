@@ -48,14 +48,14 @@ Read these with the Read tool. `diff.patch` can be long; read it in parts.
   don't make exploratory or test calls. Don't @-mention anyone in anything you
   post.
 - Use Read, Grep and Glob for files. Bash runs only these commands, one per
-  call: `gh issue view`, `gh pr view`, `gh pr diff`, GET requests with
-  `gh api repos/<repo>/issues/<number>/comments` or
-  `gh api repos/<repo>/pulls/<number>/comments`, and `git log`, `git show`,
-  `git diff` and `git blame`, either in the working directory or as
-  `git -C <PR checkout> ...`. A call that adds anything else is refused whole:
-  `cd`, `cat`, pipes, `;`, `&&`, redirects or other programs. If a call is
-  refused, rewrite it as one of the allowed commands; a refusal doesn't mean
-  Bash is unavailable.
+  call: `gh issue view`, `gh pr view`, `gh pr diff` (for this repository, by
+  number — not URLs or `-R`), and `git log`, `git show`, and `git diff`, either
+  in the working directory or as `git -C <PR checkout> ...`. PR comments and
+  reviews are already saved in the context files (`comments.jsonl`,
+  `review-comments.jsonl`, `reviews.jsonl`). A call that adds anything else is
+  refused whole: `cd`, `cat`, pipes, `;`, `&&`, redirects or other programs. If
+  a call is refused, rewrite it as one of the allowed commands; a refusal
+  doesn't mean Bash is unavailable.
 - The private protocol documentation is not available here. If the pull request
   changes protobuf fields or wire formats, say in "Not checked" that the
   maintainer should cross-check them.
@@ -124,7 +124,7 @@ summary that the approach may need rethinking rather than another fix.
 Read each changed source file in context, not only the changed lines: the whole
 function, its callers and callees (search both checkouts), the tests, and how
 the base branch does it today. Before calling existing code wrong, use
-`git log` or `git blame` to learn why it is the way it is.
+`git log` (including `git log -L`) to learn why it is the way it is.
 
 Cover all of these:
 
