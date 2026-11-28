@@ -123,6 +123,178 @@ fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: Option<u64>) ->
     })
 }
 
+/// Start the local daemon in the background (or return the already-running
+/// owned daemon's status) without printing to stdout.
+pub async fn start_background(config: &crate::config::ServerConfig) -> Result<Value> {
+    let mut config = config.clone();
+    if config.data_dir.exists() {
+        config.data_dir = std::fs::canonicalize(&config.data_dir)?;
+    }
+    if config.listen.port() == 0 {
+        bail!("daemon start requires an explicit nonzero listen port");
+    }
+    private_directory(&config.data_dir)?;
+    config.data_dir = std::fs::canonicalize(&config.data_dir)?;
+    let directory = config.data_dir.join("daemon");
+    let record = directory.join("process.json");
+    let log = directory.join("daemon.log");
+    private_directory(&directory)?;
+    let lock = wechat_platform::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(wechat_platform::NOFOLLOW)
+        .open(directory.join("management.lock"))?;
+    if lock.try_lock_exclusive().is_err() {
+        bail!("daemon lifecycle operation already in progress");
+    }
+    if let Some(owned) = load(&record)? {
+        if fingerprint(owned.pid).is_some() {
+            return identity(&config, &owned)
+                .await
+                .map_err(|e| with_log_hint(e, &log, None));
+        }
+        std::fs::remove_file(&record)?;
+    }
+    let listener = std::net::TcpListener::bind(config.listen).map_err(|e| {
+        with_log_hint(
+            anyhow::Error::new(e)
+                .context("daemon listener is occupied; no owner was adopted or stopped"),
+            &log,
+            None,
+        )
+    })?;
+    drop(listener);
+    let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)
+        .map_err(|e| with_log_hint(e, &log, None))?;
+    let output_file = wechat_platform::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(wechat_platform::NOFOLLOW)
+        .open(&log)?;
+    let metadata = output_file.metadata()?;
+    if !metadata.is_file() || !wechat_platform::private_file(&output_file)? {
+        return Err(with_log_hint(
+            anyhow::anyhow!("daemon log must be a private owned regular file"),
+            &log,
+            None,
+        ));
+    }
+    let log_start_offset = metadata.len();
+    let executable = std::fs::canonicalize(std::env::current_exe()?)?;
+    let mut command = ProcessCommand::new(&executable);
+    command
+        .arg("serve")
+        .arg("--data-dir")
+        .arg(&config.data_dir)
+        .arg("--listen")
+        .arg(config.listen.to_string())
+        .arg("--token-file")
+        .arg(&config.token_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output_file.try_clone()?))
+        .stderr(Stdio::from(output_file));
+    if config.config_present {
+        command.arg("--server-config").arg(&config.config_file);
+    }
+    if let Some(address) = config.network_listen {
+        command
+            .arg("--network-listen")
+            .arg(address.to_string())
+            .arg("--tls-cert-file")
+            .arg(config.tls_cert_file.as_ref().unwrap())
+            .arg("--tls-key-file")
+            .arg(config.tls_key_file.as_ref().unwrap());
+    }
+    wechat_platform::detach(&mut command);
+    let mut child = command.spawn().context("cannot launch native daemon")?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let readiness = async {
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Err(with_log_hint(
+                    anyhow::anyhow!("native daemon exited before readiness ({status})"),
+                    &log,
+                    Some(log_start_offset),
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(with_log_hint(
+                    anyhow::anyhow!("native daemon readiness deadline reached"),
+                    &log,
+                    Some(log_start_offset),
+                ));
+            }
+            if let Ok(Ok(value)) = tokio::time::timeout(
+                Duration::from_millis(500),
+                remote(&config)?.get("v1/status"),
+            )
+            .await
+            {
+                if value["pid"].as_u64() != Some(child.id() as u64)
+                    || value["dataDir"].as_str() != config.data_dir.to_str()
+                    || value["version"]["backend"] != "native"
+                {
+                    return Err(with_log_hint(
+                        anyhow::anyhow!(
+                            "listener belongs to another process; no owner was adopted"
+                        ),
+                        &log,
+                        Some(log_start_offset),
+                    ));
+                }
+                let owned = OwnedProcess {
+                    pid: child.id(),
+                    start_ticks: fingerprint(child.id())
+                        .context("native daemon process identity disappeared")?,
+                    executable: executable.clone(),
+                    data_dir: std::fs::canonicalize(&config.data_dir)?,
+                    endpoint: format!("http://{}", config.listen),
+                    server_id: value["serverId"]
+                        .as_str()
+                        .context("missing daemon identity")?
+                        .into(),
+                    ownership_generation: value["ownershipGeneration"]
+                        .as_str()
+                        .context("missing daemon ownership generation")?
+                        .into(),
+                };
+                private_output(&record, &serde_json::to_vec(&owned)?)?;
+                return Ok(value);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    .await;
+    match readiness {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if child.try_wait()?.is_some() {
+                return Err(error);
+            }
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            #[cfg(windows)]
+            {
+                let _ = child.kill();
+            }
+            for _ in 0..50 {
+                if child.try_wait()?.is_some() {
+                    return Err(error);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            child.kill()?;
+            let _ = child.wait();
+            Err(error)
+        }
+    }
+}
+
 pub async fn run(
     config: crate::config::ServerConfig,
     command: DaemonCommand,
@@ -139,166 +311,7 @@ pub async fn run(
         DaemonCommand::Doctor { .. } => {
             unreachable!("wx daemon doctor is handled before config::resolve in main")
         }
-        DaemonCommand::Start => {
-            if config.listen.port() == 0 {
-                bail!("daemon start requires an explicit nonzero listen port");
-            }
-            private_directory(&config.data_dir)?;
-            config.data_dir = std::fs::canonicalize(&config.data_dir)?;
-            private_directory(&directory)?;
-            let lock = wechat_platform::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .mode(0o600)
-                .custom_flags(wechat_platform::NOFOLLOW)
-                .open(directory.join("management.lock"))?;
-            if lock.try_lock_exclusive().is_err() {
-                bail!("daemon lifecycle operation already in progress");
-            }
-            if let Some(owned) = load(&record)? {
-                if fingerprint(owned.pid).is_some() {
-                    return output.print(
-                        &identity(&config, &owned)
-                            .await
-                            .map_err(|e| with_log_hint(e, &log, None))?,
-                    );
-                }
-                std::fs::remove_file(&record)?;
-            }
-            let listener = std::net::TcpListener::bind(config.listen).map_err(|e| {
-                with_log_hint(
-                    anyhow::Error::new(e)
-                        .context("daemon listener is occupied; no owner was adopted or stopped"),
-                    &log,
-                    None,
-                )
-            })?;
-            drop(listener);
-            let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)
-                .map_err(|e| with_log_hint(e, &log, None))?;
-            let output_file = wechat_platform::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .custom_flags(wechat_platform::NOFOLLOW)
-                .open(&log)?;
-            let metadata = output_file.metadata()?;
-            if !metadata.is_file() || !wechat_platform::private_file(&output_file)? {
-                bail!("daemon log must be a private owned regular file; run `wx daemon doctor` to diagnose");
-            }
-            let log_start_offset = metadata.len();
-            let executable = std::fs::canonicalize(std::env::current_exe()?)?;
-            let mut command = ProcessCommand::new(&executable);
-            command
-                .arg("serve")
-                .arg("--data-dir")
-                .arg(&config.data_dir)
-                .arg("--listen")
-                .arg(config.listen.to_string())
-                .arg("--token-file")
-                .arg(&config.token_file)
-                .stdin(Stdio::null())
-                .stdout(Stdio::from(output_file.try_clone()?))
-                .stderr(Stdio::from(output_file));
-            if config.config_present {
-                command.arg("--server-config").arg(&config.config_file);
-            }
-            if let Some(address) = config.network_listen {
-                command
-                    .arg("--network-listen")
-                    .arg(address.to_string())
-                    .arg("--tls-cert-file")
-                    .arg(config.tls_cert_file.as_ref().unwrap())
-                    .arg("--tls-key-file")
-                    .arg(config.tls_key_file.as_ref().unwrap());
-            }
-            wechat_platform::detach(&mut command);
-            let mut child = command.spawn().context("cannot launch native daemon")?;
-            let deadline = Instant::now() + Duration::from_secs(20);
-            let readiness = async {
-                loop {
-                    if let Some(status) = child.try_wait()? {
-                        return Err(with_log_hint(
-                            anyhow::anyhow!("native daemon exited before readiness ({status})"),
-                            &log,
-                            Some(log_start_offset),
-                        ));
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(with_log_hint(
-                            anyhow::anyhow!("native daemon readiness deadline reached"),
-                            &log,
-                            Some(log_start_offset),
-                        ));
-                    }
-                    if let Ok(Ok(value)) = tokio::time::timeout(
-                        Duration::from_millis(500),
-                        remote(&config)?.get("v1/status"),
-                    )
-                    .await
-                    {
-                        if value["pid"].as_u64() != Some(child.id() as u64)
-                            || value["dataDir"].as_str() != config.data_dir.to_str()
-                            || value["version"]["backend"] != "native"
-                        {
-                            return Err(with_log_hint(
-                                anyhow::anyhow!(
-                                    "listener belongs to another process; no owner was adopted"
-                                ),
-                                &log,
-                                Some(log_start_offset),
-                            ));
-                        }
-                        let owned = OwnedProcess {
-                            pid: child.id(),
-                            start_ticks: fingerprint(child.id())
-                                .context("native daemon process identity disappeared")?,
-                            executable: executable.clone(),
-                            data_dir: std::fs::canonicalize(&config.data_dir)?,
-                            endpoint: format!("http://{}", config.listen),
-                            server_id: value["serverId"]
-                                .as_str()
-                                .context("missing daemon identity")?
-                                .into(),
-                            ownership_generation: value["ownershipGeneration"]
-                                .as_str()
-                                .context("missing daemon ownership generation")?
-                                .into(),
-                        };
-                        private_output(&record, &serde_json::to_vec(&owned)?)?;
-                        return Ok(value);
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-            .await;
-            match readiness {
-                Ok(value) => output.print(&value),
-                Err(error) => {
-                    if child.try_wait()?.is_some() {
-                        return Err(error);
-                    }
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(child.id() as i32, libc::SIGTERM);
-                    }
-                    #[cfg(windows)]
-                    {
-                        let _ = child.kill();
-                    }
-                    for _ in 0..50 {
-                        if child.try_wait()?.is_some() {
-                            return Err(error);
-                        }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    child.kill()?;
-                    let _ = child.wait();
-                    Err(error)
-                }
-            }
-        }
+        DaemonCommand::Start => output.print(&start_background(&config).await?),
         DaemonCommand::Status => match load(&record).map_err(|e| with_log_hint(e, &log, None))? {
             Some(owned) if fingerprint(owned.pid).is_some() => output.print(
                 &identity(&config, &owned)
@@ -447,7 +460,13 @@ mod tests {
             err_fresh.to_string(),
             "native daemon exited before readiness"
         );
-        assert_eq!(outcome::classify(&err_fresh).0, 1);
+        let described_fresh = outcome::describe(&err_fresh);
+        assert_eq!(described_fresh.exit, 1);
+        assert_eq!(
+            described_fresh.message,
+            "native daemon exited before readiness"
+        );
+        assert_eq!(described_fresh.next, vec!["wx daemon doctor"]);
         let hint_fresh = err_fresh.downcast_ref::<HintedError>().unwrap();
         assert_eq!(
             hint_fresh.last_log_error.as_deref(),

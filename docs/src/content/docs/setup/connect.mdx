@@ -1,6 +1,6 @@
 ---
 title: Connect your account
-description: Start the daemon and log in to WeChat, with a new profile or your existing WeChat data.
+description: Log in to WeChat with a new profile or your existing WeChat data.
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -8,13 +8,17 @@ import qrLogin from '../../../assets/qr-login.svg';
 
 <Steps>
 
-1. **Start the daemon** and leave it running.
+1. **Run `wx auth login`.**
+
+   In a terminal, `wx auth login` guides you through first-time setup:
+   - If no local daemon is running, it offers to start one in the background.
+   - If no account exists yet, it lets you create a new profile or (on Linux, when `~/xwechat_files` is present) attach your existing WeChat for Linux files after a backup confirmation.
 
    ```bash
-   wx serve
+   wx auth login
    ```
 
-2. **Log in** from a second terminal.
+   For scripts or non-interactive terminals, run the steps directly:
 
    <Tabs>
    <TabItem label="New profile">
@@ -22,6 +26,7 @@ import qrLogin from '../../../assets/qr-login.svg';
    Works on every platform. agent-wechat creates a fresh WeChat profile in its own data folder.
 
    ```bash
+   wx daemon start
    wx accounts create --alias me
    wx auth login
    ```
@@ -32,6 +37,7 @@ import qrLogin from '../../../assets/qr-login.svg';
    Keeps your chat history by using WeChat for Linux's files where they are. Quit WeChat and back them up first:
 
    ```bash
+   wx daemon start
    tar -czf ~/wechat-profile-backup.tgz -C ~ xwechat_files .xwechat
    wx auth login --official
    ```
@@ -41,7 +47,7 @@ import qrLogin from '../../../assets/qr-login.svg';
    </TabItem>
    </Tabs>
 
-   Scan the QR code with WeChat on your phone. When the terminal says it is
+2. **Scan the QR code** with WeChat on your phone. When the terminal says it is
    waiting for confirmation, approve the login in WeChat.
 
    With `wx --json auth login`, the waiting notice is a JSON line on stderr
@@ -103,8 +109,9 @@ Removal unregisters the profile and keeps its local files. `wx auth forget --yes
 - **A new profile starts without your old chats.** WeChat doesn't send full history to a new login, so it fills up from new messages onward.
 - **With `--official`, keep WeChat closed** while the daemon is running. Both writing to the same files can damage them.
 - **The account has to match.** With `--official`, log in as the account those files belong to; the daemon won't write another account's messages into them.
+- **Using the AgentWechat desktop app?** Its built-in hub uses the same default port (`127.0.0.1:6174`). Export its key from **Settings → Export key for CLI** instead of starting a second daemon.
 - **Next time you start the daemon, it reconnects on its own.** You only log in again if WeChat ends the session.
 - **No terminal?** `wx` saves the QR code as a PNG and prints the path.
 - **Phone approval stalls?** Some approvals need your phone to reach the daemon over the local network (ports 8050 to 8100). Check the firewall and Wi-Fi client isolation.
-- **Several accounts:** create and log in to each one, then pick one with `--account ALIAS`.
+- **Several accounts:** create and log in to each one, then pick one with `--account ALIAS` or `wx accounts select ALIAS`.
 </Aside>

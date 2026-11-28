@@ -458,7 +458,7 @@ async fn resumable_original(remote: &Remote, id: &str, output: &Path, asset: &Va
                     .base
                     .join(&remote.path(&format!("media/{}/content", encode(id)))?)?,
             )
-            .bearer_auth(&remote.token)
+            .bearer_auth(remote.bearer_token())
             .header("Range", format!("bytes={position}-"))
             .header("If-Range", format!("\"{sha}\""))
             .timeout(Duration::from_secs(65))

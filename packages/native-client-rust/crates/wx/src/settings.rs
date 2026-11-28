@@ -24,6 +24,8 @@ pub struct Settings {
     pub schema_version: u32,
     pub active_server: Option<String>,
     pub local_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_account_id: Option<String>,
     #[serde(default)]
     pub servers: BTreeMap<String, Server>,
     #[serde(default)]
@@ -35,6 +37,7 @@ impl Default for Settings {
             schema_version: 1,
             active_server: None,
             local_profile: None,
+            default_account_id: None,
             servers: BTreeMap::new(),
             local_profiles: BTreeMap::new(),
         }
@@ -62,6 +65,26 @@ pub fn valid_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Where the active client endpoint choice came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointSource {
+    Flag,
+    Environment,
+    SavedServer,
+    Default,
+}
+
+impl EndpointSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Environment => "environment",
+            Self::SavedServer => "saved_server",
+            Self::Default => "default",
+        }
+    }
+}
+
 impl File {
     pub fn load(
         explicit: Option<&Path>,
@@ -213,12 +236,12 @@ impl File {
             .clone();
         Ok((name, profile))
     }
-    pub fn client(
+    pub fn client_with_source(
         &self,
         selected: Option<&str>,
         url: Option<&str>,
         server: &crate::config::ServerConfig,
-    ) -> Result<(crate::config::ClientConfig, Option<String>)> {
+    ) -> Result<(crate::config::ClientConfig, Option<String>, EndpointSource)> {
         let environment_url = std::env::var("AGENT_WECHAT_URL").ok();
         let environment_name = std::env::var("AGENT_WECHAT_SERVER").ok();
         let direct = url.or_else(|| {
@@ -235,6 +258,15 @@ impl File {
                 None
             }
         });
+        let source = if url.is_some() || selected.is_some() {
+            EndpointSource::Flag
+        } else if environment_url.is_some() || environment_name.is_some() {
+            EndpointSource::Environment
+        } else if self.settings.active_server.is_some() {
+            EndpointSource::SavedServer
+        } else {
+            EndpointSource::Default
+        };
         let name = self.server_name(name, direct)?;
         let saved = name.as_ref().and_then(|n| self.settings.servers.get(n));
         Ok((
@@ -250,9 +282,15 @@ impl File {
                     .unwrap_or_else(|| server.token_file.clone()),
                 account: std::env::var("AGENT_WECHAT_ACCOUNT")
                     .ok()
-                    .or_else(|| saved.and_then(|s| s.default_account_id.clone())),
+                    .or_else(|| saved.and_then(|s| s.default_account_id.clone()))
+                    .or_else(|| {
+                        (source == EndpointSource::Default)
+                            .then(|| self.settings.default_account_id.clone())
+                            .flatten()
+                    }),
             },
             name,
+            source,
         ))
     }
 }
@@ -318,5 +356,47 @@ mod tests {
         assert_eq!(loaded.profile(None, None).unwrap().0, "archive");
         assert!(loaded.settings.servers.is_empty());
         assert_eq!(std::fs::metadata(&file.path).unwrap().mode() & 0o777, 0o600);
+    }
+    #[test]
+    fn standalone_default_account_applies_only_to_default_endpoint_and_omits_when_unset() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut file = File {
+            path: temp.path().join("client.toml"),
+            settings: Settings::default(),
+        };
+        file.save().unwrap();
+        assert!(!std::fs::read_to_string(&file.path)
+            .unwrap()
+            .contains("defaultAccountId"));
+
+        file.settings.default_account_id = Some("acc-local".into());
+        file.save().unwrap();
+        let loaded = File::load(
+            Some(&file.path),
+            &crate::config::Environment::default(),
+            temp.path(),
+            false,
+        )
+        .unwrap();
+        let server = crate::config::resolve(
+            &crate::config::Overrides::default(),
+            &crate::config::Environment {
+                home: Some(temp.path().to_owned()),
+                ..Default::default()
+            },
+            temp.path(),
+        )
+        .unwrap();
+        let (default_client, name, source) =
+            loaded.client_with_source(None, None, &server).unwrap();
+        assert_eq!(name, None);
+        assert_eq!(source, EndpointSource::Default);
+        assert_eq!(default_client.account.as_deref(), Some("acc-local"));
+
+        let (flag_client, _, flag_source) = loaded
+            .client_with_source(None, Some("https://other.invalid"), &server)
+            .unwrap();
+        assert_eq!(flag_source, EndpointSource::Flag);
+        assert_eq!(flag_client.account, None);
     }
 }
