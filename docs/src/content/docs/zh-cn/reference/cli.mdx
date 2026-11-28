@@ -1,7 +1,7 @@
 ---
 title: CLI 命令参考
 description: wx 命令分组、全局标志与退出状态码。
-sourceHash: "324b3741f239"
+sourceHash: "6b47df870f16"
 ---
 
 执行 `wx --help` 可查看顶级命令分组，`wx accounts --help` 查看某个命令组的子命令，或者 `wx accounts select --help` 查看具体操作参数。帮助信息按字母顺序排列并详细解释功能。所有命令默认输出易读的文本结果，添加 `--json` 可获得便于脚本解析的机器可读 JSON 输出。
@@ -28,6 +28,7 @@ sourceHash: "324b3741f239"
 | `wx profiles` | 在无需 Daemon 启动的情况下离线只读审查 Profile（`add`、`avatars`、`chats`、`contacts`、`groups`、`images`、`inspect`、`keys export`、`list`、`messages`、`select`） |
 | `wx store` | 实验性：复制、导入与导出 Profile；`usage` 显示 `control.sqlite` 中保存的内容 |
 | `wx completions` | 为 `bash`、`zsh`、`fish` 或 `powershell` 生成 Shell 命令补全脚本 |
+| `wx feedback` | 输出代码仓库链接和预先填好的问题反馈 URL（在人类可读模式下，加上 `--open` 会用浏览器打开） |
 | `wx version` | 查看版本与编译目标平台 |
 
 `contacts find`、`groups find` 与 `groups members list --search` 用于在已保存的本地目录中搜索。搜索不区分大小写，并会组合匹配以空格分隔的多个词语：`wx contacts find "Mira work"` 可以在同一联系人的昵称和备注中同时匹配。`contacts lookup` 向微信服务端实时请求一个或两个确切联系人 ID 的详情。如果好友备注和昵称均为空，则显示名称默认取用其联系人 ID。`groups lookup` 向微信服务端实时请求指定群聊 ID 的完整成员名册。两种查询都不会保存结果；如需更新本地数据，请使用 `contacts refresh` 或 `groups members refresh`。
@@ -52,6 +53,7 @@ sourceHash: "324b3741f239"
 | `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | 存放 API 访问令牌的文件路径 |
 | | `AGENT_WECHAT_TOKEN` | 访问令牌直接字符串（建议优先使用文件路径形式） |
 | `--config PATH` | `AGENT_WECHAT_CONFIG` | CLI 配置文件路径 |
+| | `AGENT_WECHAT_NO_PROMPTS` | 设为 `1` 可隐藏一次性的 CLI 提示（设置了 `CI` 时同样隐藏） |
 | `--json` | | 输出机器友好的机器可读结果与错误。事件监听模式下每行输出一个 JSON 事件。 |
 
 命令行标志优先级高于环境变量，环境变量优先级高于本地配置文件。所有耗时后台命令（发送、下载、登录、撤回等）均支持传入 `--detach`，使命令在任务成功入队后立即返回。
@@ -98,6 +100,7 @@ wx completions powershell | Out-String | Invoke-Expression
 | 状态码 | 含义 |
 | --- | --- |
 | 0 | 成功完成，或已使用 `--detach` 成功入队 |
+| 1 | 其他错误（`operation_failed`）；如果看起来是程序缺陷，请运行 `wx feedback` 进行反馈 |
 | 2 | 输入参数或配置无效 |
 | 3 | 无法连接到 Daemon 服务 |
 | 4 | 令牌被拒绝或缺少必要权限范围 |

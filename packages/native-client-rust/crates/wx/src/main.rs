@@ -21,6 +21,7 @@ mod daemon;
 mod doctor;
 mod doctor_discovery;
 mod events;
+mod feedback;
 mod login;
 mod outcome;
 mod output;
@@ -103,6 +104,12 @@ enum Command {
     },
     /// Show the CLI version, build target and API capabilities.
     Version,
+    /// Show the repository link and a pre-filled bug-report URL.
+    Feedback {
+        /// Open the pre-filled bug-report URL in the default browser (human mode only).
+        #[arg(long)]
+        open: bool,
+    },
     /// Show bundled third-party license notices.
     Licenses,
     /// Generate shell completion scripts for wx.
@@ -1317,15 +1324,7 @@ async fn main() {
             described.next.push("wx daemon doctor".into());
         }
         if json {
-            let mut body = json!({
-                "code": described.code,
-                "message": described.message,
-                "retryable": described.retryable,
-            });
-            if !described.next.is_empty() {
-                body["next"] = json!(described.next);
-            }
-            eprintln!("{}", json!({"error": body}));
+            eprintln!("{}", outcome::json_error(&described));
         } else {
             eprintln!("{}", described.message);
             if let Some(hint) = error
@@ -1341,6 +1340,12 @@ async fn main() {
                 for step in &described.next {
                     eprintln!("  {step}");
                 }
+            }
+            if let Some(hint) = outcome::human_error_hint(&described) {
+                if !described.next.is_empty() {
+                    eprintln!();
+                }
+                eprintln!("{hint}");
             }
         }
         std::process::exit(described.exit);
@@ -1898,11 +1903,19 @@ async fn run(cli: Cli) -> Result<()> {
                 | Command::Config { .. }
                 | Command::Profiles { .. }
                 | Command::Version
+                | Command::Feedback { .. }
                 | Command::Licenses
                 | Command::Completions { .. }
         )
     {
-        bail!("--token-stdin is supported by serve and HTTP client commands");
+        return Err(failure(
+            2,
+            "invalid_configuration_or_input",
+            "--token-stdin is supported by serve and HTTP client commands",
+        ));
+    }
+    if let Command::Feedback { open } = cli.command {
+        return feedback::run(open, cli.json);
     }
     if let Command::Completions { shell } = cli.command {
         return completions::write(shell, &mut std::io::stdout().lock());
@@ -2408,6 +2421,16 @@ async fn run(cli: Cli) -> Result<()> {
                 command: ChatCommand::List { .. } | ChatCommand::Find { .. }
             }
     );
+    // `wx stickers send` does not keep a local CLI receipt, so a manual rerun
+    // with the same `--idempotency-key` after an already-accepted send can be
+    // counted again (documented reuse is after an uncertain response, which
+    // exits non-zero and is not counted).
+    let mut count_send = matches!(
+        &cli.command,
+        Command::Stickers {
+            command: stickers_cli::StickerCommand::Send { .. }
+        }
+    );
     let attached_login = matches!(
         &cli.command,
         Command::Auth {
@@ -2888,7 +2911,7 @@ async fn run(cli: Cli) -> Result<()> {
                     wait,
                     idempotency_key,
                 } = *args;
-                client_actions::send(
+                let (value, replayed) = client_actions::send_with_replay_status(
                     &r,
                     &settings,
                     thread,
@@ -2911,7 +2934,9 @@ async fn run(cli: Cli) -> Result<()> {
                     detach,
                     wait,
                 )
-                .await?
+                .await?;
+                count_send = !replayed;
+                value
             }
             MessageCommand::SendStatus { id } => {
                 r.get(&r.path(&format!("sends/{}", encode(&id)))?).await?
@@ -2979,6 +3004,7 @@ async fn run(cli: Cli) -> Result<()> {
             events::list(&r, after, None).await?
         }
         Command::Version
+        | Command::Feedback { .. }
         | Command::Licenses
         | Command::Completions { .. }
         | Command::Config { .. }
@@ -2990,7 +3016,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
     };
     if chat_list {
-        output.chats(&result)
+        output.chats(&result)?;
     } else {
         output.print(&result)?;
         if attached_login && !cli.json && result["state"] == "succeeded" {
@@ -3003,8 +3029,11 @@ async fn run(cli: Cli) -> Result<()> {
                 connection::login_next_steps(&result, label, target.is_loopback())
             );
         }
-        Ok(())
     }
+    if count_send {
+        feedback::maybe_record_send_and_emit_notice(&settings.path, &result, cli.json);
+    }
+    Ok(())
 }
 async fn stdin_token() -> Result<String> {
     use std::io::IsTerminal;

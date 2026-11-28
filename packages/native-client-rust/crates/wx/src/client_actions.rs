@@ -588,6 +588,7 @@ fn validate_recall_operation(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // Mirrors one command's mutually exclusive payload flags.
 pub async fn send(
     r: &Remote,
@@ -612,6 +613,57 @@ pub async fn send(
     detach: bool,
     wait: u64,
 ) -> Result<Value> {
+    send_with_replay_status(
+        r,
+        config,
+        thread,
+        share,
+        title,
+        description,
+        thumbnail_url,
+        text,
+        quote_message_id,
+        quote_server_id,
+        mention,
+        mention_all,
+        image,
+        file,
+        video,
+        video_quality,
+        image_quality,
+        voice,
+        key,
+        detach,
+        wait,
+    )
+    .await
+    .map(|(value, _)| value)
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors one command's mutually exclusive payload flags.
+pub async fn send_with_replay_status(
+    r: &Remote,
+    config: &settings::File,
+    thread: String,
+    share: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    thumbnail_url: Option<String>,
+    text: Option<String>,
+    quote_message_id: Option<String>,
+    quote_server_id: Option<String>,
+    mention: Vec<String>,
+    mention_all: bool,
+    image: Option<PathBuf>,
+    file: Option<PathBuf>,
+    video: Option<PathBuf>,
+    video_quality: Option<String>,
+    image_quality: Option<String>,
+    voice: Option<PathBuf>,
+    key: Option<String>,
+    detach: bool,
+    wait: u64,
+) -> Result<(Value, bool)> {
     let mentions = if mention_all || !mention.is_empty() {
         if text.is_none() || !thread.ends_with("@chatroom") {
             bail!("mentions require group --text");
@@ -743,7 +795,7 @@ pub async fn send(
             .await?;
         let mut value = value;
         value["receiptPath"] = json!(path);
-        return Ok(value);
+        return Ok((value, true));
     }
     let (mut result, resource) = if kind == "text" || kind == "share" {
         (
@@ -814,7 +866,7 @@ pub async fn send(
     write_replace(&path, &receipt)?;
     result = wait_resource(r, result, resource, if detach { 0 } else { wait }).await?;
     result["receiptPath"] = json!(path);
-    Ok(result)
+    Ok((result, false))
 }
 fn send_kind_source_limit(kind: &str) -> Result<usize> {
     use wechat_core::MediaKind;

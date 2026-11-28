@@ -28,7 +28,7 @@ fn configure(command: Command, parents: &[&str]) -> Command {
         ["wx", "daemon", "doctor"] => "Examples:\n  wx daemon doctor\n  wx daemon doctor --all\n  wx daemon doctor --fix\n  wx --data-dir /path/to/data daemon doctor --json\n\nRuns read-only checks on the data folder when the daemon is stopped, without taking owner.lock or modifying databases.",
         ["wx", "daemon" | "store" | "serve", ..] => "Runs on this computer. Use --data-dir PATH and --server-config FILE for the local daemon store.",
         ["wx", "completions"] => "Examples:\n  wx completions bash\n  wx completions zsh\n  wx completions fish\n  wx completions powershell\n\nPrints a completion script to stdout. Runs locally without a server connection or API token.",
-        ["wx", "version" | "licenses"] => "Runs locally without a server connection or API token.",
+        ["wx", "version" | "licenses" | "feedback"] => "Runs locally without a server connection or API token.",
         _ => "Use --server-name NAME to select a saved server and --account ID to select an account.\nRun wx accounts list to find account IDs and aliases. AGENT_WECHAT_TOKEN supplies an API token.",
     };
     let command = if matches!(
