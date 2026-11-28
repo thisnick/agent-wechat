@@ -28,7 +28,10 @@ Installers that disable lifecycle scripts are supported:
 ```bash
 npm install -g --ignore-scripts @agent-wechat/cli@VERSION
 wx-native-install
+wx-native-install --link
 ```
+
+On global npm installs where npm's global bin folder is not on `PATH`, postinstall (or `wx-native-install --link`, which also supports pnpm and `--ignore-scripts` installs) checks for an existing `wx` on `PATH`, links `~/.local/bin/wx` to the package's `wx` launcher when `~/.local/bin` is on `PATH` and free, or prints the shell `PATH` line to add. It never replaces an existing file or a symlink it did not create.
 
 For offline deployment, provision the release binary and its `wx-vVERSION-checksums.json` into one local directory, then run:
 

@@ -57,5 +57,6 @@ Next: [connect your account](/setup/connect/).
 
 <Aside title="Good to know">
 - If `wx` says no native runtime is installed, the install script didn't run. Run `wx-native-install`.
+- If your shell says `wx` is not found after a global install, npm or pnpm's global bin folder isn't on your `PATH`. Run `wx-native-install --link` from that bin folder (for example `"$(npm prefix -g)/bin/wx-native-install" --link` or `"$(pnpm bin -g)/wx-native-install" --link`) to link `wx` into `~/.local/bin` or print the `PATH` line for your shell. To run an already-installed global `wx` once without changing `PATH`, use `npx -p @agent-wechat/cli wx` — don't run `npx wx`, which refers to an unrelated npm package.
 - Install FFmpeg and FFprobe on the daemon's machine (for example `apt install ffmpeg`, `brew install ffmpeg` or `winget install Gyan.FFmpeg`) if you'll send voice or video.
 </Aside>
