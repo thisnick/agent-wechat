@@ -95,15 +95,32 @@ async fn identity(config: &crate::config::ServerConfig, owned: &OwnedProcess) ->
     }
     Ok(value)
 }
-fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: Option<u64>) -> anyhow::Error {
-    let mut hint = String::new();
-    if let Some(offset) = after_offset {
-        if let Some(matched) = crate::doctor::last_log_error(log, offset) {
-            hint.push_str(&format!("Last log error: {}\n", matched.line));
-        }
+#[derive(Debug)]
+pub(crate) struct HintedError {
+    pub(crate) source: anyhow::Error,
+    pub(crate) last_log_error: Option<String>,
+}
+
+impl std::fmt::Display for HintedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
     }
-    hint.push_str("Run `wx daemon doctor` to diagnose");
-    error.context(hint)
+}
+
+impl std::error::Error for HintedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
+fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: Option<u64>) -> anyhow::Error {
+    let last_log_error = after_offset
+        .and_then(|offset| crate::doctor::last_log_error(log, offset))
+        .map(|matched| matched.line);
+    anyhow::Error::new(HintedError {
+        source: error,
+        last_log_error,
+    })
 }
 
 pub async fn run(
@@ -387,14 +404,26 @@ mod tests {
     }
 
     #[test]
-    fn with_log_hint_does_not_duplicate_error_or_show_stale_lines() {
+    fn with_log_hint_preserves_json_message_exit_classification_and_log_offset() {
         let temp = tempfile::tempdir().unwrap();
         let log = temp.path().join("daemon.log");
         let stale = "Error: stale problem from earlier run\n";
         std::fs::write(&log, stale).unwrap();
         let offset = stale.len() as u64;
 
-        let err_none = with_log_hint(anyhow::anyhow!("daemon listener is occupied"), &log, None);
+        let inner_io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address in use");
+        let err_none = with_log_hint(
+            anyhow::Error::new(inner_io)
+                .context("daemon listener is occupied; no owner was adopted or stopped"),
+            &log,
+            None,
+        );
+        // JSON error message (`to_string()`) keeps the real cause, never the hint text.
+        assert_eq!(
+            err_none.to_string(),
+            "daemon listener is occupied; no owner was adopted or stopped"
+        );
+        // Human `{:#}` preserves the cause chain without duplicating the message.
         let formatted_none = format!("{err_none:#}");
         assert_eq!(
             formatted_none
@@ -402,24 +431,33 @@ mod tests {
                 .count(),
             1
         );
-        assert!(formatted_none.contains("Run `wx daemon doctor` to diagnose"));
-        assert!(!formatted_none.contains("stale problem"));
+        assert!(formatted_none.contains("Address in use"));
+        let hint_none = err_none.downcast_ref::<HintedError>().unwrap();
+        assert_eq!(hint_none.last_log_error, None);
 
-        let fresh_line = "Error: fresh startup failure\n";
+        // Fresh log line containing `invalid ` and `config` must not flip exit 1 to exit 2.
+        let fresh_line = "Error: invalid config value in fresh startup failure\n";
         std::fs::write(&log, format!("{stale}{fresh_line}")).unwrap();
         let err_fresh = with_log_hint(
             anyhow::anyhow!("native daemon exited before readiness"),
             &log,
             Some(offset),
         );
-        let formatted_fresh = format!("{err_fresh:#}");
         assert_eq!(
-            formatted_fresh
-                .matches("native daemon exited before readiness")
-                .count(),
-            1
+            err_fresh.to_string(),
+            "native daemon exited before readiness"
         );
-        assert!(formatted_fresh.contains("Last log error: Error: fresh startup failure"));
-        assert!(!formatted_fresh.contains("stale problem"));
+        assert_eq!(outcome::classify(&err_fresh).0, 1);
+        let hint_fresh = err_fresh.downcast_ref::<HintedError>().unwrap();
+        assert_eq!(
+            hint_fresh.last_log_error.as_deref(),
+            Some("Error: invalid config value in fresh startup failure")
+        );
+
+        // A real config/invalid error still classifies as exit 2, and typed outcome errors keep their code.
+        let err_load = with_log_hint(anyhow::anyhow!("invalid daemon/process.json"), &log, None);
+        assert_eq!(outcome::classify(&err_load).0, 2);
+        let err_auth = with_log_hint(outcome::failure(4, "unauthorized", "denied"), &log, None);
+        assert_eq!(outcome::classify(&err_auth), (4, "unauthorized".into()));
     }
 }

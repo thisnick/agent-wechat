@@ -28,18 +28,16 @@ pub fn failure(exit: i32, code: &str, message: &str) -> anyhow::Error {
     .into()
 }
 pub fn classify(error: &anyhow::Error) -> (i32, String) {
-    if let Some(error) = error.chain().find_map(|e| e.downcast_ref::<Error>()) {
+    let error = error
+        .downcast_ref::<crate::daemon::HintedError>()
+        .map_or(error, |hint| &hint.source);
+    if let Some(error) = error.downcast_ref::<Error>() {
         return (error.exit, error.code.clone());
     }
-    if error
-        .chain()
-        .any(|e| e.downcast_ref::<reqwest::Error>().is_some())
-    {
+    if error.downcast_ref::<reqwest::Error>().is_some() {
         return (3, "endpoint_unavailable".into());
     }
-    // Check only the primary error line so appended log/doctor hints cannot alter classification.
-    let full = error.to_string();
-    let message = full.lines().next().unwrap_or(&full);
+    let message = error.to_string();
     if message.contains("unsupported_capability") {
         return (9, "unsupported_capability".into());
     }
@@ -52,9 +50,7 @@ pub fn classify(error: &anyhow::Error) -> (i32, String) {
     if message.contains("account_not_") {
         return (2, "account_not_selected".into());
     }
-    if error
-        .chain()
-        .any(|e| e.downcast_ref::<std::io::Error>().is_some())
+    if error.downcast_ref::<std::io::Error>().is_some()
         || [
             "config",
             "must ",

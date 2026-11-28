@@ -1312,7 +1312,15 @@ async fn main() {
             );
         } else {
             eprintln!("{error:#}");
-            if is_serve {
+            if let Some(hint) = error
+                .chain()
+                .find_map(|e| e.downcast_ref::<daemon::HintedError>())
+            {
+                if let Some(line) = &hint.last_log_error {
+                    eprintln!("Last log error: {line}");
+                }
+                eprintln!("Run `wx daemon doctor` to diagnose.");
+            } else if is_serve {
                 eprintln!("Run `wx daemon doctor` to diagnose.");
             }
         }
