@@ -13,8 +13,10 @@ import {
   parseServerConfig,
   resolveDataDir,
   resolveServerConfigPath,
+  shouldUpdateStableBinary,
   stableBinaryPath,
   updateStableBinary,
+  versionFromBinaryPath,
 } from '../scripts/stable-binary.mjs';
 
 async function tempDir(t) {
@@ -72,8 +74,26 @@ test(
     assert.equal(updated, link);
     assert.equal(await readlink(link), v2);
     assert.ok((await lstat(link)).isSymbolicLink());
+
+    // Never downgrade a live stable link to an older version (e.g. npx or older install).
+    assert.equal(await updateStableBinary(v1, { env, platform: 'linux' }), null);
+    assert.equal(await readlink(link), v2);
+
+    // If the newer target was deleted (dangling symlink), replace it cleanly.
+    await rm(v2);
+    assert.equal(await updateStableBinary(v1, { env, platform: 'linux' }), link);
+    assert.equal(await readlink(link), v1);
   },
 );
+
+test('shouldUpdateStableBinary restricts postinstall link updates to global installs', () => {
+  assert.equal(shouldUpdateStableBinary({ isPostinstall: true, env: { npm_config_global: 'true' } }), true);
+  assert.equal(shouldUpdateStableBinary({ isPostinstall: true, env: { npm_config_global: 'false' } }), false);
+  assert.equal(shouldUpdateStableBinary({ isPostinstall: true, env: {} }), false);
+  assert.equal(shouldUpdateStableBinary({ isPostinstall: false, env: {} }), true);
+  assert.equal(versionFromBinaryPath('/opt/pkg/native/3.2.1/linux-x64-gnu/wx'), '3.2.1');
+  assert.equal(versionFromBinaryPath('/usr/local/bin/wx'), null);
+});
 
 test(
   'updateStableBinary rejects relative targets, symlinked data dirs, and skips sudo root installs into a user HOME',

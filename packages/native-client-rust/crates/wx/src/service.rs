@@ -702,8 +702,9 @@ fn ensure_no_conflicting_owner(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(unix, test)))]
 fn write_unit_file(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write;
     let parent = path
         .parent()
         .context("systemd unit path must have a parent directory")?;
@@ -893,10 +894,22 @@ async fn wait_for_service_ready(config: &crate::config::ServerConfig) -> Result<
     }
 }
 
+#[cfg(any(target_os = "linux", all(unix, test)))]
+fn restore_unit_file(unit_file: &Path, previous_unit: Option<&str>) {
+    match previous_unit {
+        Some(previous) => {
+            let _ = write_unit_file(unit_file, previous);
+        }
+        None => {
+            let _ = std::fs::remove_file(unit_file);
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn rollback_new_unit(unit_file: &Path) {
+fn rollback_unit(unit_file: &Path, previous_unit: Option<&str>) {
     let _ = run_systemctl(&["disable", "--now", UNIT_NAME]);
-    let _ = std::fs::remove_file(unit_file);
+    restore_unit_file(unit_file, previous_unit);
     let _ = run_systemctl(&["reset-failed", UNIT_NAME]);
     let _ = run_systemctl(&["daemon-reload"]);
 }
@@ -978,7 +991,7 @@ pub async fn install(
         let final_spec = build_unit_spec(&config, overrides, executable, &accounts);
         let final_rendered = render_unit(&final_spec)?;
 
-        let existed_before = unit_file.exists();
+        let previous_unit = read_installed_unit(&unit_file);
         write_unit_file(&unit_file, &final_rendered)?;
         let activation = async {
             systemctl_checked(&["daemon-reload"])?;
@@ -989,9 +1002,7 @@ pub async fn install(
         let status = match activation {
             Ok(status) => status,
             Err(error) => {
-                if !existed_before {
-                    rollback_new_unit(&unit_file);
-                }
+                rollback_unit(&unit_file, previous_unit.as_deref());
                 return Err(error);
             }
         };
@@ -1296,6 +1307,25 @@ mod tests {
         assert_eq!(
             resolve_service_executable(&other, &data_dir, &env).unwrap(),
             std::fs::canonicalize(&other).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_unit_file_removes_new_unit_and_restores_previous_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        let unit_file = temp.path().join("systemd/user/agent-wechat-native.service");
+
+        write_unit_file(&unit_file, "[Unit]\nDescription=new\n").unwrap();
+        assert!(unit_file.is_file());
+        restore_unit_file(&unit_file, None);
+        assert!(!unit_file.exists());
+
+        write_unit_file(&unit_file, "[Unit]\nDescription=replacement\n").unwrap();
+        restore_unit_file(&unit_file, Some("[Unit]\nDescription=original\n"));
+        assert_eq!(
+            std::fs::read_to_string(&unit_file).unwrap(),
+            "[Unit]\nDescription=original\n"
         );
     }
 }

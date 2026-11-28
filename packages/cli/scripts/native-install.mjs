@@ -5,7 +5,12 @@ import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ensureWxOnPath } from './native-path.mjs';
 import { installNative, packageRoot, resolveNative } from './native-runtime.mjs';
-import { detectOutdatedDaemon, formatUpgradeNotice, updateStableBinary } from './stable-binary.mjs';
+import {
+  detectOutdatedDaemon,
+  formatUpgradeNotice,
+  shouldUpdateStableBinary,
+  updateStableBinary,
+} from './stable-binary.mjs';
 
 const usage = `Usage: wx-native-install [options]
 
@@ -51,17 +56,24 @@ try {
         const destination = await installNative({ artifactDir: process.env.AGENT_WECHAT_NATIVE_ARTIFACT_DIR });
         console.error(`Installed native runtime: ${destination}`);
         runtimeReady = true;
+        let installedVersion = null;
         try {
-          const stable = await updateStableBinary(destination);
-          if (stable) console.error(`Updated stable native binary link: ${stable}`);
-        } catch (linkError) {
-          console.error(`Warning: could not update stable native binary link: ${linkError.message}`);
-        }
-        try {
-          const { version } = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
-          const outdated = await detectOutdatedDaemon(version);
-          if (outdated) console.error(formatUpgradeNotice(outdated));
+          installedVersion = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')).version;
         } catch {}
+        if (shouldUpdateStableBinary({ isPostinstall })) {
+          try {
+            const stable = await updateStableBinary(destination, { version: installedVersion ?? undefined });
+            if (stable) console.error(`Updated stable native binary link: ${stable}`);
+          } catch (linkError) {
+            console.error(`Warning: could not update stable native binary link: ${linkError.message}`);
+          }
+        }
+        if (installedVersion) {
+          try {
+            const outdated = await detectOutdatedDaemon(installedVersion);
+            if (outdated) console.error(formatUpgradeNotice(outdated));
+          } catch {}
+        }
       }
     }
     if (runtimeReady && (args.includes('--link') || (isPostinstall && process.env.npm_config_global === 'true'))) {

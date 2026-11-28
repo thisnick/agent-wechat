@@ -451,14 +451,14 @@ pub async fn run(
             if !(1..=300).contains(&timeout) {
                 bail!("daemon restart timeout must be 1..300 seconds");
             }
+            let has_owned = load(&record)?.is_some_and(|owned| process_matches(&owned));
             #[cfg(target_os = "linux")]
-            if has_matching_systemd_service(&config, env) {
+            if !has_owned && has_matching_systemd_service(&config, env) {
                 return crate::service::restart_service(&config, env, output).await;
             }
             if config.listen.port() == 0 {
                 bail!("daemon restart requires an explicit nonzero listen port");
             }
-            let has_owned = load(&record)?.is_some_and(|owned| process_matches(&owned));
             if !has_owned {
                 crate::service::check_owner_lock_free(&config.data_dir)?;
                 crate::service::check_ports_free(&config)?;

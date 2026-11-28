@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, rename, rm, symlink } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readlink, realpath, rename, rm, symlink } from 'node:fs/promises';
 import { posix, win32 } from 'node:path';
 
 function pathFor(platform) {
@@ -71,9 +71,19 @@ async function ensurePrivateDir(path, pathLib, euid) {
   }
 }
 
+export function shouldUpdateStableBinary({ isPostinstall = false, env = process.env } = {}) {
+  if (!isPostinstall) return true;
+  return env.npm_config_global === 'true';
+}
+
+export function versionFromBinaryPath(binaryPath) {
+  const match = /[/\\]native[/\\]([^/\\]+)[/\\][^/\\]+[/\\]wx(?:\.exe)?$/.exec(String(binaryPath ?? ''));
+  return match && parseSemver(match[1]) ? match[1] : null;
+}
+
 export async function updateStableBinary(
   targetBinary,
-  { dataDir, env = process.env, platform = process.platform, euid = process.geteuid?.() } = {},
+  { version, dataDir, env = process.env, platform = process.platform, euid = process.geteuid?.() } = {},
 ) {
   const pathLib = pathFor(platform);
   if (!nonEmptyAbsolute(targetBinary, pathLib)) {
@@ -97,10 +107,22 @@ export async function updateStableBinary(
   const binDir = pathLib.join(dir, 'bin');
   await ensurePrivateDir(binDir, pathLib, euid);
   const destination = pathLib.join(binDir, 'wx');
+  const nextVersion = version ?? versionFromBinaryPath(targetBinary);
   try {
     const existing = await lstat(destination);
     if (existing.isDirectory()) {
       throw new Error(`Stable binary path is a directory: ${destination}`);
+    }
+    if (existing.isSymbolicLink() && nextVersion) {
+      const currentTarget = await readlink(destination);
+      const currentVersion = versionFromBinaryPath(currentTarget);
+      if (currentVersion && isOlderVersion(nextVersion, currentVersion)) {
+        let targetAlive = false;
+        try {
+          targetAlive = (await lstat(currentTarget)).isFile();
+        } catch {}
+        if (targetAlive) return null;
+      }
     }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
