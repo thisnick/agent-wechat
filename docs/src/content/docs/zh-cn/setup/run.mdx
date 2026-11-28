@@ -1,7 +1,7 @@
 ---
 title: 后台持续运行
 description: 通过 wx daemon、systemd 或 Docker Compose 在后台持续运行服务。
-sourceHash: 4339b32f8c77
+sourceHash: "c0dc454919ed"
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -16,6 +16,7 @@ import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 ```bash
 wx daemon start
 wx daemon status
+wx daemon restart
 wx daemon logs --follow
 wx daemon stop
 ```
@@ -23,27 +24,31 @@ wx daemon stop
 </TabItem>
 <TabItem label="systemd">
 
-支持异常崩溃自动重启，并随用户登录会话启动。安装官方示例 [用户服务文件](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/agent-wechat-native.service)：
+在 Linux 上，systemd 用户服务会在失败时自动重启，并随你的用户会话启动。请先停止正在运行的 Daemon（执行 `wx daemon stop`，或退出桌面应用），然后再安装：
 
-```bash
-mkdir -p ~/.config/systemd/user ~/.config/agent-wechat/server
-curl -fsSLo ~/.config/systemd/user/agent-wechat-native.service \
-  https://raw.githubusercontent.com/thisnick/agent-wechat/main/deploy/native/agent-wechat-native.service
-test -f ~/.config/agent-wechat/server/config.toml ||
-  echo 'schemaVersion = 1' > ~/.config/agent-wechat/server/config.toml
-```
+1. 预览单元文件，但不安装：
 
-在启用服务前，请检查并调整配置：
+   ```bash
+   wx daemon install --dry-run
+   ```
 
-- `ExecStart=` 默认执行 `~/.local/bin/wx`。若 `command -v wx` 路径不同请修改。
-- 如果你是通过 `--official` 登录的，请将微信目录添加到 `ReadWritePaths=` 中，例如 `%h/xwechat_files %h/.xwechat`。默认配置下该服务单元仅对 `~/.local/share/agent-wechat` 拥有写权限。
+2. 安装并启动服务（写入单元文件或调用 `systemctl` 前会先询问你）：
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now agent-wechat-native
-```
+   ```bash
+   wx daemon install
+   ```
 
-在无图形界面的服务器上，请执行 `loginctl enable-linger`，使 systemd 用户服务在未登录时依然保持运行。
+   此命令会根据随附的[用户单元文件](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/agent-wechat-native.service)生成 `~/.config/systemd/user/agent-wechat-native.service`。生成的文件包含稳定的原生程序路径、你的数据目录和服务器配置，并授予对所有已注册 `--official` Profile 的写入权限。
+
+3. 之后管理服务：
+
+   ```bash
+   wx daemon status
+   wx daemon restart
+   wx daemon uninstall   # 移除服务单元；保留你的数据
+   ```
+
+在无图形界面的服务器上，请执行 `loginctl enable-linger`，使服务在未登录时依然保持运行。如果安装后再添加 `--official` Profile，请先运行 `wx daemon uninstall`，然后重新运行 `wx daemon install`，以便 `ReadWritePaths=` 包含微信的目录。
 
 </TabItem>
 <TabItem label="Docker Compose" id="docker-compose">
