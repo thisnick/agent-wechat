@@ -162,28 +162,6 @@ impl Store {
             Ok(())
         })
     }
-    /// Retain an unconfirmed AppAuth without changing the call session state.
-    /// This preserves separately fenced cleanup and does not permit replay.
-    pub fn finish_unconfirmed_app_auth(
-        &self,
-        account: &str,
-        call_id: &str,
-        action_id: &str,
-    ) -> Result<()> {
-        if !id(call_id) || !id(action_id) {
-            bail!("invalid_call_result");
-        }
-        self.control(account, |db| {
-            let changed = db.execute(
-                "UPDATE call_actions SET outcome='needs_review',updated_at=?3 WHERE call_id=?1 AND action_id=?2 AND route=7994 AND outcome='prepared'",
-                params![call_id, action_id, unix_seconds()],
-            )?;
-            if changed != 1 {
-                bail!("call_action_already_recorded");
-            }
-            Ok(())
-        })
-    }
     pub fn finish_call(
         &self,
         account: &str,
@@ -276,33 +254,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn unconfirmed_app_auth_preserves_active_session_and_rejects_other_routes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(&tmp.path().join("data")).unwrap();
-        store.create_account("a").unwrap();
-        assert!(store.begin_call("a", "c", "generation").unwrap());
-        let request = [1; 30];
-        let digest = "a".repeat(64);
-        assert!(store
-            .begin_call_action("a", "c", "auth", 7994, &digest, &request)
-            .unwrap());
-        store.finish_unconfirmed_app_auth("a", "c", "auth").unwrap();
-        assert!(!store
-            .begin_call_action("a", "c", "auth", 7994, &digest, &request)
-            .unwrap());
-        assert!(store
-            .begin_call_action("a", "c", "cancel", 11421, &digest, &request)
-            .unwrap());
-        assert!(store
-            .finish_unconfirmed_app_auth("a", "c", "cancel")
-            .is_err());
-        let records = store.call_action_records("a", "c").unwrap();
-        assert_eq!(records[0].outcome, "needs_review");
-        assert!(records[0].encrypted_reply.is_none());
-        assert_eq!(records[1].outcome, "prepared");
-    }
-
     #[test]
     fn uncertain_additional_invitation_preserves_its_exact_intent_without_reclaiming() {
         let tmp = tempfile::tempdir().unwrap();

@@ -93,6 +93,30 @@ fn app_session_cache_is_fenced_by_errors_and_account_authority() {
     assert!(inner.cached_app_session("one", changed).is_none());
     assert!(inner.cached_app_session("one", auth).is_none());
 
+    inner.store_app_session(&lease, app.clone());
+    // Wall-clock expiry (for example across OS sleep where monotonic Instant pauses) evicts the entry.
+    inner
+        .app_sessions
+        .lock()
+        .unwrap()
+        .get_mut("one")
+        .unwrap()
+        .cached_at_wall = SystemTime::now() - APP_SESSION_TTL - Duration::from_secs(1);
+    assert!(inner.cached_app_session("one", auth).is_none());
+    assert!(inner.app_sessions.lock().unwrap().is_empty());
+
+    // Backward wall-clock jumps conservatively expire cached sessions too.
+    inner.store_app_session(&lease, app.clone());
+    inner
+        .app_sessions
+        .lock()
+        .unwrap()
+        .get_mut("one")
+        .unwrap()
+        .cached_at_wall = SystemTime::now() + Duration::from_secs(60);
+    assert!(inner.cached_app_session("one", auth).is_none());
+    assert!(inner.app_sessions.lock().unwrap().is_empty());
+
     inner.store_app_session(&lease, app);
     core.fence_call_authority("one");
     assert!(!lease.current());
@@ -554,24 +578,7 @@ impl Drop for Fixture {
     }
 }
 
-#[tokio::test]
-async fn outgoing_app_auth_cleanup_admits_only_app_auth_without_an_owner_sink() {
-    let mut f = Fixture::new(Hold::AfterHandoff).await;
-    Arc::get_mut(&mut f.transport).unwrap().admission = ControlAdmission::OutgoingAppAuthCleanup;
-    f.host.release();
-    for route in [CallHostRoute::Invite, CallHostRoute::Cancel] {
-        let (_, result) = f.start(route, 1).await.unwrap();
-        assert!(result.unwrap_err().is::<CallRpcNotSubmitted>());
-    }
-    let (_, result) = f.start(CallHostRoute::AppAuth, 2).await.unwrap();
-    assert_eq!(result.unwrap(), reply(CallHostRoute::AppAuth));
-    assert_eq!(f.host.submitted.load(Ordering::Acquire), 1);
-    let records = f.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].route, CallHostRoute::AppAuth.command());
-}
-
-fn dial_invite_reply(peer_status: u64) -> Vec<u8> {
+fn dial_invite_reply(peer_status: u64, relay_ep: Option<std::net::SocketAddr>) -> Vec<u8> {
     let member = |name: &str, id, status| {
         p::bytes(
             2,
@@ -600,8 +607,20 @@ fn dial_invite_reply(peer_status: u64) -> Vec<u8> {
         ),
     ])
     .unwrap();
-    // Deliberately omit relay endpoints: the ringing actor cannot open a socket.
-    let strategy = p::message(&[p::bytes(13, &cap), p::uint(14, 0)]).unwrap();
+    let mut strategy_fields = vec![p::bytes(13, &cap), p::uint(14, 0)];
+    if let Some(ep) = relay_ep {
+        let addr = p::message(&[
+            p::bytes(1, ep.ip().to_string().as_bytes()),
+            p::uint(2, u64::from(ep.port())),
+        ])
+        .unwrap();
+        strategy_fields.push(p::bytes(10, &[7u8; 32]));
+        strategy_fields.push(p::bytes(
+            15,
+            &p::message(&[p::uint(1, 1), p::bytes(4, &addr)]).unwrap(),
+        ));
+    }
+    let strategy = p::message(&strategy_fields).unwrap();
     let av = p::message(&[
         p::uint(3, 1),
         p::bytes(4, &p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap()),
@@ -627,9 +646,175 @@ fn dial_invite_reply(peer_status: u64) -> Vec<u8> {
     p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
 }
 
+fn dial_joined_sync_reply() -> Vec<u8> {
+    let member = |name: &str, id, status| {
+        p::bytes(
+            4,
+            &p::message(&[
+                p::bytes(1, name.as_bytes()),
+                p::uint(2, id),
+                p::uint(3, status),
+                p::bytes(7, name.as_bytes()),
+            ])
+            .unwrap(),
+        )
+    };
+    let members = p::message(&[
+        p::uint(1, 7),
+        p::uint(2, 9),
+        p::uint(3, 2),
+        member(OWN, 0, 1),
+        member(PEER, 1, 1),
+    ])
+    .unwrap();
+    let av = p::message(&[
+        p::uint(3, 2),
+        p::bytes(4, &p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap()),
+        p::bytes(4, &p::message(&[p::uint(1, 1), p::uint(2, 1)]).unwrap()),
+    ])
+    .unwrap();
+    let notify = p::message(&[
+        p::uint(3, 7),
+        p::uint(4, 9),
+        p::bytes(
+            5,
+            &p::message(&[p::uint(1, 10), p::bytes(2, &members)]).unwrap(),
+        ),
+        p::bytes(5, &p::message(&[p::uint(1, 12), p::bytes(2, &av)]).unwrap()),
+    ])
+    .unwrap();
+    let message = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+    let body = p::message(&[
+        p::bytes(
+            1,
+            &p::message(&[p::uint(1, 1), p::bytes(2, &message)]).unwrap(),
+        ),
+        p::bytes(2, b"joined"),
+    ])
+    .unwrap();
+    p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
+}
+
+fn dial_exit_transfer_reply() -> Vec<u8> {
+    let room = p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0)]).unwrap();
+    let frame = wechat_protocol::calls::app_frame::TaskFrame {
+        command: 3380,
+        integers: BTreeMap::from([
+            (4, 0),
+            (7, 0),
+            (8, 0),
+            (21, 0),
+            (22, 17),
+            (23, 0),
+            (25, 0),
+            (26, 0),
+        ]),
+        strings: BTreeMap::new(),
+        payload: p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 17), p::bytes(3, &room)]).unwrap(),
+    }
+    .encode()
+    .unwrap();
+    let body = p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap();
+    p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
+}
+
+fn spawn_synthetic_relay(
+    step_delay: Duration,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<AtomicBool>,
+    thread::JoinHandle<()>,
+) {
+    use wechat_protocol::calls::relay::{
+        decrypt_checkin, encrypt_checkin, frame_outer, unframe_outer,
+    };
+    let server = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = server.local_addr().unwrap();
+    server.set_nonblocking(true).unwrap();
+    let checkins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let checkins_thread = checkins.clone();
+    let stop_thread = stop.clone();
+    let key: [u8; 16] = crypto::md5(&9u64.to_le_bytes()).try_into().unwrap();
+    let relay_reply = move |cmd: u64, body: &[u8]| -> Vec<u8> {
+        let public = p::message(&[p::uint(1, cmd), p::uint(2, 3), p::uint(3, 0)]).unwrap();
+        let header = p::message(&[p::bytes(1, &public), p::uint(2, 7), p::uint(3, 10)]).unwrap();
+        let rand = vec![5; (8 - (body.len() + 10) % 8) % 8 + 3];
+        let cipher = encrypt_checkin(body, &key, &rand).unwrap();
+        frame_outer(
+            &p::message(&[
+                p::bytes(1, &header),
+                p::uint(2, cipher.len() as u64),
+                p::bytes(3, &cipher),
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let handle = thread::spawn(move || {
+        let mut buf = [0u8; 8198];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stop_thread.load(Ordering::Acquire) && Instant::now() < deadline {
+            match server.recv_from(&mut buf) {
+                Ok((n, src)) if n > 0 && buf[0] == 0xd5 => {
+                    let outer = p::decode(unframe_outer(&buf[..n]).unwrap()).unwrap();
+                    let cipher = p::data(&outer, 3).unwrap();
+                    let clear = decrypt_checkin(cipher, &key, 4096).unwrap();
+                    let body = p::decode(&clear).unwrap();
+                    let server_text = p::optional_data(&body, 15).unwrap().unwrap_or_default();
+                    if !step_delay.is_zero() {
+                        thread::sleep(step_delay);
+                    }
+                    checkins_thread.fetch_add(1, Ordering::AcqRel);
+                    if server_text.is_empty() {
+                        let resp = p::message(&[
+                            p::uint(1, 0),
+                            p::uint(2, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                            p::uint(3, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                            p::uint(4, u64::from(src.port())),
+                            p::uint(5, u64::from(endpoint.port())),
+                            p::uint(6, 1),
+                            p::uint(7, 0),
+                            p::uint(8, 2),
+                            p::uint(9, 1),
+                            p::bytes(12, b"127.0.0.1"),
+                            p::bytes(13, b"127.0.0.1"),
+                            p::uint(14, 0),
+                        ])
+                        .unwrap();
+                        let _ = server.send_to(&relay_reply(0x1002, &resp), src);
+                    } else {
+                        let ready = p::message(&[
+                            p::uint(1, 0),
+                            p::uint(2, 7),
+                            p::uint(3, 0),
+                            p::uint(5, 0),
+                            p::uint(6, 1),
+                            p::uint(7, 0),
+                        ])
+                        .unwrap();
+                        let _ = server.send_to(&relay_reply(0x1004, &ready), src);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (endpoint, checkins, stop, handle)
+}
+
 struct DialHost {
     peer_status: u64,
     fail_auth: bool,
+    relay_ep: Option<std::net::SocketAddr>,
+    answer_after_checkins: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+    live_sync_calls: std::sync::atomic::AtomicUsize,
+    checkins_at_answer: Mutex<Option<usize>>,
     drop_owner: Mutex<Option<ControlConnection>>,
     submitted: Mutex<Vec<CallHostRoute>>,
 }
@@ -646,12 +831,31 @@ impl TestCallIo for DialHost {
         match route {
             CallHostRoute::Invite => {
                 drop(self.drop_owner.lock().unwrap().take());
-                Ok(dial_invite_reply(self.peer_status))
+                Ok(dial_invite_reply(self.peer_status, self.relay_ep))
             }
             CallHostRoute::AppAuth if self.fail_auth => {
                 bail!("synthetic post-handoff AppAuth failure")
             }
             CallHostRoute::AppAuth | CallHostRoute::Cancel => Ok(reply(route)),
+            CallHostRoute::LiveSync => {
+                let n = self.live_sync_calls.fetch_add(1, Ordering::AcqRel);
+                if let Some((checkins, needed)) = &self.answer_after_checkins {
+                    if n == 0 {
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while checkins.load(Ordering::Acquire) < *needed
+                            && Instant::now() < deadline
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        *self.checkins_at_answer.lock().unwrap() =
+                            Some(checkins.load(Ordering::Acquire));
+                        return Ok(dial_joined_sync_reply());
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
+                Ok(reply(CallHostRoute::LiveSync))
+            }
+            CallHostRoute::Transfer => Ok(dial_exit_transfer_reply()),
             _ => bail!("unexpected synthetic dial route {route:?}"),
         }
     }
@@ -666,18 +870,31 @@ struct DialFixture {
 }
 impl DialFixture {
     fn new(peer_status: u64, fail_auth: bool) -> Self {
+        Self::with_relay(peer_status, fail_auth, None, None, Duration::ZERO)
+    }
+
+    fn with_relay(
+        peer_status: u64,
+        fail_auth: bool,
+        relay_ep: Option<std::net::SocketAddr>,
+        answer_after_checkins: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+        ring_timeout: Duration,
+    ) -> Self {
         let (temp, core) = synthetic_account();
         let host = Arc::new(DialHost {
             peer_status,
             fail_auth,
+            relay_ep,
+            answer_after_checkins,
+            live_sync_calls: std::sync::atomic::AtomicUsize::new(0),
+            checkins_at_answer: Mutex::new(None),
             drop_owner: Mutex::new(None),
             submitted: Mutex::new(vec![]),
         });
         let mut backend = NativeCallBackend::new(Arc::downgrade(&core));
         let inner = Arc::get_mut(&mut backend.inner).unwrap();
         inner.test_io = Some(host.clone());
-        // Cancel immediately after auth instead of waiting or polling for a peer.
-        inner.config.ring_timeout = Duration::ZERO;
+        inner.config.ring_timeout = ring_timeout;
         let backend = Arc::new(backend);
         let service = Arc::new(CallService::new(backend.clone()));
         Self {
@@ -770,12 +987,12 @@ impl DialFixture {
 }
 
 #[tokio::test]
-async fn cold_dial_authenticates_after_invite_and_warm_dial_reuses_cached_app() {
+async fn cold_dial_authenticates_before_invite_and_warm_dial_reuses_cached_app() {
     use CallHostRoute::{AppAuth, Cancel, Invite};
     let f = DialFixture::new(2, false);
     let (_, outcome, routes) = f.dial("cold", false).await;
     assert!(matches!(outcome, BackendOutcome::Ended));
-    assert_eq!(routes, [Invite, AppAuth, Cancel]);
+    assert_eq!(routes, [AppAuth, Invite, Cancel]);
     let lease = f.core.call_authority("one").unwrap();
     let auth = app_authority(&f.core, &lease);
     assert_eq!(
@@ -793,72 +1010,134 @@ async fn cold_dial_authenticates_after_invite_and_warm_dial_reuses_cached_app() 
 }
 
 #[tokio::test]
-async fn post_handoff_app_auth_failure_allows_ringing_cancel() {
-    use CallHostRoute::{AppAuth, Cancel, Invite};
+async fn cold_dial_app_auth_failure_ends_before_invite_without_ringing_peer() {
+    use CallHostRoute::AppAuth;
     let f = DialFixture::new(2, true);
-    let (call_id, outcome, routes) = f.dial("ringing-failure", false).await;
+    let (call_id, outcome, routes) = f.dial("auth-failure", false).await;
     assert!(matches!(outcome, BackendOutcome::Ended));
-    assert_eq!(routes, [Invite, AppAuth, Cancel]);
+    assert_eq!(routes, [AppAuth]);
     let records = f.core.store.call_action_records("one", &call_id).unwrap();
-    assert_eq!(
-        records
-            .iter()
-            .map(|r| (r.route, r.outcome.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            (Invite.command(), "received"),
-            (AppAuth.command(), "needs_review"),
-            (Cancel.command(), "received"),
-        ]
-    );
-    // Cancel's journal claim requires an active session, and its confirmed
-    // reply closes the session without changing the unconfirmed AppAuth receipt.
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, AppAuth.command());
+    assert_eq!(records[0].outcome, "needs_review");
     let status = f
         .core
         .store
         .call_session_status("one", &call_id)
         .unwrap()
         .unwrap();
-    assert!(status.local_closed && status.remote_terminal_confirmed);
+    assert!(status.local_closed);
     assert!(!f.core.store.has_unresolved_call("one").unwrap());
 }
 
 #[tokio::test]
-async fn terminal_pending_app_auth_can_submit_after_owner_revocation_but_failure_is_uncertain() {
-    use CallHostRoute::{AppAuth, Invite};
-    // A busy peer classifies the invite reply as TerminalPending, not Ringing.
-    let f = DialFixture::new(6, true);
-    let (call_id, outcome, routes) = f.dial("terminal-auth-failure", true).await;
-    assert!(matches!(outcome, BackendOutcome::Uncertain));
-    assert_eq!(routes, [Invite, AppAuth]);
-    let records = f.core.store.call_action_records("one", &call_id).unwrap();
-    assert_eq!(records[1].route, AppAuth.command());
-    assert_eq!(records[1].outcome, "needs_review");
-    let status = f
-        .core
-        .store
-        .call_session_status("one", &call_id)
-        .unwrap()
+async fn caller_ringing_relay_preconnect_completes_while_ringing_and_reuses_on_join() {
+    let (endpoint, checkins, stop_relay, relay_handle) =
+        spawn_synthetic_relay(Duration::from_millis(20));
+    let f = DialFixture::with_relay(
+        2,
+        false,
+        Some(endpoint),
+        Some((checkins.clone(), 2)),
+        Duration::from_secs(5),
+    );
+    let mut owner = f
+        .service
+        .connect("one", "preconnect-owner", true)
+        .await
         .unwrap();
-    assert!(!status.remote_terminal_confirmed);
-    if !status.local_closed {
-        let request = records[0].encrypted_request.as_deref().unwrap();
-        assert_eq!(
-            f.core
-                .store
-                .begin_call_action(
-                    "one",
-                    &call_id,
-                    "cleanup",
-                    Invite.command(),
-                    &records[0].request_digest,
-                    request
-                )
-                .unwrap_err()
-                .to_string(),
-            "call_needs_review"
-        );
+    let owner_id = owner.client_id.clone();
+    f.service
+        .command(
+            &owner_id,
+            CallCommand::Ready {
+                request_id: "ready".into(),
+                ready: true,
+                format: CallAudioFormat::default(),
+                video: None,
+                scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    loop {
+        if let CallEvent::CommandResult { status, .. } = owner.events.recv().await.unwrap() {
+            assert_eq!(status, CallCommandStatus::Accepted);
+            break;
+        }
     }
+    f.service
+        .command(
+            &owner_id,
+            CallCommand::Dial {
+                request_id: "dial-preconnect".into(),
+                target: CallTarget::Direct {
+                    contact_id: PEER.into(),
+                },
+                call_type: CallType::Voice,
+                camera_enabled: None,
+                muted: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (call_id, revision) = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = owner.events.recv().await {
+            if let CallEvent::State { call } = event {
+                if call.state == CallState::Connected {
+                    return (call.call_id, call.revision);
+                }
+            }
+        }
+        panic!("closed before connected");
+    })
+    .await
+    .unwrap();
+    assert_eq!(*f.host.checkins_at_answer.lock().unwrap(), Some(2));
+    // Reusing the pre-connected relay must not perform a second check-in after Join.
+    assert_eq!(checkins.load(Ordering::Acquire), 2);
+    f.service
+        .command(
+            &owner_id,
+            CallCommand::Hangup {
+                request_id: "hangup-preconnect".into(),
+                call_id,
+                expected_revision: revision,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = owner.events.recv().await {
+            if let CallEvent::State { call } = event {
+                if call.state == CallState::Ended {
+                    let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
+                    assert!(matches!(
+                        worker.wait().await.unwrap(),
+                        BackendOutcome::Ended
+                    ));
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    stop_relay.store(true, Ordering::Release);
+    relay_handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn caller_ringing_relay_preconnect_aborts_cleanly_on_ringing_cancel() {
+    use CallHostRoute::{AppAuth, Cancel, Invite};
+    let (endpoint, _checkins, stop_relay, relay_handle) =
+        spawn_synthetic_relay(Duration::from_millis(10));
+    let f = DialFixture::with_relay(2, false, Some(endpoint), None, Duration::ZERO);
+    let (_, outcome, routes) = f.dial("cancel-preconnect", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [AppAuth, Invite, Cancel]);
+    stop_relay.store(true, Ordering::Release);
+    relay_handle.join().unwrap();
 }
 
 fn stage(core: &Arc<Core>, cancel: bool) {

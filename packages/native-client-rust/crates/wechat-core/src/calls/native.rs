@@ -134,17 +134,23 @@ struct Inner {
     #[cfg(test)]
     test_io: Option<Arc<dyn TestCallIo>>,
 }
-const APP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+const APP_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 
 struct CachedAppSession {
     session: AppSession,
     cached_at: Instant,
+    cached_at_wall: SystemTime,
     lease: CallAuthorityLease,
 }
 
 impl CachedAppSession {
     fn current(&self) -> bool {
-        self.lease.current() && self.cached_at.elapsed() < APP_SESSION_TTL
+        self.lease.current()
+            && self.cached_at.elapsed() < APP_SESSION_TTL
+            && self
+                .cached_at_wall
+                .elapsed()
+                .is_ok_and(|elapsed| elapsed < APP_SESSION_TTL)
     }
 }
 
@@ -169,6 +175,7 @@ impl Inner {
                     CachedAppSession {
                         session,
                         cached_at: Instant::now(),
+                        cached_at_wall: SystemTime::now(),
                         lease: lease.clone(),
                     },
                 );
@@ -894,15 +901,13 @@ enum ControlAdmission {
     Owner(BackendSink),
     Incoming(crate::calls::notifications::IncomingGuard),
     Terminal(BackendSink),
-    // Only AppAuth, solely to tear down an already verified room.
-    OutgoingAppAuthCleanup,
 }
 impl ControlAdmission {
     fn nonterminal_current(&self) -> bool {
         match self {
             Self::Owner(sink) => sink.is_current(),
             Self::Incoming(guard) => guard.is_current(),
-            Self::Terminal(_) | Self::OutgoingAppAuthCleanup => false,
+            Self::Terminal(_) => false,
         }
     }
     fn terminal_current(&self) -> bool {
@@ -1098,11 +1103,6 @@ impl FencedTransport {
                         .finish_interrupted_live_sync(account, call_id, action)?;
                     return Ok(());
                 }
-                if route == CallHostRoute::AppAuth {
-                    core.store
-                        .finish_unconfirmed_app_auth(account, call_id, action)?;
-                    return Ok(());
-                }
                 core.store
                     .finish_call_action(account, call_id, action, "needs_review", None)?;
                 Ok(())
@@ -1172,14 +1172,7 @@ impl FencedTransport {
         {
             return Err(CallRpcNotSubmitted.into());
         }
-        let teardown = if matches!(self.admission, ControlAdmission::OutgoingAppAuthCleanup) {
-            if route != CallHostRoute::AppAuth {
-                return Err(CallRpcNotSubmitted.into());
-            }
-            true
-        } else {
-            is_teardown_request(route, request)?
-        };
+        let teardown = is_teardown_request(route, request)?;
         let rejecting = is_reject_request(route, request)?;
         if !self.admits(teardown, rejecting) {
             return Err(CallRpcNotSubmitted.into());
@@ -1461,8 +1454,12 @@ fn begin_operational_call(
 
 /// Maximum time to complete the relay handshake while ringing.
 const PRECONNECT_HANDSHAKE_BUDGET: Duration = Duration::from_secs(4);
-/// Maximum wait to reuse an in-flight caller or callee handshake after joining.
-const PRECONNECT_HANDOFF_WAIT: Duration = Duration::from_millis(600);
+/// Maximum wait to reuse an in-flight incoming relay handshake after joining.
+const INCOMING_PRECONNECT_HANDOFF_WAIT: Duration = Duration::from_millis(250);
+/// Maximum wait to reuse an in-flight caller relay handshake after peer answer.
+const CALLER_PRECONNECT_HANDOFF_WAIT: Duration = Duration::from_millis(600);
+/// Stop keeping a pre-connected socket alive once it exceeds direct media's reuse age limit.
+const PRECONNECT_MAX_IDLE_AGE: Duration = Duration::from_secs(20);
 
 struct PreconnectHandle {
     target: RelayTarget,
@@ -1547,7 +1544,7 @@ impl PreconnectHandle {
                     );
                 }
                 while !thread_handoff.load(Ordering::Acquire) {
-                    if !can_continue() {
+                    if !can_continue() || ready.age() >= PRECONNECT_MAX_IDLE_AGE {
                         return None;
                     }
                     ready.drain_early_packets();
@@ -1574,13 +1571,13 @@ impl PreconnectHandle {
         self.answering.store(true, Ordering::Release);
     }
 
-    fn claim(mut self) -> Option<PreconnectedRelay> {
+    fn claim(mut self, handoff_wait: Duration) -> Option<PreconnectedRelay> {
         self.mark_answering();
         self.handoff.store(true, Ordering::Release);
         let handle = self.handle.take()?;
         let wait_started = Instant::now();
         while !self.ready.load(Ordering::Acquire) && !handle.is_finished() {
-            if wait_started.elapsed() >= PRECONNECT_HANDOFF_WAIT {
+            if wait_started.elapsed() >= handoff_wait {
                 self.abort.store(true, Ordering::Release);
                 break;
             }
@@ -1645,7 +1642,7 @@ fn run_control(
     let account = &worker.lease.authority().account_id;
     let call_id = worker.identity.call_id();
     begin_operational_call(worker, &core, runtime)?;
-    let mut transport = FencedTransport {
+    let transport = FencedTransport {
         core: inner.core.clone(),
         account: account.clone(),
         lease: worker.lease.clone(),
@@ -1688,6 +1685,7 @@ fn run_control(
     };
     parameters.apply_offer(&voice_offer);
     if worker.is_conference() {
+        inner.invalidate_app_session(account);
         return conference::run(
             &transport,
             state,
@@ -1707,10 +1705,34 @@ fn run_control(
     }
     let cached = inner.cached_app_session(account, auth);
     let cached_app = cached.is_some();
+    let timing = call_timing_enabled();
+    let auth_started = (timing && !cached_app).then(Instant::now);
     let mut session = match cached {
         Some(app) => NativePersonalSession::from_authenticated(&state, auth, app, parameters)?,
-        None => NativePersonalSession::new_unauthenticated(&state, auth, parameters)?,
+        None => match NativePersonalSession::authenticate(
+            &transport,
+            &mut state,
+            auth,
+            tasks.host,
+            crypto::random::<32>()?,
+            parameters,
+        ) {
+            Ok(session) => {
+                inner.store_app_session(&worker.lease, session.app_session().clone());
+                session
+            }
+            Err(error) => {
+                if let Some(start) = auth_started {
+                    eprintln!(
+                        "[wechat-call-timing] dial cached_app=false auth={}ms invite=0ms",
+                        start.elapsed().as_millis()
+                    );
+                }
+                return Err(error);
+            }
+        },
     };
+    let auth_ms = auth_started.map_or(0, |start| start.elapsed().as_millis());
     if worker.stop.load(Ordering::Acquire) || !worker.authorized() {
         core.store.finish_call(account, call_id, true)?;
         let _ = admitted.send(Ok(BackendOutcome::Ended));
@@ -1726,7 +1748,7 @@ fn run_control(
     } else {
         CallMediaMode::Voice
     };
-    let invite_started = call_timing_enabled().then(Instant::now);
+    let invite_started = timing.then(Instant::now);
     let invited = session.invite_with_mode(
         &transport,
         &mut state,
@@ -1737,12 +1759,12 @@ fn run_control(
         tasks.next()?,
     );
     let invite_ms = invite_started.map_or(0, |start| start.elapsed().as_millis());
+    if timing {
+        eprintln!(
+            "[wechat-call-timing] dial cached_app={cached_app} auth={auth_ms}ms invite={invite_ms}ms"
+        );
+    }
     if let Err(error) = invited {
-        if invite_started.is_some() && !error.is::<UnsupportedCallMedia>() {
-            eprintln!(
-                "[wechat-call-timing] dial cached_app={cached_app} invite={invite_ms}ms auth=0ms"
-            );
-        }
         if error.is::<UnsupportedCallMedia>() {
             worker.stop.store(true, Ordering::Release);
             core.store.put_runtime(
@@ -1766,65 +1788,6 @@ fn run_control(
     }
     let preconnect = start_caller_preconnect(worker, &session, &state, auth, &sink);
     let ringing_end = Instant::now() + inner.config.ring_timeout;
-    // Ringing does not require AppAuth. Complete it after admission and relay
-    // preconnect, before any live sync can advance this actor to joined work.
-    let phase = session.phase();
-    let auth_started = invite_started
-        .filter(|_| !cached_app)
-        .map(|_| Instant::now());
-    let authenticated = if session.app_session().is_none()
-        && (matches!(
-            phase,
-            PersonalPhase::Joined | PersonalPhase::TerminalPending
-        ) || (phase == PersonalPhase::Ringing && !worker.stop.load(Ordering::Acquire)))
-    {
-        let needs_cleanup_context = matches!(
-            phase,
-            PersonalPhase::Joined | PersonalPhase::TerminalPending
-        );
-        let owner_admission = needs_cleanup_context.then(|| {
-            // Invite already proved the membership/terminal state. Auth here
-            // cannot send another invitation, and is still account-fenced.
-            std::mem::replace(
-                &mut transport.admission,
-                ControlAdmission::OutgoingAppAuthCleanup,
-            )
-        });
-        let result = (|| {
-            let app = session.ensure_authenticated(
-                &transport,
-                &mut state,
-                auth,
-                tasks.next()?.host,
-                crypto::random::<32>()?,
-            )?;
-            inner.store_app_session(&worker.lease, app.clone());
-            Ok(())
-        })();
-        if let Some(owner_admission) = owner_admission {
-            transport.admission = owner_admission;
-        }
-        result
-    } else {
-        Ok(())
-    };
-    if invite_started.is_some() {
-        let auth_ms = auth_started.map_or(0, |start| start.elapsed().as_millis());
-        eprintln!("[wechat-call-timing] dial cached_app={cached_app} invite={invite_ms}ms auth={auth_ms}ms");
-    }
-    if let Err(error) = authenticated {
-        if phase != PersonalPhase::Ringing {
-            return Err(error);
-        }
-        // There is a verified pending invitation even if AppAuth failed or
-        // was fenced by the owner's stop. Cancel once; never retry AppAuth.
-        worker.stop.store(true, Ordering::Release);
-        drop(preconnect);
-        let _ = runtime.block_on(sink.ending());
-        session.cancel(&transport, &mut state, auth, tasks.next()?)?;
-        core.store.finish_call(account, call_id, true)?;
-        return Ok(());
-    }
 
     while !worker.stop.load(Ordering::Acquire) {
         ensure!(worker.authorized(), "Call authority revoked");
@@ -1877,7 +1840,7 @@ fn run_control(
         let negotiated = session.take_media(&state, auth, connection_index, udp_index)?;
         let preconnected = preconnect
             .filter(|pre| pre.target == negotiated.relay.target())
-            .and_then(PreconnectHandle::claim);
+            .and_then(|pre| pre.claim(CALLER_PRECONNECT_HANDOFF_WAIT));
         Some((negotiated, preconnected))
     };
     if worker.stop.load(Ordering::Acquire) {

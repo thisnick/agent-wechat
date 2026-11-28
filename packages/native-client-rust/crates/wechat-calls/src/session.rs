@@ -5,7 +5,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use wechat_protocol::calls::{
-    app_frame::{self as wire_app_frame, AppFrameParameters},
+    app_frame::{self, AppFrameParameters},
     app_session::{AppAuthority, AppSession, PendingAppAuth},
     host_policy::CallHostRoute,
     personal::{self, VoiceInputs, VoiceRoom},
@@ -20,45 +20,6 @@ use zeroize::Zeroizing;
 
 mod parameters;
 pub use parameters::{independent_video_parameters, independent_voice_parameters};
-
-// The conference path shares this call state but still authenticates eagerly.
-// Keep its framing calls checked without requiring it to manage optional auth.
-mod app_frame {
-    use super::{wire_app_frame, AppAuthority, AppFrameParameters, AppSession, CallOperation};
-    use anyhow::{Context, Result};
-    #[cfg(test)]
-    pub(super) use wire_app_frame::TaskFrame;
-
-    pub(super) fn prepare_transfer(
-        app: &Option<AppSession>,
-        current: AppAuthority,
-        operation: CallOperation,
-        inner: &[u8],
-        parameters: &AppFrameParameters<'_>,
-    ) -> Result<Vec<u8>> {
-        wire_app_frame::prepare_transfer(
-            app.as_ref().context("Missing app session")?,
-            current,
-            operation,
-            inner,
-            parameters,
-        )
-    }
-
-    pub(super) fn decode_transfer_reply(
-        app: &Option<AppSession>,
-        current: AppAuthority,
-        operation: CallOperation,
-        delegate: &[u8],
-    ) -> Result<Vec<u8>> {
-        wire_app_frame::decode_transfer_reply(
-            app.as_ref().context("Missing app session")?,
-            current,
-            operation,
-            delegate,
-        )
-    }
-}
 
 mod conference;
 pub use conference::{
@@ -222,14 +183,13 @@ pub struct NegotiatedMedia {
     pub video_dec_cap_mask: u32,
 }
 
-/// One personal call, optionally bound to an authenticated app session. It is not Clone and
+/// One generic app session with at most one personal call. It is not Clone and
 /// never auto-renews authentication, redials, fabricates a callee Join for caller
 /// context, or retries an uncertain action. Callers persist state.cookie changes
 /// even when subsequent app parsing fails.
 pub struct NativePersonalSession {
     ignored_controls: u64,
-    app: Option<AppSession>,
-    auth_spent: bool,
+    app: AppSession,
     authority: AppAuthority,
     own_username: String,
     parameters: VoiceParameters,
@@ -254,8 +214,11 @@ impl NativePersonalSession {
     ) -> Result<Self> {
         ensure!(host_task != 0, "Missing app auth task");
         Self::validate_parameters(&parameters)?;
-        let app = Self::authenticate_app(client, state, authority, host_task, device32)?;
-        let mut session = Self::idle(state, authority, parameters, Some(app));
+        let pending = PendingAppAuth::new(authority, device32)?;
+        let request = common(state, host_task, &pending.request_body()?)?;
+        let reply = client.call_rpc(state, CallHostRoute::AppAuth, &request)?;
+        let app = pending.complete(&reply, authority)?;
+        let mut session = Self::idle(state, authority, parameters, app);
         session.host_tasks.insert(host_task);
         Ok(session)
     }
@@ -269,18 +232,7 @@ impl NativePersonalSession {
     ) -> Result<Self> {
         Self::validate_parameters(&parameters)?;
         app.validate_authority(authority)?;
-        Ok(Self::idle(state, authority, parameters, Some(app)))
-    }
-
-    /// Prepare an idle direct call whose Invite and Cancel do not require AppAuth.
-    pub fn new_unauthenticated(
-        state: &AccountState,
-        authority: AppAuthority,
-        parameters: VoiceParameters,
-    ) -> Result<Self> {
-        Self::validate_parameters(&parameters)?;
-        PendingAppAuth::new(authority, [1; 32])?;
-        Ok(Self::idle(state, authority, parameters, None))
+        Ok(Self::idle(state, authority, parameters, app))
     }
 
     fn validate_parameters(parameters: &VoiceParameters) -> Result<()> {
@@ -296,11 +248,10 @@ impl NativePersonalSession {
         state: &AccountState,
         authority: AppAuthority,
         parameters: VoiceParameters,
-        app: Option<AppSession>,
+        app: AppSession,
     ) -> Self {
         Self {
             ignored_controls: 0,
-            auth_spent: app.is_some(),
             app,
             authority,
             own_username: state.own_username.clone(),
@@ -315,58 +266,9 @@ impl NativePersonalSession {
         }
     }
 
-    /// Reuse the verified app session or spend one fresh host task to obtain it.
-    /// A failed request is never retried within this operation.
-    pub fn ensure_authenticated(
-        &mut self,
-        client: &impl PersonalTransport,
-        state: &mut AccountState,
-        current: AppAuthority,
-        host_task: u32,
-        device32: [u8; 32],
-    ) -> Result<&AppSession> {
-        ensure!(
-            matches!(
-                self.phase,
-                PersonalPhase::Idle
-                    | PersonalPhase::Ringing
-                    | PersonalPhase::Joined
-                    | PersonalPhase::TerminalPending
-            ),
-            "App authentication unavailable in current call phase"
-        );
-        self.check(state, current)?;
-        if self.app.is_none() {
-            ensure!(!self.auth_spent, "App authentication already spent");
-            ensure!(
-                host_task != 0 && self.host_tasks.len() < 4096,
-                "Invalid or exhausted app auth task"
-            );
-            ensure!(self.host_tasks.insert(host_task), "Call task already spent");
-            self.auth_spent = true;
-            self.app = Some(Self::authenticate_app(
-                client, state, current, host_task, device32,
-            )?);
-        }
-        self.app_session().context("Missing app session")
-    }
-
-    fn authenticate_app(
-        client: &impl PersonalTransport,
-        state: &mut AccountState,
-        authority: AppAuthority,
-        host_task: u32,
-        device32: [u8; 32],
-    ) -> Result<AppSession> {
-        let pending = PendingAppAuth::new(authority, device32)?;
-        let request = common(state, host_task, &pending.request_body()?)?;
-        let reply = client.call_rpc(state, CallHostRoute::AppAuth, &request)?;
-        pending.complete(&reply, authority)
-    }
-
-    /// The verified app identity, if authentication has completed.
-    pub fn app_session(&self) -> Option<&AppSession> {
-        self.app.as_ref()
+    /// The verified app identity bound to this call.
+    pub fn app_session(&self) -> &AppSession {
+        &self.app
     }
 
     pub fn ignored_control_count(&self) -> u64 {
@@ -452,10 +354,7 @@ impl NativePersonalSession {
         }
     }
     fn check(&self, state: &AccountState, current: AppAuthority) -> Result<()> {
-        self.app
-            .as_ref()
-            .map(|a| a.validate_authority(current))
-            .transpose()?;
+        self.app.validate_authority(current)?;
         ensure!(
             current == self.authority && state.own_username == self.own_username,
             "Personal call account changed"
@@ -1021,7 +920,19 @@ impl NativePersonalSession {
             self.phase == PersonalPhase::Ringing,
             "Personal ringing relay unavailable"
         );
-        let active = self.active.as_ref().context("Missing personal room")?;
+        self.ringing_relay_target_for_active(connection_index, udp_index, "Missing personal room")
+    }
+
+    pub(super) fn ringing_relay_target_for_active(
+        &self,
+        connection_index: usize,
+        udp_index: usize,
+        missing_room: &'static str,
+    ) -> Result<Option<RelayTarget>> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!(missing_room))?;
         Ok(RelayTarget::from_strategy(
             active.identity.room,
             active.identity.room_key,
@@ -1094,7 +1005,6 @@ impl NativePersonalSession {
             self.phase == PersonalPhase::Joined && timestamp > self.av_timestamp,
             "Personal SwitchAV unavailable or stale timestamp"
         );
-        let app = self.app.as_ref().context("Missing app session")?;
         let active = self
             .active
             .as_ref()
@@ -1120,8 +1030,8 @@ impl NativePersonalSession {
             host_client_version: state.device.client_version as u32,
             app_config_version: self.parameters.app_config_version,
         };
-        let body = wire_app_frame::prepare_transfer(
-            app,
+        let body = app_frame::prepare_transfer(
+            &self.app,
             current,
             CallOperation::SwitchAv,
             request.body.as_deref().context("Missing SwitchAV body")?,
@@ -1130,12 +1040,8 @@ impl NativePersonalSession {
         self.reserve(tasks)?;
         self.av_timestamp = timestamp;
         let reply = self.host(client, state, CallHostRoute::Transfer, &body, tasks.host)?;
-        let reply = wire_app_frame::decode_transfer_reply(
-            self.app.as_ref().context("Missing app session")?,
-            current,
-            CallOperation::SwitchAv,
-            &reply,
-        )?;
+        let reply =
+            app_frame::decode_transfer_reply(&self.app, current, CallOperation::SwitchAv, &reply)?;
         let values = fields(&reply)?;
         // Proto3 omits zero-valued scalar fields (`own_member == 0` on the caller).
         ensure!(
@@ -1234,12 +1140,6 @@ impl NativePersonalSession {
             self.phase == PersonalPhase::TerminalPending,
             "No pending remote teardown"
         );
-        if matches!(
-            self.control.as_ref().and_then(|control| control.terminal),
-            Some(RemoteTermination::Exit(_))
-        ) {
-            ensure!(self.app.is_some(), "Missing app session");
-        }
         self.reserve(tasks)?;
         self.phase = PersonalPhase::Ending;
         let result = (|| {
@@ -1254,7 +1154,6 @@ impl NativePersonalSession {
             let identity = control.identity;
             match action {
                 RemoteTermination::Exit(reason) => {
-                    let app = self.app.as_ref().context("Missing app session")?;
                     let request = personal::exit_remote(
                         &self.parameters.inputs(),
                         identity,
@@ -1268,8 +1167,8 @@ impl NativePersonalSession {
                         host_client_version: state.device.client_version as u32,
                         app_config_version: self.parameters.app_config_version,
                     };
-                    let body = wire_app_frame::prepare_transfer(
-                        app,
+                    let body = app_frame::prepare_transfer(
+                        &self.app,
                         current,
                         CallOperation::Exit,
                         request.body.as_deref().expect("prepared remote Exit"),
@@ -1277,8 +1176,8 @@ impl NativePersonalSession {
                     )?;
                     let reply =
                         self.host(client, state, CallHostRoute::Transfer, &body, tasks.host)?;
-                    let exit = fields(&wire_app_frame::decode_transfer_reply(
-                        self.app.as_ref().context("Missing app session")?,
+                    let exit = fields(&app_frame::decode_transfer_reply(
+                        &self.app,
                         current,
                         CallOperation::Exit,
                         &reply,
@@ -1359,7 +1258,6 @@ impl NativePersonalSession {
             self.phase == PersonalPhase::Joined,
             "Personal call not joined"
         );
-        ensure!(self.app.is_some(), "Missing app session");
         self.reserve(tasks)?;
         self.phase = PersonalPhase::Ending;
         let result = (|| {
@@ -1385,17 +1283,16 @@ impl NativePersonalSession {
                 host_client_version: state.device.client_version as u32,
                 app_config_version: self.parameters.app_config_version,
             };
-            let app = self.app.as_ref().context("Missing app session")?;
-            let body = wire_app_frame::prepare_transfer(
-                app,
+            let body = app_frame::prepare_transfer(
+                &self.app,
                 current,
                 CallOperation::Exit,
                 request.body.as_deref().expect("prepared Exit body"),
                 &parameters,
             )?;
             let delegate = self.host(client, state, CallHostRoute::Transfer, &body, tasks.host)?;
-            let exit = fields(&wire_app_frame::decode_transfer_reply(
-                self.app.as_ref().context("Missing app session")?,
+            let exit = fields(&app_frame::decode_transfer_reply(
+                &self.app,
                 current,
                 CallOperation::Exit,
                 &delegate,
@@ -1920,11 +1817,11 @@ mod tests {
                 };
                 assert_eq!(data(&body, 3)?, b"wechat");
                 assert_eq!(data(&body, 4)?, path);
-                let frame = wire_app_frame::TaskFrame::decode(data(&body, 5)?, command)?;
+                let frame = app_frame::TaskFrame::decode(data(&body, 5)?, command)?;
                 assert_eq!(frame.integers[&2], frame.integers[&22]);
                 assert!(frame.integers[&2] > 0);
                 assert_eq!(frame.strings[&24], b"wechat");
-                let clear = wire_app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
+                let clear = app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
                 let cloud = fields(&clear)?;
                 let app_base = fields(data(&cloud, 1)?)?;
                 assert_eq!(number(&app_base, 1, None)?, frame.integers[&22]);
@@ -2266,14 +2163,11 @@ mod tests {
         exit_reply_uin(17)
     }
     fn exit_reply_uin(uin: u64) -> Vec<u8> {
-        transfer_room_reply(3380, uin)
-    }
-    fn transfer_room_reply(command: u32, uin: u64) -> Vec<u8> {
-        let room = p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0)]).unwrap();
+        let exit = p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0)]).unwrap();
         let cloud =
-            p::message(&[p::bytes(1, &[8, 0]), p::uint(2, uin), p::bytes(3, &room)]).unwrap();
-        let frame = wire_app_frame::TaskFrame {
-            command,
+            p::message(&[p::bytes(1, &[8, 0]), p::uint(2, uin), p::bytes(3, &exit)]).unwrap();
+        let frame = app_frame::TaskFrame {
+            command: 3380,
             integers: BTreeMap::from([
                 (4, 0),
                 (7, 0),
@@ -2290,114 +2184,6 @@ mod tests {
         .encode()
         .unwrap();
         host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
-    }
-    #[test]
-    fn cold_invite_precedes_app_auth_and_allows_joined_transfers() {
-        let transport = FakeTransport(std::cell::RefCell::new(
-            [
-                (CallHostRoute::Invite, invite_reply()),
-                (CallHostRoute::AppAuth, auth_reply()),
-                (CallHostRoute::LiveSync, joined_sync(false)),
-                (CallHostRoute::Transfer, transfer_room_reply(3197, 17)),
-                (CallHostRoute::Transfer, exit_reply()),
-            ]
-            .into(),
-        ));
-        let mut state = state();
-        let mut session =
-            NativePersonalSession::new_unauthenticated(&state, authority(), parameters()).unwrap();
-        session
-            .invite_with_mode(
-                &transport,
-                &mut state,
-                authority(),
-                "peer",
-                personal::CallMediaMode::Voice,
-                123,
-                TaskIds { sdk: 1, host: 1 },
-            )
-            .unwrap();
-        assert_eq!(session.phase(), PersonalPhase::Ringing);
-        assert!(session.app_session().is_none());
-        let duplicate_task =
-            session.ensure_authenticated(&transport, &mut state, authority(), 1, [9; 32]);
-        assert_eq!(
-            duplicate_task.err().unwrap().to_string(),
-            "Call task already spent"
-        );
-        assert_eq!(
-            session
-                .ensure_authenticated(&transport, &mut state, authority(), 2, [9; 32])
-                .unwrap()
-                .app_uin(),
-            17
-        );
-        assert_eq!(session.phase(), PersonalPhase::Ringing);
-        session
-            .poll(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 },
-            )
-            .unwrap();
-        session
-            .switch_av(
-                &transport,
-                &mut state,
-                authority(),
-                true,
-                false,
-                1,
-                TaskIds { sdk: 3, host: 4 },
-            )
-            .unwrap();
-        session
-            .exit(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 4, host: 5 },
-                false,
-            )
-            .unwrap();
-        assert_eq!(session.phase(), PersonalPhase::Finished);
-        assert!(transport.0.borrow().is_empty());
-    }
-
-    #[test]
-    fn app_auth_is_single_attempt_and_only_available_in_live_phases() {
-        let transport = FakeTransport(std::cell::RefCell::new(
-            [(CallHostRoute::AppAuth, vec![])].into(),
-        ));
-        let mut state = state();
-        let mut session =
-            NativePersonalSession::new_unauthenticated(&state, authority(), parameters()).unwrap();
-        for phase in [
-            PersonalPhase::Finished,
-            PersonalPhase::Ending,
-            PersonalPhase::Uncertain,
-        ] {
-            session.phase = phase;
-            let result =
-                session.ensure_authenticated(&transport, &mut state, authority(), 1, [9; 32]);
-            assert_eq!(
-                result.err().unwrap().to_string(),
-                "App authentication unavailable in current call phase"
-            );
-            assert_eq!(transport.0.borrow().len(), 1);
-        }
-        session.phase = PersonalPhase::Idle;
-        assert!(session
-            .ensure_authenticated(&transport, &mut state, authority(), 1, [9; 32])
-            .is_err());
-        assert!(transport.0.borrow().is_empty());
-        assert!(session.app_session().is_none());
-        let retry = session.ensure_authenticated(&transport, &mut state, authority(), 2, [9; 32]);
-        assert_eq!(
-            retry.err().unwrap().to_string(),
-            "App authentication already spent"
-        );
     }
 
     #[test]
@@ -2428,6 +2214,7 @@ mod tests {
         let mut session =
             NativePersonalSession::from_authenticated(&state, authority(), app, parameters())
                 .unwrap();
+        assert_eq!(session.app_session().app_uin(), 17);
         session
             .invite_with_mode(
                 &transport,
@@ -2440,16 +2227,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.phase(), PersonalPhase::Joined);
-        assert!(session
-            .ensure_authenticated(&transport, &mut state, changed, 0, [0; 32])
-            .is_err());
-        assert_eq!(
-            session
-                .ensure_authenticated(&transport, &mut state, authority(), 0, [0; 32])
-                .unwrap()
-                .app_uin(),
-            17,
-        );
         session
             .exit(
                 &transport,
@@ -2568,17 +2345,10 @@ mod tests {
         assert_eq!(host_tasks, [1, 2, 3, 4, 5, 6]);
         let common = CommonRequest::decode(&requests.last().unwrap().1).unwrap();
         let delegate = fields(common.body.as_deref().unwrap()).unwrap();
-        let frame = wire_app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();
+        let frame = app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();
         assert_eq!(frame.integers[&2], u64::MAX);
         assert_eq!(frame.integers[&22], u64::MAX);
-        let common = fields(
-            &session
-                .app_session()
-                .unwrap()
-                .common_session(authority())
-                .unwrap(),
-        )
-        .unwrap();
+        let common = fields(&session.app.common_session(authority()).unwrap()).unwrap();
         assert_eq!(number(&common, 4, None).unwrap(), u64::MAX);
         assert_eq!(data(&common, 5).unwrap(), b"server");
         assert_eq!(number(&common, 6, None).unwrap(), 1);
@@ -3216,9 +2986,8 @@ mod tests {
         let common = CommonRequest::decode(request).unwrap();
         let delegate = fields(common.body.as_deref().unwrap()).unwrap();
         assert_eq!(number(&delegate, 2, None).unwrap(), 3380);
-        let frame = wire_app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();
-        let cloud =
-            fields(&wire_app_frame::lz4_decode(&frame.payload, 64 * 1024).unwrap()).unwrap();
+        let frame = app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();
+        let cloud = fields(&app_frame::lz4_decode(&frame.payload, 64 * 1024).unwrap()).unwrap();
         number(&fields(data(&cloud, 2).unwrap()).unwrap(), 6, None).unwrap()
     }
     #[test]

@@ -369,9 +369,8 @@ impl Actor {
         match session {
             Ok(session) => {
                 if !cached_app {
-                    if let Some(app) = session.app_session().cloned() {
-                        self.inner.store_app_session(&self.worker.lease, app);
-                    }
+                    self.inner
+                        .store_app_session(&self.worker.lease, session.app_session().clone());
                 }
                 self.session = Some(session);
             }
@@ -961,7 +960,7 @@ impl Actor {
         if pre.target.own_member != own_member || !endpoint_matches {
             return None;
         }
-        pre.claim()
+        pre.claim(INCOMING_PRECONNECT_HANDOFF_WAIT)
     }
 
     fn abort_preconnect(&mut self) {

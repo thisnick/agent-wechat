@@ -121,7 +121,7 @@ impl NativeIncomingSession {
     }
 
     /// The verified app identity used by this incoming call.
-    pub fn app_session(&self) -> Option<&AppSession> {
+    pub fn app_session(&self) -> &AppSession {
         self.base.app_session()
     }
 
@@ -667,22 +667,12 @@ impl NativeIncomingSession {
             host_client_version: state.device.client_version as u32,
             app_config_version: self.base.parameters.app_config_version,
         };
-        let body = wire_app_frame::prepare_transfer(
-            self.base.app_session().context("Missing app session")?,
-            current,
-            operation,
-            inner,
-            &parameters,
-        )?;
+        let body =
+            app_frame::prepare_transfer(&self.base.app, current, operation, inner, &parameters)?;
         let reply = self
             .base
             .host(client, state, CallHostRoute::Transfer, &body, host_task)?;
-        wire_app_frame::decode_transfer_reply(
-            self.base.app_session().context("Missing app session")?,
-            current,
-            operation,
-            &reply,
-        )
+        app_frame::decode_transfer_reply(&self.base.app, current, operation, &reply)
     }
     /// Decline only the source ACKed-callee state. Pre-ACK busy/other-device
     /// paths have separate operations and are not substituted here.
@@ -841,22 +831,11 @@ impl NativeIncomingSession {
             self.phase == IncomingPhase::Acknowledged,
             "Incoming ringing relay unavailable"
         );
-        let active = self
-            .base
-            .active
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Missing incoming room"))?;
-        match RelayTarget::from_strategy(
-            active.identity.room,
-            active.identity.room_key,
-            active.identity.own_member as u16,
-            &active.strategy,
+        self.base.ringing_relay_target_for_active(
             connection_index,
             udp_index,
-        ) {
-            Ok(target) => Ok(Some(target)),
-            Err(_) => Ok(None),
-        }
+            "Missing incoming room",
+        )
     }
     pub fn take_media(
         &mut self,
@@ -1005,7 +984,7 @@ mod tests {
             "peer",
         )
         .unwrap();
-        assert_eq!(session.app_session().unwrap().app_uin(), 17);
+        assert_eq!(session.app_session().app_uin(), 17);
     }
 
     fn ack_reply() -> Vec<u8> {
@@ -1032,7 +1011,7 @@ mod tests {
         ))
     }
     fn wrapped_reply(command: u32, body: &[u8]) -> Vec<u8> {
-        let frame = wire_app_frame::TaskFrame {
+        let frame = app_frame::TaskFrame {
             command,
             integers: BTreeMap::from([
                 (4, 0),
