@@ -114,6 +114,22 @@ export function desktopNotifications(connection: Connection, open: (route: Route
   return () => { stopped = true; window.removeEventListener("focus", focus); void listening.then((unlisten) => unlisten()); };
 }
 export const desktopInvoke = invoke;
+
+const UPLOAD_CHUNK_BYTES = 256 * 1024;
+const FRAME_DATA = 0;
+const FRAME_END = 1;
+const FRAME_ERROR = 2;
+
+async function sendUploadChunk(id: string, chunk: Uint8Array): Promise<void> {
+  const payload =
+    chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
+      ? chunk
+      : chunk.slice();
+  await invoke("http_body_chunk", payload, {
+    headers: { "x-upload-id": id },
+  });
+}
+
 export function desktopFetch(session: DesktopSession): typeof fetch {
   return async (input, init) => {
     const multipart = init?.body instanceof FormData ? desktopMultipart(init.body) : undefined;
@@ -173,12 +189,16 @@ export function desktopFetch(session: DesktopSession): typeof fetch {
             request.signal.throwIfAborted();
             const next = await reader.read();
             if (next.done) break;
-            for (let offset = 0; offset < next.value.length; offset += 65536) {
+            for (
+              let offset = 0;
+              offset < next.value.length;
+              offset += UPLOAD_CHUNK_BYTES
+            ) {
               request.signal.throwIfAborted();
-              await invoke("http_body_chunk", {
+              await sendUploadChunk(
                 id,
-                bytes: Array.from(next.value.subarray(offset, offset + 65536)),
-              });
+                next.value.subarray(offset, offset + UPLOAD_CHUNK_BYTES),
+              );
             }
           }
         } finally {
@@ -198,22 +218,48 @@ export function desktopFetch(session: DesktopSession): typeof fetch {
         },
         { highWaterMark: 0 },
       );
-      type Packet = { type: "data"; bytes: string } | { type: "end" | "error" };
-      const channel = new Channel<Packet>();
+      const channel = new Channel<ArrayBuffer | number[]>();
+      const interrupt = () => {
+        cancel();
+        controller!.error(new Error("The hub connection was interrupted"));
+      };
       channel.onmessage = (packet) => {
         if (finished) return;
-        if (packet.type === "data") {
-          const raw = atob(packet.bytes);
-          queued.push(
-            Uint8Array.from(raw, (character) => character.charCodeAt(0)),
-          );
-          pump();
-        } else if (packet.type === "end") {
-          ended = true;
-          pump();
+        let view: Uint8Array;
+        if (packet instanceof ArrayBuffer) {
+          view = new Uint8Array(packet);
+        } else if (
+          Array.isArray(packet) &&
+          packet.every(
+            (byte) =>
+              typeof byte === "number" &&
+              Number.isInteger(byte) &&
+              byte >= 0 &&
+              byte <= 255,
+          )
+        ) {
+          // Tauri's postMessage fallback delivers raw channel frames as byte arrays.
+          view = Uint8Array.from(packet);
         } else {
-          cancel();
-          controller!.error(new Error("The hub connection was interrupted"));
+          interrupt();
+          return;
+        }
+        if (view.byteLength === 0) {
+          interrupt();
+          return;
+        }
+        switch (view[0]) {
+          case FRAME_DATA:
+            queued.push(view.subarray(1));
+            pump();
+            break;
+          case FRAME_END:
+            ended = true;
+            pump();
+            break;
+          case FRAME_ERROR:
+          default:
+            interrupt();
         }
       };
       const headers = Object.fromEntries(
@@ -285,11 +331,16 @@ export async function saveDesktopFile(blob: Blob, name: string): Promise<void> {
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
-        for (let offset = 0; offset < next.value.length; offset += 65536)
-          await invoke("http_body_chunk", {
+        for (
+          let offset = 0;
+          offset < next.value.length;
+          offset += UPLOAD_CHUNK_BYTES
+        ) {
+          await sendUploadChunk(
             id,
-            bytes: Array.from(next.value.subarray(offset, offset + 65536)),
-          });
+            next.value.subarray(offset, offset + UPLOAD_CHUNK_BYTES),
+          );
+        }
       }
     } finally {
       reader.releaseLock();

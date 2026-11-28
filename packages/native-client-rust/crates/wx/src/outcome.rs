@@ -67,6 +67,13 @@ pub fn classify(error: &anyhow::Error) -> (i32, String) {
 }
 
 pub fn describe(error: &anyhow::Error) -> ClassifiedError {
+    if let Some(hint) = error.downcast_ref::<crate::daemon::HintedError>() {
+        let mut described = describe(&hint.source);
+        if !described.next.iter().any(|step| step == "wx daemon doctor") {
+            described.next.push("wx daemon doctor".into());
+        }
+        return described;
+    }
     if let Some(structured) = error.downcast_ref::<Error>() {
         let message = if error.chain().count() > 1 {
             format!("{error:#}")

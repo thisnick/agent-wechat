@@ -80,6 +80,7 @@ payloads! {
     "MediaJob" => wechat_core::media_types::MediaJob,
     "MediaAsset" => wechat_core::media_types::MediaAsset,
     "AccountSettings" => wechat_store::AccountSettings,
+    "StorageUsage" => wechat_store::StorageUsage,
     "OwnedMediaSource" => wechat_store::OwnedMediaSource,
     "CallSnapshot" => wechat_core::call_types::CallSnapshot,
     "CallTicketRequest" => wechat_core::call_types::CallTicketRequest,

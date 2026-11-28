@@ -76,6 +76,7 @@ mod tests {
         assert_eq!(b.event_boundary("one").unwrap(), "0");
         assert!(a.put_runtime("one", "value", b"bad").is_err());
         assert!(a.runtime("other", "value").is_err());
+        assert!(a.storage_usage("one").unwrap().file_bytes > 0);
         assert_eq!(store.event_boundary("one").unwrap(), "1");
     }
 }

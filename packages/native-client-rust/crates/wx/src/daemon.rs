@@ -13,6 +13,15 @@ pub enum DaemonCommand {
     Start,
     /// Show the local managed daemon's state and identity.
     Status,
+    /// Check a local daemon's data folder, databases and runtime health without modifying databases.
+    Doctor {
+        /// Run the full check suite on every discovered local daemon data folder.
+        #[arg(long)]
+        all: bool,
+        /// Apply only clearly safe fixes, such as removing a stale process.json for a dead process.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Stop the owned local daemon without logging out of WeChat.
     Stop {
         /// Seconds to wait for the daemon to exit (1 to 300); it is never force-killed.
@@ -162,6 +171,34 @@ async fn identity(config: &crate::config::ServerConfig, owned: &OwnedProcess) ->
     Ok(value)
 }
 
+#[derive(Debug)]
+pub(crate) struct HintedError {
+    pub(crate) source: anyhow::Error,
+    pub(crate) last_log_error: Option<String>,
+}
+
+impl std::fmt::Display for HintedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
+    }
+}
+
+impl std::error::Error for HintedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
+fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: Option<u64>) -> anyhow::Error {
+    let last_log_error = after_offset
+        .and_then(|offset| crate::doctor::last_log_error(log, offset))
+        .map(|matched| matched.line);
+    anyhow::Error::new(HintedError {
+        source: error,
+        last_log_error,
+    })
+}
+
 fn acquire_management_lock(directory: &Path) -> Result<std::fs::File> {
     let lock = wechat_platform::OpenOptions::new()
         .read(true)
@@ -222,14 +259,23 @@ async fn start_locked(
 ) -> Result<Value> {
     if let Some(owned) = load(record)? {
         if fingerprint(owned.pid).is_some() {
-            return identity(config, &owned).await;
+            return identity(config, &owned)
+                .await
+                .map_err(|e| with_log_hint(e, log, None));
         }
         std::fs::remove_file(record)?;
     }
-    let listener = std::net::TcpListener::bind(config.listen)
-        .context("daemon listener is occupied; no owner was adopted or stopped")?;
+    let listener = std::net::TcpListener::bind(config.listen).map_err(|e| {
+        with_log_hint(
+            anyhow::Error::new(e)
+                .context("daemon listener is occupied; no owner was adopted or stopped"),
+            log,
+            None,
+        )
+    })?;
     drop(listener);
-    let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)?;
+    let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)
+        .map_err(|e| with_log_hint(e, log, None))?;
     let output_file = wechat_platform::OpenOptions::new()
         .create(true)
         .append(true)
@@ -238,8 +284,13 @@ async fn start_locked(
         .open(log)?;
     let metadata = output_file.metadata()?;
     if !metadata.is_file() || !wechat_platform::private_file(&output_file)? {
-        bail!("daemon log must be a private owned regular file");
+        return Err(with_log_hint(
+            anyhow::anyhow!("daemon log must be a private owned regular file"),
+            log,
+            None,
+        ));
     }
+    let log_start_offset = metadata.len();
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let mut command = ProcessCommand::new(&executable);
     command
@@ -271,10 +322,18 @@ async fn start_locked(
     let readiness = async {
         loop {
             if let Some(status) = child.try_wait()? {
-                bail!("native daemon exited before readiness ({status}); inspect daemon logs");
+                return Err(with_log_hint(
+                    anyhow::anyhow!("native daemon exited before readiness ({status})"),
+                    log,
+                    Some(log_start_offset),
+                ));
             }
             if Instant::now() >= deadline {
-                bail!("native daemon readiness deadline reached");
+                return Err(with_log_hint(
+                    anyhow::anyhow!("native daemon readiness deadline reached"),
+                    log,
+                    Some(log_start_offset),
+                ));
             }
             if let Ok(Ok(value)) = tokio::time::timeout(
                 Duration::from_millis(500),
@@ -286,7 +345,13 @@ async fn start_locked(
                     || value["dataDir"].as_str() != config.data_dir.to_str()
                     || value["version"]["backend"] != "native"
                 {
-                    bail!("listener belongs to another process; no owner was adopted");
+                    return Err(with_log_hint(
+                        anyhow::anyhow!(
+                            "listener belongs to another process; no owner was adopted"
+                        ),
+                        log,
+                        Some(log_start_offset),
+                    ));
                 }
                 let owned = OwnedProcess {
                     pid: child.id(),
@@ -383,11 +448,16 @@ pub async fn run(
     let record = directory.join("process.json");
     let log = directory.join("daemon.log");
     match command {
+        DaemonCommand::Doctor { .. } => {
+            unreachable!("wx daemon doctor is handled before config::resolve in main")
+        }
         DaemonCommand::Start => output.print(&start_background(&config).await?),
-        DaemonCommand::Status => match load(&record)? {
-            Some(owned) if fingerprint(owned.pid).is_some() => {
-                output.print(&identity(&config, &owned).await?)
-            }
+        DaemonCommand::Status => match load(&record).map_err(|e| with_log_hint(e, &log, None))? {
+            Some(owned) if fingerprint(owned.pid).is_some() => output.print(
+                &identity(&config, &owned)
+                    .await
+                    .map_err(|e| with_log_hint(e, &log, None))?,
+            ),
             _ => {
                 #[cfg(target_os = "linux")]
                 if has_matching_systemd_service(&config, env) {
@@ -565,5 +635,69 @@ mod tests {
             Path::new("/opt/node_modules/@agent-wechat/cli/native/3.2.0/linux-x64-gnu/wx2"),
             expected
         ));
+    }
+
+    #[test]
+    fn with_log_hint_preserves_json_message_exit_classification_and_log_offset() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("daemon.log");
+        let stale = "Error: stale problem from earlier run\n";
+        std::fs::write(&log, stale).unwrap();
+        let offset = stale.len() as u64;
+
+        let inner_io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address in use");
+        let err_none = with_log_hint(
+            anyhow::Error::new(inner_io)
+                .context("daemon listener is occupied; no owner was adopted or stopped"),
+            &log,
+            None,
+        );
+        // JSON error message (`to_string()`) keeps the real cause, never the hint text.
+        assert_eq!(
+            err_none.to_string(),
+            "daemon listener is occupied; no owner was adopted or stopped"
+        );
+        // Human `{:#}` preserves the cause chain without duplicating the message.
+        let formatted_none = format!("{err_none:#}");
+        assert_eq!(
+            formatted_none
+                .matches("daemon listener is occupied")
+                .count(),
+            1
+        );
+        assert!(formatted_none.contains("Address in use"));
+        let hint_none = err_none.downcast_ref::<HintedError>().unwrap();
+        assert_eq!(hint_none.last_log_error, None);
+
+        // Fresh log line containing `invalid ` and `config` must not flip exit 1 to exit 2.
+        let fresh_line = "Error: invalid config value in fresh startup failure\n";
+        std::fs::write(&log, format!("{stale}{fresh_line}")).unwrap();
+        let err_fresh = with_log_hint(
+            anyhow::anyhow!("native daemon exited before readiness"),
+            &log,
+            Some(offset),
+        );
+        assert_eq!(
+            err_fresh.to_string(),
+            "native daemon exited before readiness"
+        );
+        let described_fresh = outcome::describe(&err_fresh);
+        assert_eq!(described_fresh.exit, 1);
+        assert_eq!(
+            described_fresh.message,
+            "native daemon exited before readiness"
+        );
+        assert_eq!(described_fresh.next, vec!["wx daemon doctor"]);
+        let hint_fresh = err_fresh.downcast_ref::<HintedError>().unwrap();
+        assert_eq!(
+            hint_fresh.last_log_error.as_deref(),
+            Some("Error: invalid config value in fresh startup failure")
+        );
+
+        // A real config/invalid error still classifies as exit 2, and typed outcome errors keep their code.
+        let err_load = with_log_hint(anyhow::anyhow!("invalid daemon/process.json"), &log, None);
+        assert_eq!(outcome::classify(&err_load).0, 2);
+        let err_auth = with_log_hint(outcome::failure(4, "unauthorized", "denied"), &log, None);
+        assert_eq!(outcome::classify(&err_auth), (4, "unauthorized".into()));
     }
 }

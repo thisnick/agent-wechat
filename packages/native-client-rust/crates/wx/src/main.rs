@@ -18,6 +18,8 @@ mod completions;
 mod config;
 mod connection;
 mod daemon;
+mod doctor;
+mod doctor_discovery;
 mod events;
 mod login;
 mod outcome;
@@ -1309,8 +1311,12 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let is_serve = matches!(cli.command, Command::Serve { .. });
     if let Err(error) = run(cli).await {
-        let described = outcome::describe(&error);
+        let mut described = outcome::describe(&error);
+        if is_serve && !described.next.iter().any(|step| step == "wx daemon doctor") {
+            described.next.push("wx daemon doctor".into());
+        }
         if json {
             let mut body = json!({
                 "code": described.code,
@@ -1323,6 +1329,14 @@ async fn main() {
             eprintln!("{}", json!({"error": body}));
         } else {
             eprintln!("{}", described.message);
+            if let Some(hint) = error
+                .chain()
+                .find_map(|e| e.downcast_ref::<daemon::HintedError>())
+            {
+                if let Some(line) = &hint.last_log_error {
+                    eprintln!("Last log error: {line}");
+                }
+            }
             if !described.next.is_empty() {
                 eprintln!("\nNext:");
                 for step in &described.next {
@@ -1896,6 +1910,29 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
+    if let Command::Daemon {
+        command: daemon::DaemonCommand::Doctor { all, fix },
+    } = cli.command
+    {
+        let overrides = crate::config::Overrides {
+            server_config: cli.server_config.clone(),
+            data_dir: cli.data_dir.clone(),
+            token_file: cli.token_file.clone(),
+            listen: cli.listen,
+            network_listen: cli.network_listen,
+            tls_cert_file: cli.tls_cert_file.clone(),
+            tls_key_file: cli.tls_key_file.clone(),
+        };
+        return doctor::run_cli(
+            &overrides,
+            &env,
+            &cwd,
+            doctor::DoctorOptions { all, fix },
+            output,
+            cli.json,
+        )
+        .await;
+    }
     if matches!(
         &cli.command,
         Command::Serve { .. }

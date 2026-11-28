@@ -1399,7 +1399,7 @@ impl Core {
                 )?;
             }
         }
-        if is_channels || asset.kind == MediaKind::Voice {
+        if is_channels || matches!(asset.kind, MediaKind::Voice | MediaKind::Image) {
             while let Ok(previous) = self.store.media_job_by_key(account, &key) {
                 let renewable = if is_channels {
                     match previous.state.as_str() {
@@ -1408,10 +1408,11 @@ impl Core {
                         _ => false,
                     }
                 } else {
-                    // Explicit voice re-download starts a fresh job when the prior attempt
-                    // failed (e.g. after upgrading or transient server drift), while keeping
-                    // cancelled jobs respected so automatic downloads do not restart them.
-                    previous.state == "failed" && asset.state != "available"
+                    // Explicit voice or image re-download starts a fresh job when the prior
+                    // attempt failed (e.g. after upgrading past a strict HEIC original failure
+                    // or transient server drift), while keeping cancelled jobs respected so
+                    // automatic downloads do not restart them.
+                    previous.state == "failed"
                 };
                 if !renewable {
                     break;
@@ -1989,9 +1990,14 @@ impl Core {
                 source: crate::links::LinkThumbnail::Cdn(mut descriptor),
             } => {
                 // Persisted plans from older releases also marked normal videos
-                // strict. The transport still verifies a selected representation
-                // against the CDN response digest before returning any bytes.
-                if asset.kind == MediaKind::Video && asset.variant == MediaVariant::Normal {
+                // and CDN original images strict. Normal videos still verify a
+                // selected representation against the CDN response digest; CDN
+                // image originals still keep expected_md5 for non-transcoded
+                // images and only allow size/digest divergence for verified
+                // transcoded JPEGs (rsppicformat=1, substituteftype=1).
+                if (asset.kind == MediaKind::Video && asset.variant == MediaVariant::Normal)
+                    || (asset.kind == MediaKind::Image && asset.variant == MediaVariant::Original)
+                {
                     descriptor.strict_size = false;
                 }
                 let mut state = self.account_state(account)?;
@@ -2062,8 +2068,14 @@ impl Core {
                         "link_thumbnail_size_limit"
                     );
                 }
+                let transcoded_image_original = asset.kind == MediaKind::Image
+                    && asset.variant == MediaVariant::Original
+                    && mime == "image/jpeg"
+                    && media.picture_format == Some(1)
+                    && media.substituted_filetype == Some(1);
                 ensure!(
                     asset.variant != MediaVariant::Original
+                        || transcoded_image_original
                         || (media.advertised_size_matches != Some(false)
                             && descriptor
                                 .expected_md5
@@ -3174,8 +3186,9 @@ fn validate_destination(value: &str) -> Result<()> {
     Ok(())
 }
 /// Downloads have passed the transport's integrity checks. A returned video
-/// representation 9 can satisfy a normal-video request; original requests keep
-/// their descriptor's exact identity and representation checks.
+/// representation 9 can satisfy a normal-video request; other requests require
+/// either no substitution or the requested filetype (preventing a Standard
+/// downgrade from satisfying an Original request).
 fn received_video_variant(
     kind: MediaKind,
     variant: MediaVariant,
@@ -3382,6 +3395,13 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     } else {
                         None
                     };
+                    // CDN image downloads with downpicformat=1 may transcode
+                    // non-JPEG originals (such as HEIC photos) into a larger
+                    // JPEG whose size and MD5 differ from the XML attributes.
+                    // Keep expected_bytes and expected_md5 so non-transcoded
+                    // originals stay verified while DownloadState and Core
+                    // accept verified transcoded JPEGs (rsppicformat=1,
+                    // substituteftype=1).
                     out.push((
                         MediaKind::Image,
                         variant,
@@ -3392,7 +3412,7 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                                 quality,
                                 expected_bytes: bytes,
                                 expected_md5: md5,
-                                strict_size: variant == MediaVariant::Original,
+                                strict_size: false,
                                 expires_at: expiry,
                             },
                         },
@@ -8359,6 +8379,611 @@ mod tests {
         assert_eq!(rejected_assets.len(), 1);
         let err = run_download(&rejected_assets[0].id, "job_tp_106_403").unwrap_err();
         assert_eq!(classify_error(&err), "media_service_rejected");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cdn_transcoded_original_image_downloads_and_writes_back_to_official_profile() {
+        use md5::Digest;
+        use std::collections::BTreeMap;
+
+        struct MockCdnEntry {
+            bytes: Vec<u8>,
+            substituted_filetype: Option<u32>,
+            picture_format: Option<u32>,
+        }
+        fn aes_ecb_encrypt(plain: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+            ensure!(key.len() == 16, "expected 16-byte AES key");
+            let mut padded = plain.to_vec();
+            let pad = 16 - (padded.len() % 16);
+            padded.resize(padded.len() + pad, pad as u8);
+            let mut out = Vec::with_capacity(padded.len());
+            for block in padded.chunks_exact(16) {
+                let mut xored = [0u8; 16];
+                for i in 0..16 {
+                    xored[i] = block[i] ^ key[i];
+                }
+                let enc = wechat_protocol::crypto::cbc_encrypt(&xored, key)?;
+                out.extend_from_slice(&enc[..16]);
+            }
+            Ok(out)
+        }
+        struct MockCdnHttp {
+            ciphertext: Vec<u8>,
+            substituted_filetype: Option<u32>,
+            picture_format: Option<u32>,
+        }
+        impl wechat_protocol::transport::HttpTransport for MockCdnHttp {
+            fn send<'a>(
+                &'a self,
+                request: wechat_protocol::transport::HttpRequest,
+            ) -> wechat_protocol::transport::TransportFuture<
+                'a,
+                Result<wechat_protocol::transport::HttpResponse>,
+            > {
+                let outcome = (|| {
+                    let fields = wechat_protocol::media::unpack_cdn(&request.body)?;
+                    let parse_usize = |k: &str| -> Result<usize> {
+                        let raw = fields.get(k).context("missing CDN request field")?;
+                        Ok(std::str::from_utf8(raw)?.parse()?)
+                    };
+                    let start = parse_usize("rangestart")?;
+                    let end = parse_usize("rangeend")?.min(self.ciphertext.len() - 1);
+                    let mut reply = wechat_protocol::media::CdnFields::new();
+                    for (k, v) in [
+                        ("ver", 0usize),
+                        ("seq", parse_usize("seq")?),
+                        ("retcode", 0),
+                        ("istrans", 999),
+                        ("videoformat", 0),
+                        ("backsrcnum", 0),
+                        ("rangestart", start),
+                        ("rangeend", end),
+                        ("totalsize", self.ciphertext.len()),
+                    ] {
+                        reply.insert(k.into(), v.to_string().into_bytes());
+                    }
+                    if let Some(v) = self.picture_format {
+                        reply.insert("rsppicformat".into(), v.to_string().into_bytes());
+                    }
+                    if let Some(v) = self.substituted_filetype {
+                        reply.insert("substituteftype".into(), v.to_string().into_bytes());
+                    }
+                    reply.insert("filedata".into(), self.ciphertext[start..=end].to_vec());
+                    Ok(wechat_protocol::transport::HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: wechat_protocol::media::pack_cdn(&reply)?,
+                    })
+                })();
+                Box::pin(async move { outcome })
+            }
+        }
+        struct MockCdnTransport {
+            entries: BTreeMap<String, MockCdnEntry>,
+        }
+        impl crate::upstream::media::MediaTransport for MockCdnTransport {
+            fn download(
+                &self,
+                descriptor: &MediaDescriptor,
+                _progress: crate::upstream::media::Progress<'_>,
+            ) -> Result<wechat_protocol::media::DownloadedMedia> {
+                let entry = self
+                    .entries
+                    .get(&descriptor.file_id)
+                    .context("missing_mock_cdn_entry")?;
+                let ciphertext = aes_ecb_encrypt(&entry.bytes, &descriptor.aes_key)?;
+                let cdn = wechat_protocol::media::CdnClient::new(
+                    wechat_protocol::media::CdnConfig {
+                        version: 1,
+                        uin: 9,
+                        client_version: 456,
+                        client_os_type: "UnifiedPCLinux x86_64".into(),
+                        auth_key: b"synthetic-auth".to_vec(),
+                        server_ips: vec![std::net::Ipv4Addr::new(1, 1, 1, 1)],
+                        front_id: 0,
+                        location: None,
+                    },
+                    std::time::Duration::from_secs(10),
+                )?;
+                let http = MockCdnHttp {
+                    ciphertext,
+                    substituted_filetype: entry.substituted_filetype,
+                    picture_format: entry.picture_format,
+                };
+                let clock = wechat_protocol::transport::SystemClock::new();
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()?
+                            .block_on(cdn.download_async(descriptor, &http, &clock))
+                    })
+                    .join()
+                    .expect("mock CDN download thread panicked")
+                })
+            }
+            fn upload(
+                &self,
+                _prepared: &wechat_protocol::media::PreparedUpload,
+                _progress: crate::upstream::media::Progress<'_>,
+            ) -> Result<wechat_protocol::media::UploadedMedia> {
+                bail!("unsupported_simulator_operation")
+            }
+            fn upload_image(
+                &self,
+                _prepared: &wechat_protocol::media::PreparedImageUpload,
+                _progress: crate::upstream::media::Progress<'_>,
+            ) -> Result<wechat_protocol::media::UploadedImage> {
+                bail!("unsupported_simulator_operation")
+            }
+            fn upload_video(
+                &self,
+                _prepared: &wechat_protocol::media::PreparedVideoUpload,
+                _progress: crate::upstream::media::Progress<'_>,
+            ) -> Result<wechat_protocol::media::UploadedVideo> {
+                bail!("unsupported_simulator_operation")
+            }
+        }
+        struct MockCdnUpstream {
+            entries: Arc<BTreeMap<String, MockCdnEntry>>,
+        }
+        impl crate::upstream::Upstream for MockCdnUpstream {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn media_transport_route(
+                &self,
+                _state: &mut wechat_protocol::AccountState,
+                _route: Option<LargeCdnRoute>,
+            ) -> Result<Box<dyn crate::upstream::media::MediaTransport>> {
+                Ok(Box::new(MockCdnTransport {
+                    entries: self
+                        .entries
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                MockCdnEntry {
+                                    bytes: v.bytes.clone(),
+                                    substituted_filetype: v.substituted_filetype,
+                                    picture_format: v.picture_format,
+                                },
+                            )
+                        })
+                        .collect(),
+                }))
+            }
+        }
+
+        let make_image = |dim: u32, salt: u32, fmt: image::ImageFormat| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            let img = image::RgbImage::from_fn(dim, dim, |x, y| {
+                image::Rgb([
+                    ((x * 11 + salt) & 0xff) as u8,
+                    ((y * 17 + salt) & 0xff) as u8,
+                    (((x ^ y) * 23 + salt) & 0xff) as u8,
+                ])
+            });
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut out, fmt)
+                .unwrap();
+            out.into_inner()
+        };
+
+        let transcoded_jpeg = make_image(160, 7, image::ImageFormat::Jpeg);
+        let advertised_heic_len = (transcoded_jpeg.len() / 2) as u64;
+        let advertised_heic_md5 = "11111111111111111111111111111111";
+        let std_jpeg = make_image(96, 3, image::ImageFormat::Jpeg);
+        let thumb_jpeg = make_image(48, 5, image::ImageFormat::Jpeg);
+        let mismatched_png = make_image(128, 9, image::ImageFormat::Png);
+        assert!(transcoded_jpeg.len() as u64 > advertised_heic_len);
+        assert_ne!(
+            format!("{:x}", md5::Md5::digest(&transcoded_jpeg)),
+            advertised_heic_md5
+        );
+
+        let mut entries = BTreeMap::new();
+        for fid in [
+            "cdn-heic-orig-fresh",
+            "cdn-heic-orig-legacy",
+            "cdn-heic-orig-retry",
+        ] {
+            entries.insert(
+                fid.into(),
+                MockCdnEntry {
+                    bytes: transcoded_jpeg.clone(),
+                    substituted_filetype: Some(1),
+                    picture_format: Some(1),
+                },
+            );
+        }
+        entries.insert(
+            "cdn-heic-orig-downgraded".into(),
+            MockCdnEntry {
+                bytes: std_jpeg.clone(),
+                substituted_filetype: Some(2),
+                picture_format: Some(1),
+            },
+        );
+        entries.insert(
+            "cdn-heic-orig-unmarked".into(),
+            MockCdnEntry {
+                bytes: std_jpeg.clone(),
+                substituted_filetype: None,
+                picture_format: Some(1),
+            },
+        );
+        entries.insert(
+            "cdn-heic-orig-png".into(),
+            MockCdnEntry {
+                bytes: mismatched_png.clone(),
+                substituted_filetype: Some(1),
+                picture_format: Some(1),
+            },
+        );
+        entries.insert(
+            "cdn-heic-std".into(),
+            MockCdnEntry {
+                bytes: std_jpeg.clone(),
+                substituted_filetype: Some(2),
+                picture_format: Some(1),
+            },
+        );
+        entries.insert(
+            "cdn-heic-thumb".into(),
+            MockCdnEntry {
+                bytes: thumb_jpeg.clone(),
+                substituted_filetype: Some(3),
+                picture_format: Some(1),
+            },
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("a").unwrap();
+        let core = Core::with_upstream(
+            store.clone(),
+            None,
+            Arc::new(MockCdnUpstream {
+                entries: Arc::new(entries),
+            }),
+        )
+        .unwrap();
+
+        let state = wechat_protocol::AccountState {
+            schema: 1,
+            device: wechat_protocol::DeviceProfile {
+                device_id: vec![b'B'; 16],
+                device_type: "UnifiedPCLinux x86_64".into(),
+                client_version: -227271398,
+            },
+            uin: 9,
+            own_username: "synthetic_self".into(),
+            cookie: vec![1; 15],
+            session_key: vec![1; 16],
+            request_key: vec![2; 24],
+            response_key: vec![3; 24],
+            auto_auth_key: wechat_protocol::protobuf::message(&[
+                wechat_protocol::protobuf::bytes(
+                    1,
+                    &wechat_protocol::protobuf::buffer(b"synthetic-a"),
+                ),
+                wechat_protocol::protobuf::bytes(
+                    2,
+                    &wechat_protocol::protobuf::buffer(b"synthetic-b"),
+                ),
+            ])
+            .unwrap(),
+            key_info: vec![4; 180],
+            database_password: vec![43u8; 32],
+            auth_snapshot: Default::default(),
+            long_host: "long.weixin.qq.com".into(),
+            short_host: "short.weixin.qq.com".into(),
+        };
+        core.test_managed_profile("a", &state).unwrap();
+        core.store
+            .put_runtime("a", "desired", b"connected")
+            .unwrap();
+        core.store
+            .put_runtime(
+                "a",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+
+        let peer = "peer_heic_sender";
+        let make_xml = |big_id: &str| {
+            format!(
+                "<msg><img aeskey=\"01010101010101010101010101010101\" encryver=\"1\" \
+                 cdnbigimgurl=\"{big_id}\" hdlength=\"{advertised_heic_len}\" \
+                 cdnmidimgurl=\"cdn-heic-std\" length=\"{}\" \
+                 cdnthumburl=\"cdn-heic-thumb\" cdnthumbaeskey=\"01010101010101010101010101010101\" \
+                 cdnthumblength=\"{}\" md5=\"{advertised_heic_md5}\"/></msg>",
+                std_jpeg.len() / 2,
+                thumb_jpeg.len(),
+            )
+        };
+        let fresh_xml = make_xml("cdn-heic-orig-fresh");
+        let legacy_xml = make_xml("cdn-heic-orig-legacy");
+        let retry_xml = make_xml("cdn-heic-orig-retry");
+        let downgraded_xml = make_xml("cdn-heic-orig-downgraded");
+        let unmarked_xml = make_xml("cdn-heic-orig-unmarked");
+        let png_xml = make_xml("cdn-heic-orig-png");
+
+        // Fresh CDN discovery keeps expected_bytes and expected_md5, clearing only strict_size.
+        let discovered = discover(&message(3), &fresh_xml).unwrap();
+        let (_, _, DownloadPlan::Cdn { descriptor }, _) = discovered
+            .iter()
+            .find(|(_, v, _, _)| *v == MediaVariant::Original)
+            .unwrap()
+        else {
+            panic!("expected CDN original image plan");
+        };
+        assert!(!descriptor.strict_size);
+        assert_eq!(
+            descriptor.expected_md5.as_deref(),
+            Some(advertised_heic_md5)
+        );
+        assert_eq!(descriptor.expected_bytes, Some(advertised_heic_len));
+
+        let add_cmd = |body: &str, sid: u64, time: u32| wechat_protocol::SyncCommand {
+            id: 5,
+            payload: wechat_protocol::protobuf::message(&[
+                wechat_protocol::protobuf::uint(1, 1),
+                wechat_protocol::protobuf::bytes(
+                    2,
+                    &wechat_protocol::protobuf::bytes(1, peer.as_bytes()),
+                ),
+                wechat_protocol::protobuf::bytes(
+                    3,
+                    &wechat_protocol::protobuf::bytes(1, b"synthetic_self"),
+                ),
+                wechat_protocol::protobuf::uint(4, 3),
+                wechat_protocol::protobuf::bytes(
+                    5,
+                    &wechat_protocol::protobuf::bytes(1, body.as_bytes()),
+                ),
+                wechat_protocol::protobuf::uint(6, 0),
+                wechat_protocol::protobuf::uint(7, 0),
+                wechat_protocol::protobuf::bytes(8, &wechat_protocol::protobuf::buffer(b"")),
+                wechat_protocol::protobuf::uint(9, u64::from(time)),
+                wechat_protocol::protobuf::bytes(10, b"<msgsource/>"),
+                wechat_protocol::protobuf::uint(12, sid),
+                wechat_protocol::protobuf::uint(13, 9),
+            ])
+            .unwrap(),
+        };
+        for (idx, (body, sid, time)) in [
+            (fresh_xml.as_str(), 200u64, 1_700_000_100u32),
+            (legacy_xml.as_str(), 201, 1_700_000_101),
+            (downgraded_xml.as_str(), 202, 1_700_000_102),
+            (unmarked_xml.as_str(), 203, 1_700_000_103),
+            (png_xml.as_str(), 204, 1_700_000_104),
+            (retry_xml.as_str(), 205, 1_700_000_105),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            core.apply_received_sync_command(
+                "a",
+                &add_cmd(body, sid, time),
+                &format!("heic-sync-{idx}"),
+                "live",
+            )
+            .unwrap();
+        }
+
+        let msgs = core.messages("a", peer, Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let msg_id_for = |sid: &str| {
+            msgs.iter()
+                .find(|m| m["serverId"].as_str() == Some(sid))
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let run_download = |asset_id: &str, job_id: &str| {
+            let hash = digest(asset_id.as_bytes());
+            core.store
+                .create_media_job(
+                    "a",
+                    job_id,
+                    &format!("download:{asset_id}"),
+                    &hash,
+                    "download",
+                    &json!({"assetId": asset_id, "completedBytes": 0}),
+                    b"",
+                )
+                .unwrap();
+            core.perform_download("a", job_id)
+        };
+
+        // 1. Fresh transcoded HEIC -> JPEG original succeeds, writes back to official profile,
+        //    releases its sidecar copy, and reads back identically.
+        let fresh_mid = msg_id_for("200");
+        let fresh_assets = core.media_assets("a", &fresh_mid).unwrap();
+        let fresh_orig = fresh_assets
+            .iter()
+            .find(|a| a.variant == MediaVariant::Original)
+            .unwrap();
+        assert_eq!(fresh_orig.advertised_byte_length, Some(advertised_heic_len));
+        run_download(&fresh_orig.id, "job_heic_fresh").unwrap();
+        let done = core.media_asset("a", &fresh_orig.id).unwrap();
+        assert_eq!(done.state, "available");
+        assert_eq!(done.actual_variant, Some(MediaVariant::Original));
+        assert_eq!(done.byte_length, Some(transcoded_jpeg.len() as u64));
+        assert_eq!(done.official_writeback, "complete");
+        let stored_row = core
+            .store
+            .media_asset_with_payload("a", &fresh_orig.id)
+            .unwrap();
+        assert!(
+            stored_row.payload.is_none(),
+            "sidecar copy should be released to profile"
+        );
+        assert_eq!(
+            core.store
+                .media_asset_profile_key("a", &fresh_orig.id)
+                .unwrap()
+                .as_deref(),
+            Some("message")
+        );
+        assert_eq!(
+            core.media_content("a", &fresh_orig.id).unwrap().bytes,
+            transcoded_jpeg
+        );
+        let source = source_message_id(&fresh_mid).unwrap();
+        let cached = core
+            .profile_reader_owned("a")
+            .unwrap()
+            .cached_image(&source, wechat_profile::ImageQuality::Original)
+            .unwrap();
+        assert_eq!(
+            cached.quality,
+            wechat_profile::VerifiedImageQuality::Original
+        );
+        assert_eq!(cached.media.bytes, transcoded_jpeg);
+
+        // 2a. Legacy persisted plan with strict_size=true and expected_md5=Some(heic_md5) is
+        //     normalized on execution and succeeds without re-syncing.
+        let legacy_mid = msg_id_for("201");
+        let legacy_assets = core.media_assets("a", &legacy_mid).unwrap();
+        let legacy_orig = legacy_assets
+            .iter()
+            .find(|a| a.variant == MediaVariant::Original)
+            .unwrap();
+        let legacy_row = core.store.media_asset("a", &legacy_orig.id).unwrap();
+        let mut legacy_plan = core.asset_plan("a", &legacy_row).unwrap();
+        let DownloadPlan::Cdn {
+            descriptor: ref mut legacy_desc,
+        } = legacy_plan.plan
+        else {
+            panic!("expected CDN plan");
+        };
+        legacy_desc.strict_size = true;
+        legacy_desc.expected_md5 = Some(advertised_heic_md5.into());
+        let legacy_asset_id = "asset_legacy_strict_heic_original";
+        let mut legacy_meta = legacy_row.metadata.clone();
+        legacy_meta["id"] = json!(legacy_asset_id);
+        let sealed = core
+            .vault
+            .seal(
+                "a",
+                &format!("plan:{legacy_asset_id}"),
+                &serde_json::to_vec(&legacy_plan).unwrap(),
+            )
+            .unwrap();
+        core.store
+            .put_media_asset(
+                "a",
+                &MediaAssetRecord {
+                    id: legacy_asset_id.into(),
+                    message_id: Some(legacy_mid.clone()),
+                    variant: "original".into(),
+                    kind: "image".into(),
+                    metadata: legacy_meta,
+                    plan: sealed,
+                    payload: None,
+                },
+            )
+            .unwrap();
+        run_download(legacy_asset_id, "job_heic_legacy_strict").unwrap();
+        let legacy_strict_done = core.media_asset("a", legacy_asset_id).unwrap();
+        assert_eq!(legacy_strict_done.state, "available");
+        assert_eq!(legacy_strict_done.official_writeback, "complete");
+
+        // 2b. A previously failed (non-retryable media_integrity_failed) image download rotates to
+        //     a fresh job via start_media_transfer and completes through the worker.
+        let retry_mid = msg_id_for("205");
+        let retry_assets = core.media_assets("a", &retry_mid).unwrap();
+        let retry_orig = retry_assets
+            .iter()
+            .find(|a| a.variant == MediaVariant::Original)
+            .unwrap();
+        let prior_job_id = "job_prior_failed_heic_original";
+        let (mut prior_row, created) = core
+            .store
+            .create_media_job(
+                "a",
+                prior_job_id,
+                &format!("download:{}", retry_orig.id),
+                &digest(retry_orig.id.as_bytes()),
+                "download",
+                &json!({"assetId": retry_orig.id, "completedBytes": transcoded_jpeg.len()}),
+                b"",
+            )
+            .unwrap();
+        assert!(created);
+        prior_row.state = "failed".into();
+        prior_row.phase = "downloading".into();
+        prior_row.error_code = Some("media_integrity_failed".into());
+        prior_row.retryable = false;
+        core.store.save_media_job("a", &prior_row).unwrap();
+        let mut failed_asset = retry_orig.clone();
+        failed_asset.state = "failed".into();
+        failed_asset.reason = Some("media_integrity_failed".into());
+        failed_asset.retryable = false;
+        failed_asset.job_id = Some(prior_job_id.into());
+        core.store
+            .save_media_asset(
+                "a",
+                &retry_orig.id,
+                &serde_json::to_value(&failed_asset).unwrap(),
+                None,
+            )
+            .unwrap();
+
+        let renewed = core
+            .start_media_transfer(
+                "a",
+                MediaTransferRequest {
+                    message_id: retry_mid.clone(),
+                    asset_id: Some(retry_orig.id.clone()),
+                    quality: MediaVariant::Original,
+                },
+            )
+            .unwrap();
+        assert_ne!(renewed.id, prior_job_id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let state = core.store.media_job("a", &renewed.id).unwrap().state;
+            if state != "queued" && state != "running" {
+                assert_eq!(state, "available");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for renewed image download job"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let retry_done = core.media_asset("a", &retry_orig.id).unwrap();
+        assert_eq!(retry_done.state, "available");
+        assert_eq!(retry_done.official_writeback, "complete");
+        assert_eq!(
+            core.media_content("a", &retry_orig.id).unwrap().bytes,
+            transcoded_jpeg
+        );
+
+        // 3. Downgraded (substituteftype=2), unmarked (substituteftype=None), and non-JPEG
+        //    mismatched originals are still rejected.
+        for (sid, job_id) in [
+            ("202", "job_heic_downgraded"),
+            ("203", "job_heic_unmarked"),
+            ("204", "job_heic_png_mismatch"),
+        ] {
+            let mid = msg_id_for(sid);
+            let assets = core.media_assets("a", &mid).unwrap();
+            let orig = assets
+                .iter()
+                .find(|a| a.variant == MediaVariant::Original)
+                .unwrap();
+            let err = run_download(&orig.id, job_id).unwrap_err();
+            assert_eq!(classify_error(&err), "media_integrity_failed", "sid={sid}");
+        }
     }
 }
 #[test]

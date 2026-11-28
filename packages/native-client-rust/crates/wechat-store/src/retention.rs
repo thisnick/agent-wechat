@@ -142,19 +142,25 @@ impl RetentionStep {
 }
 
 /// Row count and stored bytes of one table or runtime family.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCount {
+    /// Table name or runtime key family prefix.
     pub name: String,
+    /// Number of stored rows in this table or family.
     pub rows: i64,
+    /// Stored payload bytes across those rows.
     pub bytes: i64,
 }
 /// Size of an account sidecar and the unresolved work that keeps records whole.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageUsage {
+    /// Total allocated size of `control.sqlite` in bytes.
     pub file_bytes: i64,
+    /// Unused freelist bytes inside `control.sqlite`.
     pub free_bytes: i64,
+    /// Per-table row and byte counts, largest first.
     pub tables: Vec<StorageCount>,
     /// The largest runtime key families, by stored bytes.
     pub runtime_families: Vec<StorageCount>,
@@ -170,11 +176,12 @@ pub struct StorageUsage {
     /// The labels are kept for good, like the commands' raw bytes, so a later
     /// version can find and apply them.
     pub skipped_controls: Vec<SkippedControlCount>,
+    /// Number of retired idempotency key and operation ID digests kept to prevent replay.
     pub retired_keys: i64,
 }
 /// Commands of one form that keep sync batches blocked. Labels only: never a
 /// peer's identity or the control's contents.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockedControlCount {
     /// AddMsg type, such as 51 (status) or 10002 (system).
@@ -187,14 +194,16 @@ pub struct BlockedControlCount {
     pub peer_kind: Option<String>,
     /// Why the command is blocked.
     pub reason: Option<String>,
+    /// Number of blocked commands matching this form.
     pub commands: i64,
+    /// Number of distinct sync batches blocked by this form.
     pub batches: i64,
 }
 
 /// Commands of one form that were skipped as handled because this build
 /// can't apply them. Labels only: never a peer's identity or the command's
 /// contents.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkippedControlCount {
     /// Sync command ID, such as 5 (AddMsg) or 44.
@@ -211,7 +220,9 @@ pub struct SkippedControlCount {
     pub peer_kind: Option<String>,
     /// Why this build can't apply it.
     pub reason: Option<String>,
+    /// Number of skipped commands matching this form.
     pub commands: i64,
+    /// Number of distinct sync batches containing this skipped form.
     pub batches: i64,
 }
 

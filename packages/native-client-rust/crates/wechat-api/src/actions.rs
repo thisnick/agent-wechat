@@ -5,6 +5,7 @@ pub(super) fn routes() -> Router<App> {
             "/v1/accounts/{a}/settings",
             get(account_settings).patch(update_settings),
         )
+        .api_route("/v1/accounts/{a}/storage", get(account_storage))
         .api_route(
             "/v1/accounts/{a}/messages/{id}/recall",
             post(recall_message),
@@ -84,6 +85,20 @@ async fn account_settings(
 ) -> ApiResult<Json<wechat_store::AccountSettings>> {
     c.require(Some(&a), "read")?;
     Ok(Json(app.core.store.account_settings(&a)?))
+}
+async fn account_storage(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<Json<wechat_store::StorageUsage>> {
+    c.require(Some(&a), "read")?;
+    let store = app.core.store.clone();
+    work(move || {
+        let snapshot = store.read_snapshot(&a)?;
+        snapshot.storage_usage(&a)
+    })
+    .await
+    .map(Json)
 }
 async fn update_settings(
     State(app): State<App>,

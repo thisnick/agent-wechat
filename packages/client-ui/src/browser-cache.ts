@@ -13,20 +13,29 @@ const stores = [
   "chatState",
   "syncState",
   "avatars",
+  "avatarMeta",
   "media",
+  "mediaMeta",
   "drafts",
   "receipts",
 ] as const;
 type Store = (typeof stores)[number];
-const fetched: Store[] = [
+type BlobStore = "avatars" | "media";
+type BlobMetaStore = "avatarMeta" | "mediaMeta";
+const blobStores: readonly BlobStore[] = ["avatars", "media"];
+const metaStore = (kind: BlobStore): BlobMetaStore =>
+  kind === "media" ? "mediaMeta" : "avatarMeta";
+// Blob size and recency are available without loading cached payloads.
+const fetchedStats: Store[] = [
   "threads",
   "contacts",
   "messages",
   "chatState",
   "syncState",
-  "avatars",
-  "media",
+  "avatarMeta",
+  "mediaMeta",
 ];
+const fetched: Store[] = [...fetchedStats, "avatars", "media"];
 export type AccountSnapshot = {
   threads: NativeThread[];
   contacts: NativeContact[];
@@ -59,6 +68,41 @@ type Row = {
   bytes?: number;
   messageId?: string;
 };
+type BlobRow = Pick<Row, "key" | "scope" | "data" | "messageId">;
+type BlobMetadata = Omit<Row, "data">;
+const blobBytes = (data: StoredBlob | SavedBlob | undefined): number => {
+  if (!data || typeof data !== "object") return 0;
+  if ("content" in data && typeof data.content?.byteLength === "number")
+    return data.content.byteLength;
+  if ("blob" in data && typeof data.blob?.size === "number")
+    return data.blob.size;
+  return 0;
+};
+const metadataFromRow = (
+  row: Partial<Row>,
+  fallbackLastUsed = 0,
+): BlobMetadata | null => {
+  if (!Array.isArray(row.key)) return null;
+  const payload = row.data as StoredBlob | SavedBlob | undefined;
+  return {
+    key: row.key,
+    scope:
+      typeof row.scope === "string"
+        ? row.scope
+        : JSON.stringify(row.key.slice(0, -1)),
+    lastUsed:
+      typeof row.lastUsed === "number" && Number.isFinite(row.lastUsed)
+        ? row.lastUsed
+        : fallbackLastUsed,
+    bytes:
+      typeof row.bytes === "number" &&
+      Number.isFinite(row.bytes) &&
+      row.bytes >= 0
+        ? row.bytes
+        : blobBytes(payload),
+    messageId: row.messageId,
+  };
+};
 const request = <T>(value: IDBRequest<T>): Promise<T> =>
   new Promise((resolve, reject) => {
     value.onsuccess = () => resolve(value.result);
@@ -79,8 +123,11 @@ export class BrowserCache {
   private now: () => number;
   private channel?: BroadcastChannel;
   private invalidations = new Set<(account: string) => void>();
+  private closing = false;
   private closed = false;
   private failed = false;
+  private cancelBlockedOpen?: () => void;
+  private cancelOpen?: () => void;
   constructor(
     origin: string,
     hubId: string,
@@ -91,6 +138,7 @@ export class BrowserCache {
       now?: () => number;
       mediaBudget?: number;
       broadcast?: boolean;
+      blockedTimeoutMs?: number;
     } = {},
   ) {
     this.namespace = [new URL(origin).origin, hubId];
@@ -106,38 +154,109 @@ export class BrowserCache {
       }
       let open: IDBOpenDBRequest;
       try {
-        open = factory.open(options.name ?? "agent-wechat-cache", 1);
+        open = factory.open(options.name ?? "agent-wechat-cache", 2);
       } catch {
         this.failed = true;
         resolve(null);
         return;
       }
-      open.onupgradeneeded = () => {
+      let settled = false;
+      let blockedTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearBlockedTimer = () => {
+        if (blockedTimer === undefined) return;
+        clearTimeout(blockedTimer);
+        blockedTimer = undefined;
+      };
+      const settle = (db: IDBDatabase | null) => {
+        if (settled) return;
+        settled = true;
+        clearBlockedTimer();
+        resolve(db);
+      };
+      const failOpen = () => {
+        if (settled) return;
+        this.failed = true;
+        settle(null);
+      };
+      this.cancelBlockedOpen = () => {
+        if (blockedTimer !== undefined) settle(null);
+      };
+      this.cancelOpen = () => {
+        settle(null);
+      };
+      open.onupgradeneeded = (event) => {
+        clearBlockedTimer();
         for (const name of stores) {
+          if (open.result.objectStoreNames.contains(name)) continue;
           const store = open.result.createObjectStore(name, { keyPath: "key" });
           store.createIndex("scope", "scope");
         }
+        if (event.oldVersion === 1) {
+          const tx = open.transaction!;
+          for (const kind of blobStores) {
+            const payload = tx.objectStore(kind);
+            const meta = tx.objectStore(metaStore(kind));
+            // Media and avatars are disposable caches: if any legacy row hits a
+            // request-level read or write error during upgrade, clear that cache
+            // so the upgrade still commits and drafts/receipts remain accessible.
+            let reset = false;
+            const clearCache = () => {
+              if (reset) return;
+              reset = true;
+              payload.clear();
+              meta.clear();
+            };
+            const recover = (errEvent: Event) => {
+              errEvent.preventDefault();
+              errEvent.stopPropagation();
+              clearCache();
+            };
+            // Backfill the small rows without modifying any existing payload bytes.
+            const scan = payload.openCursor();
+            scan.onerror = recover;
+            scan.onsuccess = () => {
+              if (reset) return;
+              const cursor = scan.result;
+              if (!cursor) return;
+              const entry = metadataFromRow(cursor.value as Partial<Row>);
+              if (entry) {
+                try {
+                  const write = meta.put(entry);
+                  write.onerror = recover;
+                } catch {
+                  clearCache();
+                  return;
+                }
+              }
+              cursor.continue();
+            };
+          }
+        }
       };
       open.onerror = () => {
-        this.failed = true;
-        resolve(null);
+        failOpen();
       };
       open.onblocked = () => {
-        this.failed = true;
-        resolve(null);
+        if (settled || this.closing || this.closed) {
+          settle(null);
+          return;
+        }
+        if (blockedTimer !== undefined) return;
+        blockedTimer = setTimeout(failOpen, options.blockedTimeoutMs ?? 3000);
+        (blockedTimer as unknown as { unref?: () => void }).unref?.();
       };
       open.onsuccess = () => {
         const db = open.result;
-        if (this.closed || this.failed) {
+        if (settled || this.closed) {
           db.close();
-          resolve(null);
+          settle(null);
           return;
         }
         db.onversionchange = () => {
           db.close();
           this.failed = true;
         };
-        resolve(db);
+        settle(db);
       };
     });
     if (
@@ -217,11 +336,11 @@ export class BrowserCache {
   async flush() {
     await this.tail;
   }
-  private async rows(
+  private async rows<T = Row>(
     tx: IDBTransaction,
     name: Store,
     account: string,
-  ): Promise<Row[]> {
+  ): Promise<T[]> {
     return request(
       tx.objectStore(name).index("scope").getAll(this.scope(account)),
     );
@@ -435,18 +554,30 @@ export class BrowserCache {
     );
   }
   async blob(
-    kind: "avatars" | "media",
+    kind: BlobStore,
     account: string,
     id: string,
   ): Promise<SavedBlob | undefined> {
     await this.flush();
-    const data = await this.transaction([kind], "readwrite", async (tx) => {
-      const row = await request<Row | undefined>(
-        tx.objectStore(kind).get(this.key(account, id)),
-      );
+    const key = this.key(account, id);
+    const metaName = metaStore(kind);
+    const names: Store[] = [kind, metaName];
+    const data = await this.transaction(names, "readwrite", async (tx) => {
+      const store = tx.objectStore(kind);
+      const meta = tx.objectStore(metaName);
+      const [row, entry] = await Promise.all([
+        request<Row | BlobRow | undefined>(store.get(key)),
+        request<BlobMetadata | undefined>(meta.get(key)),
+      ]);
       if (!row) return;
-      row.lastUsed = this.now();
-      tx.objectStore(kind).put(row);
+      const lastUsed = this.now();
+      // Updating recency must not serialize the cached ArrayBuffer again.
+      if (entry) {
+        meta.put({ ...entry, lastUsed });
+      } else {
+        const repaired = metadataFromRow(row, lastUsed);
+        if (repaired) meta.put({ ...repaired, lastUsed });
+      }
       return row.data as StoredBlob | SavedBlob;
     });
     if (!data) return;
@@ -466,15 +597,16 @@ export class BrowserCache {
     } catch {
       // Fetch the hub's cached bytes again if a legacy Blob is no longer readable.
       await this.enqueue(() =>
-        this.transaction([kind], "readwrite", (tx) => {
-          tx.objectStore(kind).delete(this.key(account, id));
+        this.transaction(names, "readwrite", (tx) => {
+          tx.objectStore(kind).delete(key);
+          tx.objectStore(metaName).delete(key);
         }),
       );
       return;
     }
   }
   saveBlob(
-    kind: "avatars" | "media",
+    kind: BlobStore,
     account: string,
     id: string,
     data: SavedBlob,
@@ -489,38 +621,62 @@ export class BrowserCache {
         refreshedAt: data.refreshedAt,
         etag: data.etag,
       };
-      const row = {
-        ...this.row(account, id, stored),
+      const row: BlobMetadata = {
+        key: this.key(account, id),
+        scope: this.scope(account),
+        lastUsed: this.now(),
         bytes: data.blob.size,
         messageId,
       };
-      return this.transaction(["avatars", "media"], "readwrite", async (tx) => {
-        tx.objectStore(kind).put(row);
-        const entries: { kind: "avatars" | "media"; row: Row }[] = [];
-        for (const store of ["avatars", "media"] as const) {
-          const rows = await request<Row[]>(tx.objectStore(store).getAll());
-          for (const item of rows) entries.push({ kind: store, row: item });
-        }
-        let bytes = entries.reduce(
-          (sum, item) => sum + (item.row.bytes ?? 0),
-          0,
-        );
-        for (const item of entries.sort(
-          (a, b) => a.row.lastUsed - b.row.lastUsed,
-        )) {
-          if (bytes <= this.mediaBudget) break;
-          tx.objectStore(item.kind).delete(item.row.key);
-          bytes -= item.row.bytes ?? 0;
-        }
-      });
+      return this.transaction(
+        ["avatars", "avatarMeta", "media", "mediaMeta"],
+        "readwrite",
+        async (tx) => {
+          const payloadStore = tx.objectStore(kind);
+          const payloadMeta = tx.objectStore(metaStore(kind));
+          payloadStore.put({
+            key: row.key,
+            scope: row.scope,
+            data: stored,
+            ...(messageId !== undefined ? { messageId } : {}),
+          } satisfies BlobRow);
+          payloadMeta.put(row);
+          const entries = (
+            await Promise.all(
+              blobStores.map(async (blobKind) => {
+                const meta = tx.objectStore(metaStore(blobKind));
+                return (await request<BlobMetadata[]>(meta.getAll())).map(
+                  (entry) => ({ kind: blobKind, row: entry }),
+                );
+              }),
+            )
+          ).flat();
+          let bytes = entries.reduce(
+            (sum, item) => sum + (item.row.bytes ?? 0),
+            0,
+          );
+          for (const { kind: entryKind, row: entry } of entries.sort(
+            (a, b) => a.row.lastUsed - b.row.lastUsed,
+          )) {
+            if (bytes <= this.mediaBudget) break;
+            tx.objectStore(entryKind).delete(entry.key);
+            tx.objectStore(metaStore(entryKind)).delete(entry.key);
+            bytes -= entry.bytes ?? 0;
+          }
+        },
+      );
     });
   }
   invalidateMessage(account: string, message: string) {
     void this.enqueue(() =>
-      this.transaction(["media"], "readwrite", async (tx) => {
-        for (const row of await this.rows(tx, "media", account))
-          if (row.messageId === message)
-            tx.objectStore("media").delete(row.key);
+      this.transaction(["media", "mediaMeta"], "readwrite", async (tx) => {
+        const meta = tx.objectStore("mediaMeta");
+        const rows = await this.rows<BlobMetadata>(tx, "mediaMeta", account);
+        for (const row of rows) {
+          if (row.messageId !== message) continue;
+          tx.objectStore("media").delete(row.key);
+          meta.delete(row.key);
+        }
       }),
     );
   }
@@ -560,21 +716,27 @@ export class BrowserCache {
     available: boolean;
   }> {
     await this.flush();
-    const result = await this.transaction(fetched, "readonly", async (tx) => {
-      const rows = await Promise.all(
-        fetched.map((name) => this.rows(tx, name, account)),
-      );
-      return {
-        bytes: rows.reduce(
-          (sum, list) =>
-            sum + list.reduce((count, row) => count + (row.bytes ?? 0), 0),
-          0,
-        ),
-        messages: rows[2].length,
-        chats: rows[3].length,
-        available: true,
-      };
-    });
+    const result = await this.transaction(
+      fetchedStats,
+      "readonly",
+      async (tx) => {
+        const rows = await Promise.all(
+          fetchedStats.map((name) =>
+            this.rows<Pick<Row, "bytes">>(tx, name, account),
+          ),
+        );
+        return {
+          bytes: rows.reduce(
+            (sum, list) =>
+              sum + list.reduce((count, row) => count + (row.bytes ?? 0), 0),
+            0,
+          ),
+          messages: rows[2].length,
+          chats: rows[3].length,
+          available: true,
+        };
+      },
+    );
     return result ?? { bytes: 0, messages: 0, chats: 0, available: false };
   }
   private preferenceKey(id: string) {
@@ -610,8 +772,11 @@ export class BrowserCache {
     this.setPreference(`view:${account}`, { ...this.view(account), ...patch });
   }
   async close() {
+    this.closing = true;
+    this.cancelBlockedOpen?.();
     await this.flush();
     this.closed = true;
+    this.cancelOpen?.();
     this.channel?.close();
     (await this.database)?.close();
   }

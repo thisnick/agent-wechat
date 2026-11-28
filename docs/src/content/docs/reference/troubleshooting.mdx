@@ -3,7 +3,7 @@ title: Troubleshooting
 description: Fixes for common install, login, profile, media and OpenClaw problems.
 ---
 
-Start with `wx accounts status`. It shows whether you're logged in (`authenticated`), connected (`connection`), and whether any work is stuck.
+Start with `wx daemon doctor` if the daemon won't start or you aren't sure which local daemon owns a data folder, or `wx accounts status` if it is running and you want to check login and connection state.
 
 ## Install
 
@@ -11,16 +11,44 @@ Start with `wx accounts status`. It shows whether you're logged in (`authenticat
 
 ## Starting the daemon
 
-**Address already in use.** Another daemon is already running, perhaps under `wx daemon`, systemd, Docker or OpenClaw managed mode. Stop that one, or connect to it instead. Don't kill a process you don't recognize just because it holds the port.
+Run `wx daemon doctor` on the machine that holds the data folder. When the daemon is stopped, it reads files only: it never opens a database for writing, never takes `owner.lock`, never starts a daemon and never contacts WeChat.
+
+```bash
+wx daemon doctor
+```
+
+```text
+Target: /home/you/.local/share/agent-wechat (chosen from: default)
+Listen: http://127.0.0.1:6174  State: stopped (read-only check)
+
+Status  Check            Summary
+OK      server_config    Using default server settings
+OK      data_dir         Data folder is owned by UID 1000 with mode 0700
+OK      sqlite.registry  registry.sqlite OK (schema v4/4, 36.0 KiB)
+OK      disk.space       42.3 GiB free of 100.0 GiB
+OK      media_tools      FFmpeg and FFprobe available
+
+For daemons running in Docker, run `docker exec <container> wx daemon doctor`.
+```
+
+| Flag | What it does |
+| --- | --- |
+| `--all` | Run the full check list on every local daemon data folder (`wx daemon`, systemd, desktop hub and running `wx serve` processes). |
+| `--fix` | Apply only safe cleanup, such as removing a leftover `daemon/process.json` for a dead process. Never changes, moves or deletes database files. |
+| `--json` | Print the target, `checks[]`, `others[]` and any redacted bug report as JSON. |
+
+Use `--data-dir PATH` or `--server-config FILE` to check a non-default folder. For a daemon in Docker, run `docker exec <container> wx daemon doctor`.
+
+**Address already in use.** Another daemon is already running, perhaps under `wx daemon`, systemd, Docker or OpenClaw managed mode. Run `wx daemon doctor` to see which process holds the port, then stop that one or connect to it instead. Don't kill a process you don't recognize just because it holds the port.
 
 **Old `serverUrl` or `backend` settings are rejected.** You're using a 0.x configuration. See [Migrate from the old container](/setup/migrate/).
 
-**"cannot open … database WAL …; existing files preserved".** One of the daemon's own databases doesn't match its log (the `-wal` file beside it), or its `-shm` index file is unrecognized. This usually follows a sudden stop of the computer, VM or WSL, or a full disk. The daemon repairs the common cases itself — including an out-of-date index or a 3-byte `-shm` left by an interrupted start — and keeps a copy of the original files in a `.sqlite-recovery-…` folder beside the database. If it still refuses to start:
+**"cannot open … database WAL …; existing files preserved".** One of the daemon's own databases doesn't match its log (the `-wal` file beside it), or its `-shm` index file is unrecognized. This usually follows a sudden stop of the computer, VM or WSL, or a full disk. Run `wx daemon doctor` to inspect the files without modifying them. The daemon repairs the common cases itself — including an out-of-date index or a 3-byte `-shm` left by an interrupted start — and keeps a copy of the original files in a `.sqlite-recovery-…` folder beside the database. If it still refuses to start:
 
 1. Stop the daemon.
 2. Copy the database named in the message, with its `-wal` and `-shm` files, somewhere safe.
 3. If the message says `commits from a newer log generation`, `index exceeds log` or `published frame is not a verified commit`, the log is missing the latest changes. To start without them, move the `-shm` file out of the folder and start the daemon. It checks the log again before using it.
-4. For any other message, the log or index file is damaged or unrecognized. Restore the data directory from a backup, or [open an issue](https://github.com/thisnick/agent-wechat/issues) with the message.
+4. For any other message, the log or index file is damaged or unrecognized. Restore the data directory from a backup, or [open an issue](https://github.com/thisnick/agent-wechat/issues) with the redacted bug report that `wx daemon doctor` prints.
 
 ## Login
 

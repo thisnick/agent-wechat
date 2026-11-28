@@ -1,11 +1,29 @@
 use crate::Desktop;
 use anyhow::{bail, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use tauri::{ipc::Channel, State};
+use std::{borrow::Cow, collections::BTreeMap};
+use tauri::{http::HeaderValue, ipc::Channel, State};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
+
+const STREAM_CHUNK_BYTES: usize = 128 * 1024;
+const STREAM_CREDITS: usize = 8;
+const MAX_ACTIVE_REQUESTS: usize = 64;
+const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
+const FRAME_DATA: u8 = 0;
+const FRAME_END: u8 = 1;
+const FRAME_ERROR: u8 = 2;
+
+fn data_frame(part: &[u8]) -> tauri::ipc::InvokeResponseBody {
+    let mut frame = Vec::with_capacity(1 + part.len());
+    frame.push(FRAME_DATA);
+    frame.extend_from_slice(part);
+    tauri::ipc::InvokeResponseBody::Raw(frame)
+}
+
+fn control_frame(tag: u8) -> tauri::ipc::InvokeResponseBody {
+    tauri::ipc::InvokeResponseBody::Raw(vec![tag])
+}
 
 pub struct Control {
     pub cancel: CancellationToken,
@@ -15,13 +33,6 @@ pub struct Upload {
     pub temp: tempfile::NamedTempFile,
     pub file: tokio::fs::File,
     length: usize,
-}
-#[derive(Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum Packet {
-    Data { bytes: String },
-    End,
-    Error,
 }
 #[derive(Serialize)]
 pub struct Head {
@@ -109,23 +120,54 @@ pub async fn http_body_begin(state: State<'_, Desktop>, id: String) -> Result<()
     );
     Ok(())
 }
+fn parse_upload_chunk<'a>(
+    id_header: Option<&'a HeaderValue>,
+    body: &'a tauri::ipc::InvokeBody,
+) -> Result<(&'a str, Cow<'a, [u8]>), String> {
+    let id = id_header
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Invalid request identity")?;
+    request_id(id).map_err(|_| "Invalid request identity")?;
+    let bytes = match body {
+        tauri::ipc::InvokeBody::Raw(bytes) => {
+            if bytes.len() > UPLOAD_CHUNK_BYTES {
+                return Err("Upload chunk is too large".into());
+            }
+            Cow::Borrowed(bytes.as_slice())
+        }
+        // Tauri's postMessage fallback JSON-encodes a Uint8Array payload as a byte array.
+        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(items)) => {
+            if items.len() > UPLOAD_CHUNK_BYTES {
+                return Err("Upload chunk is too large".into());
+            }
+            let mut decoded = Vec::with_capacity(items.len());
+            for item in items {
+                let byte = item
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or("Binary upload chunk is required")?;
+                decoded.push(byte);
+            }
+            Cow::Owned(decoded)
+        }
+        tauri::ipc::InvokeBody::Json(_) => return Err("Binary upload chunk is required".into()),
+    };
+    Ok((id, bytes))
+}
 #[tauri::command]
 pub async fn http_body_chunk(
     state: State<'_, Desktop>,
-    id: String,
-    bytes: Vec<u8>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    if bytes.len() > 64 * 1024 {
-        return Err("Upload chunk is too large".into());
-    }
+    let (id, bytes) = parse_upload_chunk(request.headers().get("x-upload-id"), request.body())?;
     let mut uploads = state.uploads.lock().await;
-    let upload = uploads.get_mut(&id).ok_or("Upload was cancelled")?;
+    let upload = uploads.get_mut(id).ok_or("Upload was cancelled")?;
     if upload.length + bytes.len() > 513 * 1024 * 1024 {
         return Err("Upload is too large".into());
     }
     upload
         .file
-        .write_all(&bytes)
+        .write_all(bytes.as_ref())
         .await
         .map_err(|_| "Cannot store upload")?;
     upload.length += bytes.len();
@@ -142,7 +184,7 @@ pub async fn http_cancel(state: State<'_, Desktop>, id: String) -> Result<(), St
 #[tauri::command]
 pub async fn http_ack(state: State<'_, Desktop>, id: String) -> Result<(), String> {
     if let Some(control) = state.requests.lock().await.get(&id) {
-        if control.credits.available_permits() < 8 {
+        if control.credits.available_permits() < STREAM_CREDITS {
             control.credits.add_permits(1);
         }
     }
@@ -152,7 +194,7 @@ pub async fn http_ack(state: State<'_, Desktop>, id: String) -> Result<(), Strin
 pub async fn http_request(
     state: State<'_, Desktop>,
     request: Request,
-    channel: Channel<Packet>,
+    channel: Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<Head, String> {
     request_id(&request.id).map_err(|_| "Invalid request identity")?;
     request_path(&request.path).map_err(|_| "Invalid API path")?;
@@ -207,10 +249,10 @@ pub async fn http_request(
         return Err("Unexpected request body".into());
     }
     let cancel = CancellationToken::new();
-    let credits = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let credits = std::sync::Arc::new(tokio::sync::Semaphore::new(STREAM_CREDITS));
     {
         let mut requests = state.requests.lock().await;
-        if requests.len() >= 64 || requests.contains_key(&request.id) {
+        if requests.len() >= MAX_ACTIVE_REQUESTS || requests.contains_key(&request.id) {
             return Err("Too many active requests".into());
         }
         requests.insert(
@@ -222,14 +264,16 @@ pub async fn http_request(
         );
     }
     let response = tokio::select! {
-        _ = cancel.cancelled() => Err("Request cancelled".to_string()),
-        response = builder.send() => response.map_err(|_| "Cannot reach the hub; check its connection and certificate".to_string()),
+        _ = cancel.cancelled() => Err("Request cancelled"),
+        response = builder.send() => {
+            response.map_err(|_| "Cannot reach the hub; check its connection and certificate")
+        }
     };
     let mut response = match response {
         Ok(value) => value,
         Err(error) => {
             state.requests.lock().await.remove(&request.id);
-            return Err(error);
+            return Err(error.into());
         }
     };
     let head = Head {
@@ -253,29 +297,24 @@ pub async fn http_request(
             let next = tokio::select! { _ = cancel.cancelled() => break, chunk = response.chunk() => chunk };
             match next {
                 Ok(Some(bytes)) => {
-                    for part in bytes.chunks(64 * 1024) {
+                    for part in bytes.chunks(STREAM_CHUNK_BYTES) {
                         let permit = tokio::select! { _ = cancel.cancelled() => break, permit = credits.acquire() => permit };
                         let Ok(permit) = permit else {
                             break;
                         };
                         permit.forget();
-                        if channel
-                            .send(Packet::Data {
-                                bytes: STANDARD.encode(part),
-                            })
-                            .is_err()
-                        {
+                        if channel.send(data_frame(part)).is_err() {
                             cancel.cancel();
                             break;
                         }
                     }
                 }
                 Ok(None) => {
-                    let _ = channel.send(Packet::End);
+                    let _ = channel.send(control_frame(FRAME_END));
                     break;
                 }
                 Err(_) => {
-                    let _ = channel.send(Packet::Error);
+                    let _ = channel.send(control_frame(FRAME_ERROR));
                     break;
                 }
             }
@@ -287,6 +326,107 @@ pub async fn http_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UPLOAD_ID: &str = "c4bea3cb-06bc-4e78-b4ec-608ece103b2a";
+
+    #[test]
+    fn data_frames_prefix_the_binary_payload() {
+        let tauri::ipc::InvokeResponseBody::Raw(bytes) = data_frame(&[0, 128, 255]) else {
+            panic!("expected a raw data frame");
+        };
+        assert_eq!(bytes, [0, 0, 128, 255]);
+    }
+
+    #[test]
+    fn control_frames_contain_only_their_tag() {
+        for (tag, expected) in [(FRAME_END, [1]), (FRAME_ERROR, [2])] {
+            let tauri::ipc::InvokeResponseBody::Raw(bytes) = control_frame(tag) else {
+                panic!("expected a raw control frame");
+            };
+            assert_eq!(bytes, expected);
+        }
+    }
+
+    #[test]
+    fn upload_chunk_accepts_raw_bytes() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        let body = tauri::ipc::InvokeBody::Raw(vec![0, 128, 255]);
+        let (id, bytes) = parse_upload_chunk(Some(&header), &body).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert_eq!(bytes.as_ref(), &[0, 128, 255][..]);
+    }
+
+    #[test]
+    fn upload_chunk_rejects_missing_or_invalid_upload_ids() {
+        let invalid_uuid = HeaderValue::from_static("not-a-uuid");
+        let invalid_utf8 = HeaderValue::from_bytes(&[0xff]).unwrap();
+        let body = tauri::ipc::InvokeBody::Raw(vec![0]);
+        for header in [None, Some(&invalid_uuid), Some(&invalid_utf8)] {
+            assert_eq!(
+                parse_upload_chunk(header, &body).unwrap_err(),
+                "Invalid request identity"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_chunk_accepts_postmessage_fallback_json_byte_array() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        let body = tauri::ipc::InvokeBody::Json(serde_json::json!([0, 128, 255]));
+        let (id, bytes) = parse_upload_chunk(Some(&header), &body).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert_eq!(bytes.as_ref(), &[0, 128, 255][..]);
+
+        let oversized = tauri::ipc::InvokeBody::Json(serde_json::Value::Array(vec![
+            serde_json::Value::from(0);
+            UPLOAD_CHUNK_BYTES + 1
+        ]));
+        assert_eq!(
+            parse_upload_chunk(Some(&header), &oversized).unwrap_err(),
+            "Upload chunk is too large"
+        );
+    }
+
+    #[test]
+    fn upload_chunk_rejects_invalid_json() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        for body in [
+            tauri::ipc::InvokeBody::Json(serde_json::json!({ "bytes": [0, 1] })),
+            tauri::ipc::InvokeBody::Json(serde_json::json!([256])),
+            tauri::ipc::InvokeBody::Json(serde_json::json!([-1])),
+            tauri::ipc::InvokeBody::Json(serde_json::json!(["0"])),
+        ] {
+            assert_eq!(
+                parse_upload_chunk(Some(&header), &body).unwrap_err(),
+                "Binary upload chunk is required"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_chunk_accepts_empty_and_max_sized_raw_bytes() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        let empty = tauri::ipc::InvokeBody::Raw(Vec::new());
+        let (id, bytes) = parse_upload_chunk(Some(&header), &empty).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert!(bytes.is_empty());
+        let max = vec![0x5a; UPLOAD_CHUNK_BYTES];
+        let body = tauri::ipc::InvokeBody::Raw(max.clone());
+        let (id, bytes) = parse_upload_chunk(Some(&header), &body).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert_eq!(bytes.as_ref(), max.as_slice());
+    }
+
+    #[test]
+    fn upload_chunk_rejects_oversized_raw_bytes() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        let body = tauri::ipc::InvokeBody::Raw(vec![0; UPLOAD_CHUNK_BYTES + 1]);
+        assert_eq!(
+            parse_upload_chunk(Some(&header), &body).unwrap_err(),
+            "Upload chunk is too large"
+        );
+    }
+
     #[test]
     fn conditional_sticker_mutations_keep_revision_and_native_credentials() {
         for method in [reqwest::Method::PATCH, reqwest::Method::DELETE] {
