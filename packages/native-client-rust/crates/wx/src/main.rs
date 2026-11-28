@@ -14,6 +14,7 @@ use wechat_core::Core;
 mod calls_cli;
 mod cli_help;
 mod client_actions;
+mod completions;
 mod config;
 mod daemon;
 mod events;
@@ -100,6 +101,11 @@ enum Command {
     Version,
     /// Show bundled third-party license notices.
     Licenses,
+    /// Generate shell completion scripts for wx.
+    Completions {
+        /// Shell to generate completions for.
+        shell: completions::CompletionShell,
+    },
     /// Inspect configuration and manage saved servers.
     Config {
         #[command(subcommand)]
@@ -1664,14 +1670,6 @@ async fn run(cli: Cli) -> Result<()> {
             return calls_cli::session::run_local(cmd.clone(), cli.json).await;
         }
     }
-    if matches!(cli.command, Command::Licenses) {
-        return output.print(
-            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
-        );
-    }
-    if matches!(cli.command, Command::Version) {
-        return output.print(&wechat_api::version());
-    }
     if cli.token_stdin
         && matches!(
             &cli.command,
@@ -1681,9 +1679,21 @@ async fn run(cli: Cli) -> Result<()> {
                 | Command::Profiles { .. }
                 | Command::Version
                 | Command::Licenses
+                | Command::Completions { .. }
         )
     {
         bail!("--token-stdin is supported by serve and HTTP client commands");
+    }
+    if matches!(cli.command, Command::Licenses) {
+        return output.print(
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+        );
+    }
+    if matches!(cli.command, Command::Version) {
+        return output.print(&wechat_api::version());
+    }
+    if let Command::Completions { shell } = cli.command {
+        return completions::write(shell, &mut std::io::stdout().lock());
     }
     let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
@@ -2517,6 +2527,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Version
         | Command::Licenses
+        | Command::Completions { .. }
         | Command::Config { .. }
         | Command::Serve { .. }
         | Command::Store { .. }
