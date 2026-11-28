@@ -1233,6 +1233,41 @@ response StickerPackStickers.items[].thumbnail.sha256 | string, required, nullab
 response StickerPackStickers.items[].thumbnail.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
 response StickerPackStickers.items[].thumbnail.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
 response StickerPackStickers.packId | string, required | Product identity.
+response StorageUsage | object | Size of an account sidecar and the unresolved work that keeps records whole.
+response StorageUsage.blockedControls | array of object, required | Status and system controls (AddMsg types 51 and 10002) recorded by an earlier version as keeping sync batches blocked, by form. Such controls are now skipped (see `skipped_controls`), so this only lists batches no retry has reached yet. Batches waiting on local work, such as a group refresh, aren't listed.
+response StorageUsage.blockedControls[] | object | Commands of one form that keep sync batches blocked. Labels only: never a peer's identity or the control's contents.
+response StorageUsage.blockedControls[].batches | integer, required, format int64 | Number of distinct sync batches blocked by this form.
+response StorageUsage.blockedControls[].commands | integer, required, format int64 | Number of blocked commands matching this form.
+response StorageUsage.blockedControls[].messageType | integer, required, nullable, format int64 | AddMsg type, such as 51 (status) or 10002 (system).
+response StorageUsage.blockedControls[].operationIds | string, required, nullable | Status operation IDs, as a JSON array.
+response StorageUsage.blockedControls[].peerKind | string, required, nullable | `group`, `excluded`, `classified` or `ordinary`.
+response StorageUsage.blockedControls[].reason | string, required, nullable | Why the command is blocked.
+response StorageUsage.blockedControls[].systemKind | string, required, nullable | System message kind, such as `dynacfg`.
+response StorageUsage.fileBytes | integer, required, format int64 | Total allocated size of `control.sqlite` in bytes.
+response StorageUsage.freeBytes | integer, required, format int64 | Unused freelist bytes inside `control.sqlite`.
+response StorageUsage.retiredKeys | integer, required, format int64 | Number of retired idempotency key and operation ID digests kept to prevent replay.
+response StorageUsage.runtimeFamilies | array of object, required | The largest runtime key families, by stored bytes.
+response StorageUsage.runtimeFamilies[] | object | Row count and stored bytes of one table or runtime family.
+response StorageUsage.runtimeFamilies[].bytes | integer, required, format int64 | Stored payload bytes across those rows.
+response StorageUsage.runtimeFamilies[].name | string, required | Table name or runtime key family prefix.
+response StorageUsage.runtimeFamilies[].rows | integer, required, format int64 | Number of stored rows in this table or family.
+response StorageUsage.skippedControls | array of object, required | Commands this build couldn't apply and skipped as handled, by form. The labels are kept for good, like the commands' raw bytes, so a later version can find and apply them.
+response StorageUsage.skippedControls[] | object | Commands of one form that were skipped as handled because this build can't apply them. Labels only: never a peer's identity or the command's contents.
+response StorageUsage.skippedControls[].batches | integer, required, format int64 | Number of distinct sync batches containing this skipped form.
+response StorageUsage.skippedControls[].classification | string, required, nullable | What kind of command it was, such as `status_notification`.
+response StorageUsage.skippedControls[].commandId | integer, required, nullable, format int64 | Sync command ID, such as 5 (AddMsg) or 44.
+response StorageUsage.skippedControls[].commands | integer, required, format int64 | Number of skipped commands matching this form.
+response StorageUsage.skippedControls[].messageType | integer, required, nullable, format int64 | AddMsg type, such as 51 (status) or 10002 (system).
+response StorageUsage.skippedControls[].operationIds | string, required, nullable | Status operation IDs, as a JSON array.
+response StorageUsage.skippedControls[].peerKind | string, required, nullable | `group`, `excluded`, `classified` or `ordinary`.
+response StorageUsage.skippedControls[].reason | string, required, nullable | Why this build can't apply it.
+response StorageUsage.skippedControls[].systemKind | string, required, nullable | System message kind, such as `dynacfg`.
+response StorageUsage.tables | array of object, required | Per-table row and byte counts, largest first.
+response StorageUsage.tables[] | object | Row count and stored bytes of one table or runtime family.
+response StorageUsage.tables[].bytes | integer, required, format int64 | Stored payload bytes across those rows.
+response StorageUsage.tables[].name | string, required | Table name or runtime key family prefix.
+response StorageUsage.tables[].rows | integer, required, format int64 | Number of stored rows in this table or family.
+response StorageUsage.unresolved | object, required | Records retention keeps whole until they finish or expire.
 route DELETE /v1/access-tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
 route DELETE /v1/accounts/{a} | scope admin, request NativeAccountRemovalRequest, response NativeAccountRemoval, sdk response NativeAccountRemoval | Unregister a signed-out account. Its local files are kept. The body must repeat the account ID to confirm.
 route DELETE /v1/accounts/{a}/contact-requests/{id} | scope admin, idempotency key required, request NativeContactRequestVersion, response NativeOperation, status 202, sdk response NativeOperation | Delete local request history; does not reject or cancel on the server.
@@ -1291,6 +1326,7 @@ route GET /v1/accounts/{a}/sticker-packs/{id} | scope media, response StickerPac
 route GET /v1/accounts/{a}/sticker-packs/{id}/stickers | scope media, query StickerLanguageQuery, response StickerPackStickers, sdk response StickerPackStickers | Read ordered pack item identities, optional captions and media references.
 route GET /v1/accounts/{a}/sticker-packs/{id}/stickers/{stickerId} | scope media, query StickerLanguageQuery, response StickerPackSticker, sdk response StickerPackSticker | Read one pack item without starting a media acquisition.
 route GET /v1/accounts/{a}/sticker-preparations/{id} | scope media, response MediaJob, sdk response MediaJob | Read a preparation job and its verified media references.
+route GET /v1/accounts/{a}/storage | scope read, response StorageUsage | Report the size of the account's control database and counts of pending, blocked or needs-review work.
 route GET /v1/accounts/{a}/threads | scope read, query PageQuery, response NativeThreadPage, sdk response NativePage<NativeThread> | List the chats, newest activity first.
 route GET /v1/accounts/{a}/threads/{id} | scope read, response NativeThread, sdk response NativeThread | Show one chat.
 route GET /v1/accounts/{a}/threads/{thread}/messages | scope read, query PageQuery, response NativeMessagePage, sdk response NativePage<NativeMessage> | List the saved messages of one chat, newest first.

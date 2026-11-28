@@ -16,6 +16,8 @@ mod cli_help;
 mod client_actions;
 mod config;
 mod daemon;
+mod doctor;
+mod doctor_discovery;
 mod events;
 mod login;
 mod outcome;
@@ -1300,6 +1302,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let is_serve = matches!(cli.command, Command::Serve { .. });
     if let Err(error) = run(cli).await {
         let (exit, code) = outcome::classify(&error);
         if json {
@@ -1309,6 +1312,9 @@ async fn main() {
             );
         } else {
             eprintln!("{error:#}");
+            if is_serve {
+                eprintln!("Run `wx daemon doctor` to diagnose.");
+            }
         }
         std::process::exit(exit);
     }
@@ -1687,6 +1693,29 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
+    if let Command::Daemon {
+        command: daemon::DaemonCommand::Doctor { all, fix },
+    } = cli.command
+    {
+        let overrides = crate::config::Overrides {
+            server_config: cli.server_config.clone(),
+            data_dir: cli.data_dir.clone(),
+            token_file: cli.token_file.clone(),
+            listen: cli.listen,
+            network_listen: cli.network_listen,
+            tls_cert_file: cli.tls_cert_file.clone(),
+            tls_key_file: cli.tls_key_file.clone(),
+        };
+        return doctor::run_cli(
+            &overrides,
+            &env,
+            &cwd,
+            doctor::DoctorOptions { all, fix },
+            output,
+            cli.json,
+        )
+        .await;
+    }
     if matches!(
         &cli.command,
         Command::Serve { .. }

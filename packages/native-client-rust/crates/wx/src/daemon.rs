@@ -13,6 +13,15 @@ pub enum DaemonCommand {
     Start,
     /// Show the local managed daemon's state and identity.
     Status,
+    /// Check a local daemon's data folder, databases and runtime health without modifying databases.
+    Doctor {
+        /// Run the full check suite on every discovered local daemon data folder.
+        #[arg(long)]
+        all: bool,
+        /// Apply only clearly safe fixes, such as removing a stale process.json for a dead process.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Stop the owned local daemon without logging out of WeChat.
     Stop {
         /// Seconds to wait for the daemon to exit (1 to 300); it is never force-killed.
@@ -86,6 +95,23 @@ async fn identity(config: &crate::config::ServerConfig, owned: &OwnedProcess) ->
     }
     Ok(value)
 }
+fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: u64) -> anyhow::Error {
+    let mut text = error.to_string();
+    // When after_offset > 0 (e.g. a freshly spawned daemon failed before readiness),
+    // only inspect lines written during this attempt so stale errors from earlier runs
+    // are not misattributed.
+    let matched = if after_offset > 0 {
+        crate::doctor::last_log_error(log, after_offset)
+    } else {
+        crate::doctor::last_log_error(log, 0)
+    };
+    if let Some(matched) = matched {
+        text.push_str(&format!("\nLast log error: {}", matched.line));
+    }
+    text.push_str("\nRun `wx daemon doctor` to diagnose.");
+    error.context(text)
+}
+
 pub async fn run(
     config: crate::config::ServerConfig,
     command: DaemonCommand,
@@ -99,6 +125,9 @@ pub async fn run(
     let record = directory.join("process.json");
     let log = directory.join("daemon.log");
     match command {
+        DaemonCommand::Doctor { .. } => {
+            unreachable!("wx daemon doctor is handled before config::resolve in main")
+        }
         DaemonCommand::Start => {
             if config.listen.port() == 0 {
                 bail!("daemon start requires an explicit nonzero listen port");
@@ -118,14 +147,25 @@ pub async fn run(
             }
             if let Some(owned) = load(&record)? {
                 if fingerprint(owned.pid).is_some() {
-                    return output.print(&identity(&config, &owned).await?);
+                    return output.print(
+                        &identity(&config, &owned)
+                            .await
+                            .map_err(|e| with_log_hint(e, &log, 0))?,
+                    );
                 }
                 std::fs::remove_file(&record)?;
             }
-            let listener = std::net::TcpListener::bind(config.listen)
-                .context("daemon listener is occupied; no owner was adopted or stopped")?;
+            let listener = std::net::TcpListener::bind(config.listen).map_err(|e| {
+                with_log_hint(
+                    anyhow::Error::new(e)
+                        .context("daemon listener is occupied; no owner was adopted or stopped"),
+                    &log,
+                    0,
+                )
+            })?;
             drop(listener);
-            let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)?;
+            let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)
+                .map_err(|e| with_log_hint(e, &log, 0))?;
             let output_file = wechat_platform::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -134,8 +174,9 @@ pub async fn run(
                 .open(&log)?;
             let metadata = output_file.metadata()?;
             if !metadata.is_file() || !wechat_platform::private_file(&output_file)? {
-                bail!("daemon log must be a private owned regular file");
+                bail!("daemon log must be a private owned regular file; run `wx daemon doctor` to diagnose");
             }
+            let log_start_offset = metadata.len();
             let executable = std::fs::canonicalize(std::env::current_exe()?)?;
             let mut command = ProcessCommand::new(&executable);
             command
@@ -167,12 +208,18 @@ pub async fn run(
             let readiness = async {
                 loop {
                     if let Some(status) = child.try_wait()? {
-                        bail!(
-                            "native daemon exited before readiness ({status}); inspect daemon logs"
-                        );
+                        return Err(with_log_hint(
+                            anyhow::anyhow!("native daemon exited before readiness ({status})"),
+                            &log,
+                            log_start_offset,
+                        ));
                     }
                     if Instant::now() >= deadline {
-                        bail!("native daemon readiness deadline reached");
+                        return Err(with_log_hint(
+                            anyhow::anyhow!("native daemon readiness deadline reached"),
+                            &log,
+                            log_start_offset,
+                        ));
                     }
                     if let Ok(Ok(value)) = tokio::time::timeout(
                         Duration::from_millis(500),
@@ -184,7 +231,13 @@ pub async fn run(
                             || value["dataDir"].as_str() != config.data_dir.to_str()
                             || value["version"]["backend"] != "native"
                         {
-                            bail!("listener belongs to another process; no owner was adopted");
+                            return Err(with_log_hint(
+                                anyhow::anyhow!(
+                                    "listener belongs to another process; no owner was adopted"
+                                ),
+                                &log,
+                                log_start_offset,
+                            ));
                         }
                         let owned = OwnedProcess {
                             pid: child.id(),
@@ -235,10 +288,12 @@ pub async fn run(
                 }
             }
         }
-        DaemonCommand::Status => match load(&record)? {
-            Some(owned) if fingerprint(owned.pid).is_some() => {
-                output.print(&identity(&config, &owned).await?)
-            }
+        DaemonCommand::Status => match load(&record).map_err(|e| with_log_hint(e, &log, 0))? {
+            Some(owned) if fingerprint(owned.pid).is_some() => output.print(
+                &identity(&config, &owned)
+                    .await
+                    .map_err(|e| with_log_hint(e, &log, 0))?,
+            ),
             _ => output.print(&json!({"state":"stopped","managed":true,"dataDir":config.data_dir})),
         },
         DaemonCommand::Stop { timeout } => {

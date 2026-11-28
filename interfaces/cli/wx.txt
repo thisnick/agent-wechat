@@ -433,6 +433,9 @@ wx contacts sync | - | Refresh the catalog from WeChat
 wx contacts sync --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx daemon | - | Start, inspect or stop the local background daemon
+wx daemon doctor | - | Check a local daemon's data folder, databases and runtime health without modifying databases
+wx daemon doctor --all | switch | Run the full check suite on every discovered local daemon data folder
+wx daemon doctor --fix | switch | Apply only clearly safe fixes, such as removing a stale process.json for a dead process
 wx daemon logs | - | Read the local daemon log, optionally following new lines
 wx daemon logs --follow | switch | Keep printing new log lines until interrupted
 wx daemon start | - | Start the local daemon in the background and wait until ready

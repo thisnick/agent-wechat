@@ -1,6 +1,10 @@
 //! Official-format profiles remain opaque here; only our sidecar schema is migrated.
 mod account_removal;
 mod admission;
+pub use admission::{
+    inspect_readonly as inspect_database_readonly, read_accounts_immutable, DatabaseInspection,
+    DatabaseMemberInspection, WalInspection,
+};
 mod authorization;
 mod call_actions;
 pub use call_actions::{CallActionRecord, CallLocalEndReason, CallSessionStatus};
@@ -168,7 +172,7 @@ pub struct Account {
 }
 
 /// The `registry.sqlite` schema version after every migration.
-const REGISTRY_SCHEMA_VERSION: i64 = 4;
+pub const REGISTRY_SCHEMA_VERSION: i64 = 4;
 
 pub struct Store {
     pub root: PathBuf,
