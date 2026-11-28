@@ -44,7 +44,26 @@ impl Published {
         self.page_size == page && self.big == big && self.salt == salt
     }
 }
+const WAL_INDEX_VERSION: u32 = 3007000;
+
 fn index(member: &Member) -> Result<Option<Published>> {
+    // SQLite's Unix VFS (`unixLockSharedMemory` in `os_unix.c`) shrinks `-shm`
+    // to 3 bytes when the first connection attaches, before `unixShmMap`
+    // extends it to 32 KiB and `walIndexRecover` rebuilds the index. A crash,
+    // kill, or out-of-space failure in that window leaves 3 bytes: either zeros
+    // (a newly created or cleared `-shm`) or the first 3 bytes of the native
+    // WAL-index `iVersion` (3007000) from a prior index header. Treat only those
+    // shapes as "no published index" so `-wal` is verified standalone and the
+    // pre-open files are kept in a recovery copy.
+    if member.length == 3 {
+        let data = bytes(member, 0, 3)?;
+        let version_prefix = WAL_INDEX_VERSION.to_ne_bytes();
+        ensure!(
+            data == [0, 0, 0] || data == version_prefix[..3],
+            "unrecognized database WAL index; existing files preserved"
+        );
+        return Ok(None);
+    }
     ensure!(
         member.length >= 32768 && member.length.is_multiple_of(32768),
         "unrecognized database WAL index; existing files preserved"
@@ -54,7 +73,10 @@ fn index(member: &Member) -> Result<Option<Published>> {
         return Ok(None);
     }
     ensure!(
-        data[..48] == data[48..96] && native(&data) == 3007000 && data[12] == 1 && data[13] <= 1,
+        data[..48] == data[48..96]
+            && native(&data) == WAL_INDEX_VERSION
+            && data[12] == 1
+            && data[13] <= 1,
         "unrecognized database WAL index; existing files preserved"
     );
     ensure!(
