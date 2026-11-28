@@ -28,6 +28,7 @@ and explains what they do. Commands show readable results by default. Use `--jso
 | `wx config` | `client`, `servers add/list/remove/select`, `show` |
 | `wx profiles` | Read a stopped profile directly, without a daemon (`add`, `avatars`, `chats`, `contacts`, `groups`, `images`, `inspect`, `keys export`, `list`, `messages`, `select`) |
 | `wx store` | Experimental: copy, import and export profiles; `usage` shows what `control.sqlite` holds |
+| `wx completions` | Generate shell completions for `bash`, `zsh`, `fish` or `powershell` |
 | `wx version` | Version and build target |
 
 `contacts find`, `groups find` and `groups members list --search` search the saved catalog. Search ignores letter case and combines whitespace-separated words: `wx contacts find "Mira work"` can match a nickname and remark on the same contact. `contacts lookup` requests one or two exact contact IDs live from WeChat. The display name uses the contact ID if both the remark and nickname are blank. `groups lookup` requests the member roster for an exact group ID live from WeChat. Neither lookup saves its result; use `contacts refresh` or `groups members refresh` to update saved data.
@@ -61,6 +62,39 @@ Flags win over environment variables, which win over saved settings. Commands th
 Use `wx daemon status --json` to parse daemon status in a script. `wx serve --json` prints its readiness record to stderr. `wx daemon logs` streams the saved log in its original format.
 
 `messages send --wait SECONDS` waits up to 3,600 seconds for attachment jobs and 900 seconds for text or shared links (default 30). Use `--wait 3600` for a larger file. A wait ending returns exit code 7 while the same job continues; inspect it with `wx jobs get JOB_ID`. See [Send attachments](/use/media/).
+
+## Shell completions
+
+`wx completions <shell>` prints a completion script to stdout for `bash`, `zsh`, `fish` or `powershell`. Installing the npm package does not install completions automatically.
+
+**Bash** (requires `bash-completion`, or add `eval "$(wx completions bash)"` to `~/.bashrc`):
+
+```bash
+mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+wx completions bash > "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/wx"
+```
+
+**Zsh** (ensure `~/.zfunc` is on `$fpath` before `compinit` in `~/.zshrc`, e.g. `fpath=(~/.zfunc $fpath)` and `autoload -Uz compinit && compinit`):
+
+```zsh
+mkdir -p ~/.zfunc
+wx completions zsh > ~/.zfunc/_wx
+```
+
+**Fish**:
+
+```fish
+mkdir -p ~/.config/fish/completions
+wx completions fish > ~/.config/fish/completions/wx.fish
+```
+
+**PowerShell** (run in the current session, or add to your `$PROFILE`):
+
+```powershell
+wx completions powershell | Out-String | Invoke-Expression
+```
+
+Re-run the snippet after upgrading `wx` to pick up new commands or flags.
 
 ## Exit codes
 

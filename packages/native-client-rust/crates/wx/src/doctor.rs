@@ -1465,26 +1465,7 @@ fn evaluate_db_inspection(
     }
 }
 
-fn wal_refusal_next_step(db_path: &Path, inspect: &DatabaseInspection, reason: &str) -> String {
-    let shm_bytes = inspect
-        .members
-        .iter()
-        .find(|m| m.suffix == "-shm")
-        .map(|m| m.bytes);
-    let wal_bytes = inspect
-        .members
-        .iter()
-        .find(|m| m.suffix == "-wal")
-        .map(|m| m.bytes);
-    if reason.contains("unrecognized database WAL index")
-        && shm_bytes == Some(3)
-        && wal_bytes.unwrap_or(0) == 0
-    {
-        return format!(
-            "3-byte -shm beside an empty/missing -wal (known interrupted-open shape, #665). Keep the daemon stopped, back up {} with its -wal and -shm files, then upgrade wx or follow {TROUBLESHOOTING_DAEMON_URL}.",
-            db_path.display()
-        );
-    }
+fn wal_refusal_next_step(db_path: &Path, _inspect: &DatabaseInspection, reason: &str) -> String {
     if reason.contains("commits from a newer log generation")
         || reason.contains("index exceeds log")
         || reason.contains("published frame is not a verified commit")
@@ -2895,12 +2876,24 @@ mod tests {
         wechat_platform::private_dir(&data_dir).unwrap();
         let store = wechat_store::Store::open(&data_dir).unwrap();
         store.create_account("alice").unwrap();
+        store.create_account("bob").unwrap();
         drop(store);
 
-        // Add synthetic daemon files, a 3-byte -shm (#665) on control.sqlite, stale process.json, and daemon.log.
-        let control = data_dir.join("accounts/alice/agent/control.sqlite");
-        write_private(&control.with_file_name("control.sqlite-shm"), &[0, 0, 0]);
-        write_private(&control.with_file_name("control.sqlite-wal"), &[]);
+        // Add synthetic daemon files:
+        // - alice: unrecognized 3-byte -shm (refused)
+        // - bob: interrupted-open 3-byte zero -shm (#665 / #753: admissible with recovery warning)
+        let alice_control = data_dir.join("accounts/alice/agent/control.sqlite");
+        write_private(
+            &alice_control.with_file_name("control.sqlite-shm"),
+            &[0xde, 0xad, 0xbe],
+        );
+        write_private(&alice_control.with_file_name("control.sqlite-wal"), &[]);
+        let bob_control = data_dir.join("accounts/bob/agent/control.sqlite");
+        write_private(
+            &bob_control.with_file_name("control.sqlite-shm"),
+            &[0, 0, 0],
+        );
+        write_private(&bob_control.with_file_name("control.sqlite-wal"), &[]);
         write_private(
             &data_dir.join("api-token"),
             b"0123456789abcdef0123456789abcdef\n",
@@ -2953,18 +2946,26 @@ mod tests {
             "wx daemon doctor modified the stopped data folder!"
         );
 
-        // Verify #665 check failed, stale process.json warned, and redacted bug report was generated without personal IDs.
+        // Verify unrecognized -shm failed, 3-byte zero -shm (#753) warned as admissible,
+        // stale process.json warned, and redacted bug report omitted personal IDs.
         assert_eq!(report.target.source, DataDirSource::Flag);
-        let ctrl_check = report
+        let alice_check = report
             .checks
             .iter()
             .find(|c| c.id == "sqlite.account.alice")
             .unwrap();
-        assert_eq!(ctrl_check.status, CheckStatus::Fail);
-        assert!(ctrl_check
+        assert_eq!(alice_check.status, CheckStatus::Fail);
+        assert!(alice_check
             .message
             .contains("unrecognized database WAL index"));
-        assert!(ctrl_check.next.as_deref().unwrap().contains("3-byte -shm"));
+
+        let bob_check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "sqlite.account.bob")
+            .unwrap();
+        assert_eq!(bob_check.status, CheckStatus::Warn);
+        assert!(bob_check.message.contains("existing files look admissible"));
 
         let proc_check = report
             .checks
@@ -2976,7 +2977,7 @@ mod tests {
         let br = report.bug_report.expect("expected redacted bug report");
         let br_json = serde_json::to_string(&br).unwrap();
         assert!(
-            !br_json.contains("alice"),
+            !br_json.contains("alice") && !br_json.contains("bob"),
             "bug report leaked account ID: {br_json}"
         );
         assert!(
@@ -2984,7 +2985,7 @@ mod tests {
             "bug report missing 3-byte shm size: {br_json}"
         );
         assert!(
-            br_json.contains("000000"),
+            br_json.contains("deadbe"),
             "bug report missing shm header hex: {br_json}"
         );
     }

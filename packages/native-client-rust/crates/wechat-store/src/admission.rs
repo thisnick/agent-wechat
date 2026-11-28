@@ -1059,7 +1059,7 @@ mod tests {
         assert_eq!(newer.supported_schema_version, 3);
         assert!(!newer.settled);
 
-        // #665 shape: 3-byte -shm beside 0-byte -wal (refused on main; byte-for-byte unchanged)
+        // #665 / #753 shape: 3-byte zero -shm beside 0-byte -wal is admissible with recovery retention
         let shm = member_path(&path, "-shm").unwrap();
         let wal = member_path(&path, "-wal").unwrap();
         private(&shm, &[0, 0, 0]);
@@ -1067,7 +1067,9 @@ mod tests {
         let shape_665 = inspect_readonly(&path, 4);
         assert!(matches!(
             shape_665.wal,
-            WalInspection::Refused { ref reason } if reason.contains("unrecognized database WAL index")
+            WalInspection::Valid {
+                retain_recovery: true
+            }
         ));
         let shm_member = shape_665
             .members
@@ -1076,6 +1078,21 @@ mod tests {
             .unwrap();
         assert_eq!(shm_member.bytes, 3);
         assert_eq!(shm_member.header_hex, "000000");
+
+        // Unrecognized 3-byte -shm contents are still refused (byte-for-byte unchanged)
+        private(&shm, &[0xde, 0xad, 0xbe]);
+        let refused_shm = inspect_readonly(&path, 4);
+        assert!(matches!(
+            refused_shm.wal,
+            WalInspection::Refused { ref reason } if reason.contains("unrecognized database WAL index")
+        ));
+        let refused_member = refused_shm
+            .members
+            .iter()
+            .find(|m| m.suffix == "-shm")
+            .unwrap();
+        assert_eq!(refused_member.bytes, 3);
+        assert_eq!(refused_member.header_hex, "deadbe");
 
         // Leftover admission & recovery dirs are counted without being swept
         let leftover = temp.path().join(format!("{SCRATCH}leftover"));
@@ -1088,7 +1105,7 @@ mod tests {
 
         // Files remain byte-for-byte identical and leftover dirs untouched
         assert_eq!(fs::read(&path).unwrap(), original_bytes);
-        assert_eq!(fs::read(&shm).unwrap(), [0, 0, 0]);
+        assert_eq!(fs::read(&shm).unwrap(), [0xde, 0xad, 0xbe]);
         assert_eq!(fs::read(&wal).unwrap(), b"");
         assert!(leftover.is_dir());
         assert!(recovery.is_dir());

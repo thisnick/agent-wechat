@@ -316,6 +316,8 @@ wx chats unpin --detach | switch | Return as soon as the work is queued instead 
 wx chats unpin --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
 wx chats unpin --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx chats unpin <ID> | position 1, required | Chat ID from wx chats list
+wx completions | - | Generate shell completion scripts for wx
+wx completions <SHELL> | position 1, required, values bash|zsh|fish|powershell | Shell to generate completions for
 wx config | - | Inspect configuration and manage saved servers
 wx config client | - | Show the resolved client endpoint, token-file path and account
 wx config server | hidden alias | Alias of wx config servers
