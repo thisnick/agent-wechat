@@ -1980,6 +1980,10 @@ async fn run(cli: Cli) -> Result<()> {
                 command: ChatCommand::List { .. } | ChatCommand::Find { .. }
             }
     );
+    // `wx stickers send` does not keep a local CLI receipt, so a manual rerun
+    // with the same `--idempotency-key` after an already-accepted send can be
+    // counted again (documented reuse is after an uncertain response, which
+    // exits non-zero and is not counted).
     let mut count_send = matches!(
         &cli.command,
         Command::Stickers {
