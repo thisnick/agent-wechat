@@ -85,7 +85,11 @@ test("native transport streams bytes arriving before response headers and omits 
 
 for (const [kind, packet] of [
   ["A binary error", frame(2)],
+  ["An unknown tag", frame(99, 1, 2)],
   ["An empty binary", new ArrayBuffer(0)],
+  ["A legacy JSON", { type: "data", bytes: "AP8=" }],
+  ["A byte-array", [0, 1, 2]],
+  ["A null", null],
 ]) {
   test(`${kind} frame rejects a pending reader and cancels native work`, async (t) => {
     t.after(clearMocks);
@@ -107,19 +111,6 @@ for (const [kind, packet] of [
     await assert.rejects(pending, { message: "The hub connection was interrupted" });
   });
 }
-
-test("native transport still accepts legacy data and end packets", async (t) => {
-  t.after(clearMocks);
-  mockIPC((command, args) => {
-    if (command === "http_ack") return;
-    assert.equal(command, "http_request");
-    args.channel.onmessage({ type: "data", bytes: "AP8=" });
-    args.channel.onmessage({ type: "end" });
-    return { status: 200, headers: {} };
-  });
-  const response = await desktopFetch(session)(session.endpoint + "/v1/status");
-  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), Uint8Array.of(0, 255));
-});
 
 test("aborting a stream cancels native work and rejects a pending reader", async (t) => {
   t.after(clearMocks);

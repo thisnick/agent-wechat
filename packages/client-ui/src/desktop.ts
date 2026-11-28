@@ -218,48 +218,34 @@ export function desktopFetch(session: DesktopSession): typeof fetch {
         },
         { highWaterMark: 0 },
       );
-      type LegacyPacket =
-        | { type: "data"; bytes: string }
-        | { type: "end" | "error" };
-      const channel = new Channel<ArrayBuffer | LegacyPacket>();
+      const channel = new Channel<ArrayBuffer>();
       const interrupt = () => {
         cancel();
         controller!.error(new Error("The hub connection was interrupted"));
       };
       channel.onmessage = (packet) => {
         if (finished) return;
-        if (packet instanceof ArrayBuffer) {
-          const view = new Uint8Array(packet);
-          if (view.byteLength === 0) {
-            interrupt();
-            return;
-          }
-          switch (view[0]) {
-            case FRAME_DATA:
-              queued.push(view.subarray(1));
-              pump();
-              break;
-            case FRAME_END:
-              ended = true;
-              pump();
-              break;
-            case FRAME_ERROR:
-            default:
-              interrupt();
-          }
+        if (!(packet instanceof ArrayBuffer)) {
+          interrupt();
           return;
         }
-        if (packet.type === "data") {
-          const raw = atob(packet.bytes);
-          queued.push(
-            Uint8Array.from(raw, (character) => character.charCodeAt(0)),
-          );
-          pump();
-        } else if (packet.type === "end") {
-          ended = true;
-          pump();
-        } else {
+        const view = new Uint8Array(packet);
+        if (view.byteLength === 0) {
           interrupt();
+          return;
+        }
+        switch (view[0]) {
+          case FRAME_DATA:
+            queued.push(view.subarray(1));
+            pump();
+            break;
+          case FRAME_END:
+            ended = true;
+            pump();
+            break;
+          case FRAME_ERROR:
+          default:
+            interrupt();
         }
       };
       const headers = Object.fromEntries(

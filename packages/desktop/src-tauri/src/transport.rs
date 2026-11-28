@@ -7,6 +7,8 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
 const STREAM_CHUNK_BYTES: usize = 256 * 1024;
+const STREAM_CREDITS: usize = 4;
+const MAX_ACTIVE_REQUESTS: usize = 64;
 const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
 const FRAME_DATA: u8 = 0;
 const FRAME_END: u8 = 1;
@@ -165,7 +167,7 @@ pub async fn http_cancel(state: State<'_, Desktop>, id: String) -> Result<(), St
 #[tauri::command]
 pub async fn http_ack(state: State<'_, Desktop>, id: String) -> Result<(), String> {
     if let Some(control) = state.requests.lock().await.get(&id) {
-        if control.credits.available_permits() < 8 {
+        if control.credits.available_permits() < STREAM_CREDITS {
             control.credits.add_permits(1);
         }
     }
@@ -230,10 +232,10 @@ pub async fn http_request(
         return Err("Unexpected request body".into());
     }
     let cancel = CancellationToken::new();
-    let credits = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let credits = std::sync::Arc::new(tokio::sync::Semaphore::new(STREAM_CREDITS));
     {
         let mut requests = state.requests.lock().await;
-        if requests.len() >= 128 || requests.contains_key(&request.id) {
+        if requests.len() >= MAX_ACTIVE_REQUESTS || requests.contains_key(&request.id) {
             return Err("Too many active requests".into());
         }
         requests.insert(
@@ -358,6 +360,22 @@ mod tests {
         assert_eq!(
             parse_upload_chunk(Some(&header), &body).unwrap_err(),
             "Binary upload chunk is required"
+        );
+    }
+
+    #[test]
+    fn upload_chunk_accepts_empty_and_max_sized_raw_bytes() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        let empty = tauri::ipc::InvokeBody::Raw(Vec::new());
+        assert_eq!(
+            parse_upload_chunk(Some(&header), &empty).unwrap(),
+            (UPLOAD_ID, &[][..])
+        );
+        let max = vec![0x5a; UPLOAD_CHUNK_BYTES];
+        let body = tauri::ipc::InvokeBody::Raw(max.clone());
+        assert_eq!(
+            parse_upload_chunk(Some(&header), &body).unwrap(),
+            (UPLOAD_ID, max.as_slice())
         );
     }
 
