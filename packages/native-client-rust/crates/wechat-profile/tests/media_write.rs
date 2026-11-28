@@ -546,6 +546,173 @@ fn generic_image_variants_and_hardlink_bytes_roundtrip_without_fixture_metadata(
         &o
     )
     .is_err());
+
+    // Server-transcoded original (e.g., HEIC delivered as a larger JPEG whose MD5 differs
+    // from XML md5) caches under delivered MD5 + MessageResourceDetail type 65537 and reads
+    // back via the exact resource join while still rejecting an unbound/tampered _h.dat.
+    let transcoded_original = png(40, 9);
+    let advertised_heic_md5 = "11111111111111111111111111111111";
+    assert_ne!(
+        format!("{:x}", Md5::digest(&transcoded_original)),
+        advertised_heic_md5
+    );
+    let mut heic_msg = row(3);
+    heic_msg.server_message_id = "78".into();
+    heic_msg
+        .fields
+        .insert("sort_seq".into(), SqlValue::Integer("100500".into()));
+    heic_msg
+        .fields
+        .insert("create_time".into(), SqlValue::Integer("100".into()));
+    heic_msg.fields.insert(
+        "message_content".into(),
+        SqlValue::Text(format!(
+            "<msg><img md5=\"{advertised_heic_md5}\" hdlength=\"600\"/></msg>"
+        )),
+    );
+    let heic_source = apply_message_projection(&location, &keys, &heic_msg, &o)
+        .unwrap()
+        .source_id;
+    let applied = cache_image_projection(
+        &location,
+        &keys,
+        &heic_source,
+        "peer",
+        ImageQuality::Original,
+        &transcoded_original,
+        &o,
+    )
+    .unwrap();
+    assert!(applied.changed);
+    assert!(
+        !cache_image_projection(
+            &location,
+            &keys,
+            &heic_source,
+            "peer",
+            ImageQuality::Original,
+            &transcoded_original,
+            &o,
+        )
+        .unwrap()
+        .changed
+    );
+    cache_image_projection(
+        &location,
+        &keys,
+        &heic_source,
+        "peer",
+        ImageQuality::Standard,
+        &standard,
+        &o,
+    )
+    .unwrap();
+    let r = reader(location.clone(), keys.clone());
+    let orig_cached = r
+        .cached_image(&heic_source, ImageQuality::Original)
+        .unwrap();
+    assert_eq!(orig_cached.quality, VerifiedImageQuality::Original);
+    assert_eq!(orig_cached.media.bytes, transcoded_original);
+    let best_cached = r.cached_image(&heic_source, ImageQuality::Best).unwrap();
+    assert_eq!(best_cached.quality, VerifiedImageQuality::Original);
+    assert_eq!(best_cached.media.bytes, transcoded_original);
+    let std_cached = r
+        .cached_image(&heic_source, ImageQuality::Standard)
+        .unwrap();
+    assert_eq!(std_cached.quality, VerifiedImageQuality::Standard);
+    assert_eq!(std_cached.media.bytes, standard);
+    drop(r);
+    // Corrupting the type 65537 resource size invalidates Original verification (filename suffix alone is insufficient).
+    Connection::open(
+        location
+            .root()
+            .join("db_storage/message/message_resource.db"),
+    )
+    .unwrap()
+    .execute(
+        "UPDATE MessageResourceDetail SET size=size+1 WHERE type=65537 AND size=?1",
+        [applied.encoded_bytes as i64],
+    )
+    .unwrap();
+    let r = reader(location.clone(), keys.clone());
+    assert!(matches!(
+        r.cached_image(&heic_source, ImageQuality::Original),
+        Err(ProfileError::NotCached)
+    ));
+    // Best falls back to Standard when Original's resource binding is broken.
+    let best_after_corrupt = r.cached_image(&heic_source, ImageQuality::Best).unwrap();
+    assert_eq!(best_after_corrupt.quality, VerifiedImageQuality::Standard);
+    assert_eq!(best_after_corrupt.media.bytes, standard);
+    assert_eq!(
+        r.cached_image(&heic_source, ImageQuality::Standard)
+            .unwrap()
+            .media
+            .bytes,
+        standard
+    );
+    drop(r);
+
+    // Restoring size but setting status=0 (pending) must also not verify as Original.
+    Connection::open(
+        location
+            .root()
+            .join("db_storage/message/message_resource.db"),
+    )
+    .unwrap()
+    .execute(
+        "UPDATE MessageResourceDetail SET size=?1, status=0 WHERE type=65537 AND size=?2",
+        [
+            applied.encoded_bytes as i64,
+            applied.encoded_bytes as i64 + 1,
+        ],
+    )
+    .unwrap();
+    let r = reader(location.clone(), keys.clone());
+    assert!(matches!(
+        r.cached_image(&heic_source, ImageQuality::Original),
+        Err(ProfileError::NotCached)
+    ));
+    drop(r);
+
+    // Messages with omitted or empty md5="" also write and read back via the exact 65537 resource join.
+    for (idx, (sid, xml)) in [
+        ("7801", "<msg><img hdlength=\"600\"/></msg>"),
+        ("7802", "<msg><img md5=\"\" hdlength=\"600\"/></msg>"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut msg = row(3);
+        msg.server_message_id = sid.into();
+        msg.fields.insert(
+            "sort_seq".into(),
+            SqlValue::Integer((100600 + idx as i64).to_string()),
+        );
+        msg.fields
+            .insert("create_time".into(), SqlValue::Integer("100".into()));
+        msg.fields
+            .insert("message_content".into(), SqlValue::Text(xml.into()));
+        let src = apply_message_projection(&location, &keys, &msg, &o)
+            .unwrap()
+            .source_id;
+        cache_image_projection(
+            &location,
+            &keys,
+            &src,
+            "peer",
+            ImageQuality::Original,
+            &transcoded_original,
+            &o,
+        )
+        .unwrap();
+        let r = reader(location.clone(), keys.clone());
+        let got = r.cached_image(&src, ImageQuality::Original).unwrap();
+        assert_eq!(got.quality, VerifiedImageQuality::Original);
+        assert_eq!(got.media.bytes, transcoded_original);
+        let best = r.cached_image(&src, ImageQuality::Best).unwrap();
+        assert_eq!(best.quality, VerifiedImageQuality::Original);
+        assert_eq!(best.media.bytes, transcoded_original);
+    }
     let mut message = row(49);
     message.server_message_id = "79".into();
     message

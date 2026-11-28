@@ -1042,10 +1042,12 @@ pub struct AppliedImageCache {
     pub plaintext_bytes: usize,
     pub encoded_bytes: usize,
 }
-/// Cache one actual JPEG/PNG quality under a deterministic local basename. The
+/// Cache one actual image quality under a deterministic local basename. The
 /// observed DAT/resource/hardlink representation is retained; basename allocation
 /// and UTC month are local policies, not a claim about the native generator.
-/// No other variant is removed. Original bytes must match the message XML MD5.
+/// No other variant is removed. Server-transcoded originals (for example HEIC
+/// delivered as JPEG) are recorded under their delivered plaintext MD5 and
+/// encoded DAT size, matching official Linux 4.1.13.26.
 pub fn cache_image_projection(
     location: &ProfileLocation,
     keys: &KeyFile,
@@ -1073,34 +1075,6 @@ pub fn cache_image_projection(
         .ok_or(ProfileError::ImageKeyUnavailable)?;
     let encoded = crate::encode_dat_v2(plaintext, key, None)?;
     let hash = format!("{:x}", Md5::digest(plaintext));
-    if quality == ImageQuality::Original {
-        let c = open_write(location, &source.database, keys, options.allow_plaintext)?;
-        let row = c.query_row(
-            &format!(
-                "SELECT * FROM {} WHERE local_id=?1",
-                crate::schema::quote_identifier(&source.table)
-            ),
-            [binding.local],
-            crate::reader::raw,
-        )?;
-        let decoded = crate::reader::decode(
-            &row,
-            "message_content",
-            "WCDB_CT_message_content",
-            4 * 1024 * 1024,
-        )?;
-        if crate::images::image_md5(
-            decoded
-                .text
-                .as_deref()
-                .ok_or(ProfileError::InvalidMetadata)?,
-        )?
-        .as_deref()
-            != Some(hash.as_str())
-        {
-            return Err(ProfileError::InvalidMetadata);
-        }
-    }
     let db = find_database(location, "message_resource.db")?;
     let c = open_write(location, &db, keys, options.allow_plaintext)?;
     let mut rows=c.prepare("SELECT i.packed_info FROM MessageResourceInfo i JOIN ChatName2Id n ON n.rowid=i.chat_id WHERE n.user_name=?1 AND i.message_local_id=?2 AND i.message_create_time=?3 AND i.message_svr_id=?4 LIMIT 3")?.query_map(params![chat,binding.local,binding.time,binding.server],|r|r.get::<_,Vec<u8>>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;

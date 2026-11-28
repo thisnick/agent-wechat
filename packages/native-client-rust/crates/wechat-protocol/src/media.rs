@@ -1769,6 +1769,8 @@ struct DownloadState<'a> {
     decryptor: Aes128EcbDecryptor,
     plain: zeroize::Zeroizing<Vec<u8>>,
     plaintext_bytes: usize,
+    plaintext_prefix: [u8; 3],
+    plaintext_prefix_len: usize,
     plaintext_md5: Md5Hasher,
     plaintext_sha256: Sha256Hasher,
     substituted_filetype: Option<u32>,
@@ -1876,6 +1878,8 @@ impl<'a> DownloadState<'a> {
             decryptor: Aes128EcbDecryptor::new(&descriptor.aes_key)?,
             plain: zeroize::Zeroizing::new(vec![]),
             plaintext_bytes: 0,
+            plaintext_prefix: [0; 3],
+            plaintext_prefix_len: 0,
             plaintext_md5: Md5Hasher::new()?,
             plaintext_sha256: Sha256Hasher::new()?,
             substituted_filetype: None,
@@ -2066,6 +2070,7 @@ impl<'a> DownloadState<'a> {
             self.plaintext_bytes <= self.plaintext_limit,
             "Decoded CDN body too large"
         );
+        self.record_plaintext_prefix(count);
         self.plaintext_md5.update(&self.plain[..count])?;
         self.plaintext_sha256.update(&self.plain[..count])?;
         if !self.large {
@@ -2105,9 +2110,21 @@ impl<'a> DownloadState<'a> {
             self.plaintext_bytes <= self.plaintext_limit,
             "Decoded CDN body too large"
         );
+        self.record_plaintext_prefix(count);
         self.plaintext_md5.update(&self.plain[..count])?;
         self.plaintext_sha256.update(&self.plain[..count])?;
         Ok(count)
+    }
+
+    fn record_plaintext_prefix(&mut self, count: usize) {
+        let need = self.plaintext_prefix.len() - self.plaintext_prefix_len;
+        if need == 0 || count == 0 {
+            return;
+        }
+        let take = need.min(count);
+        self.plaintext_prefix[self.plaintext_prefix_len..self.plaintext_prefix_len + take]
+            .copy_from_slice(&self.plain[..take]);
+        self.plaintext_prefix_len += take;
     }
 
     fn into_receipt(mut self) -> Result<DownloadReceipt> {
@@ -2115,12 +2132,22 @@ impl<'a> DownloadState<'a> {
             .descriptor
             .expected_bytes
             .map(|n| n == self.plaintext_bytes as u64);
+        let transcoded_original_jpeg = self.descriptor.quality == MediaQuality::Original
+            && !self.descriptor.strict_size
+            && self.picture_format == Some(1)
+            && self.substituted_filetype == Some(1)
+            && self.plaintext_prefix_len == 3
+            && self.plaintext_prefix == [0xff, 0xd8, 0xff];
         // Normal-video plans are no longer strict so that a selected copy can be accepted, but
         // a video reply the CDN did not mark as selected must still match the advertised size.
+        // Non-strict Original image plans similarly allow size divergence only for an explicit
+        // CDN-transcoded JPEG response (`rsppicformat=1`, `substituteftype=1`, JPEG SOI prefix).
         let size_rejected = self.video_selected_response != Some(true)
             && (self.strict_transfer
                 || self.descriptor.strict_size
-                || self.descriptor.quality == MediaQuality::Video)
+                || self.descriptor.quality == MediaQuality::Video
+                || (self.descriptor.quality == MediaQuality::Original
+                    && !transcoded_original_jpeg))
             && size_matches == Some(false);
         let digest = hex::encode(self.plaintext_md5.finish()?);
         let digest_matches = self.descriptor.expected_md5.as_ref().map(|expected| {
@@ -2158,7 +2185,7 @@ impl<'a> DownloadState<'a> {
         } else {
             ensure!(!size_rejected, "Advertised media size mismatch");
             ensure!(
-                digest_matches != Some(false),
+                transcoded_original_jpeg || digest_matches != Some(false),
                 "Advertised media checksum mismatch"
             );
         }
@@ -4563,6 +4590,137 @@ mod tests {
             .downcast_ref::<VideoRepresentationMismatch>()
             .is_none());
         assert_eq!(error.to_string(), "Advertised media size mismatch");
+    }
+    #[test]
+    fn transcoded_original_image_without_raw_metadata_succeeds_when_not_strict() {
+        let key = [0x42u8; 16];
+        let mut raw = vec![0xff, 0xd8, 0xff, 0xe0];
+        raw.extend((0..12_341usize).map(|i| (i % 251) as u8));
+        let ciphertext = ecb_encrypt(&raw, &key).unwrap();
+        let advertised_heic_len = 4_800u64;
+        let advertised_heic_md5 = "11111111111111111111111111111111".to_string();
+        assert_ne!(hex::encode(md5(&raw)), advertised_heic_md5);
+        let mut descriptor = MediaDescriptor {
+            file_id: "305f020100044b3049020100020400000001".into(),
+            aes_key: key.to_vec(),
+            quality: MediaQuality::Original,
+            expected_bytes: Some(advertised_heic_len),
+            expected_md5: Some(advertised_heic_md5),
+            strict_size: false,
+            expires_at: None,
+        };
+
+        let make_reply = |fields: &CdnFields,
+                          desc: &MediaDescriptor,
+                          ct: &[u8],
+                          rsp_fmt: Option<i64>,
+                          sub_ftype: Option<i64>|
+         -> Result<CdnFields> {
+            let mut reply = download_reply(fields, desc, ct);
+            for (k, v) in [
+                ("ver", 0i64),
+                ("istrans", 999),
+                ("videoformat", 0),
+                ("backsrcnum", 0),
+            ] {
+                put(&mut reply, k, v);
+            }
+            if let Some(v) = rsp_fmt {
+                put(&mut reply, "rsppicformat", v);
+            }
+            if let Some(v) = sub_ftype {
+                put(&mut reply, "substituteftype", v);
+            }
+            reply.remove("rawfilesize");
+            reply.remove("rawfilemd5");
+            Ok(reply)
+        };
+
+        let downloaded = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    assert_eq!(integer(fields, "filetype")?, 1);
+                    assert_eq!(integer(fields, "downpicformat")?, 1);
+                    make_reply(fields, &descriptor, &ciphertext, Some(1), Some(1))
+                },
+            )
+            .unwrap();
+        assert_eq!(downloaded.bytes, raw);
+        assert_eq!(downloaded.advertised_size_matches, Some(false));
+        assert_eq!(downloaded.picture_format, Some(1));
+        assert_eq!(downloaded.substituted_filetype, Some(1));
+
+        // Omitted or downgraded substituteftype / rsppicformat still enforces size and checksum.
+        for (rsp_fmt, sub_ftype) in [
+            (Some(1), None),
+            (Some(1), Some(2)),
+            (None, Some(1)),
+            (Some(2), Some(1)),
+        ] {
+            let err = client()
+                .download_with_transport(
+                    &descriptor,
+                    |_, _| Ok(()),
+                    |_, fields| make_reply(fields, &descriptor, &ciphertext, rsp_fmt, sub_ftype),
+                )
+                .err()
+                .expect("unconfirmed transcoded reply must fail size check");
+            assert_eq!(err.to_string(), "Advertised media size mismatch");
+
+            let mut same_size = descriptor.clone();
+            same_size.expected_bytes = Some(raw.len() as u64);
+            let md5_err = client()
+                .download_with_transport(
+                    &same_size,
+                    |_, _| Ok(()),
+                    |_, fields| make_reply(fields, &same_size, &ciphertext, rsp_fmt, sub_ftype),
+                )
+                .err()
+                .expect("unconfirmed same-size reply must fail checksum");
+            assert_eq!(md5_err.to_string(), "Advertised media checksum mismatch");
+        }
+
+        // Non-JPEG payloads (e.g. PNG) still enforce size and expected_md5 even with rsppicformat=1.
+        let mut png_raw = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png_raw.extend((0..4_000usize).map(|i| (i % 251) as u8));
+        let png_ct = ecb_encrypt(&png_raw, &key).unwrap();
+        let png_err = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| make_reply(fields, &descriptor, &png_ct, Some(1), Some(1)),
+            )
+            .err()
+            .expect("non-JPEG original with mismatched size must fail");
+        assert_eq!(png_err.to_string(), "Advertised media size mismatch");
+        let mut png_same_size = descriptor.clone();
+        png_same_size.expected_bytes = Some(png_raw.len() as u64);
+        let png_md5_err = client()
+            .download_with_transport(
+                &png_same_size,
+                |_, _| Ok(()),
+                |_, fields| make_reply(fields, &png_same_size, &png_ct, Some(1), Some(1)),
+            )
+            .err()
+            .expect("non-JPEG original with mismatched MD5 must fail");
+        assert_eq!(
+            png_md5_err.to_string(),
+            "Advertised media checksum mismatch"
+        );
+
+        // Strict descriptors still reject size divergence even for a transcoded JPEG reply.
+        descriptor.strict_size = true;
+        let size_err = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| make_reply(fields, &descriptor, &ciphertext, Some(1), Some(1)),
+            )
+            .err()
+            .expect("strict original download must fail");
+        assert_eq!(size_err.to_string(), "Advertised media size mismatch");
     }
     #[test]
     fn video_limits_admit_sizes_above_the_former_50_mib_bound() {
