@@ -254,9 +254,8 @@ pub fn classify_failure(
         return classify_remote_failure(target, failure);
     }
     let address = target.display_address();
-    // Seam for #752 (`wx daemon doctor`): once implemented, switch this status hint to `wx daemon doctor`.
     let status_diagnostic = if options.is_status_command {
-        "wx daemon status"
+        "wx daemon doctor"
     } else {
         "wx status"
     };
@@ -842,7 +841,7 @@ mod tests {
         assert!(status_described
             .next
             .iter()
-            .any(|step| step == "wx daemon status"));
+            .any(|step| step == "wx daemon doctor"));
     }
 
     #[test]

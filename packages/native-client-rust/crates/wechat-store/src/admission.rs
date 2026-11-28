@@ -424,6 +424,397 @@ pub(crate) fn remember(cache: &mut AdmissionCache, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read-only inspection of one file in a SQLite database family (`""`, `"-wal"`, `"-shm"`, `"-journal"`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseMemberInspection {
+    /// File suffix relative to the main database path (`""`, `"-wal"`, `"-shm"`, or `"-journal"`).
+    pub suffix: String,
+    /// Size of the file in bytes.
+    pub bytes: u64,
+    /// True when the path is a symlink or reparse point (which daemon startup refuses).
+    pub is_link: bool,
+    /// True when the path is a regular file.
+    pub is_regular_file: bool,
+    /// True when the file passes the platform owner-only privacy check.
+    pub private: bool,
+    /// Leading header bytes formatted as lowercase hex (at most 96 bytes, no table rows).
+    pub header_hex: String,
+    /// Read error if the file metadata or leading bytes could not be read.
+    pub read_error: Option<String>,
+}
+
+/// Result of running the startup WAL/SHM/journal admission validator read-only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum WalInspection {
+    /// Accepted by startup admission without keeping a recovery copy.
+    Valid {
+        /// True when startup admission will retain a `.sqlite-recovery-…` backup before opening.
+        retain_recovery: bool,
+    },
+    /// Refused by startup admission; includes the exact admission error without paths.
+    Refused {
+        /// Reason reported by startup WAL/SHM/journal admission validation.
+        reason: String,
+    },
+    /// Validation could not run (for example because a member was unreadable or not a regular file).
+    Skipped {
+        /// Why WAL validation could not run.
+        reason: String,
+    },
+}
+
+/// Complete read-only inspection of a SQLite database family.
+///
+/// Never opens any file for writing, never invokes SQLite, never takes locks,
+/// and never creates or removes files or scratch directories.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseInspection {
+    /// Whether the main database file exists.
+    pub exists: bool,
+    /// Metadata and leading header bytes for each present file in the family.
+    pub members: Vec<DatabaseMemberInspection>,
+    /// True when the main file starts with the 16-byte SQLite 3 header magic.
+    pub valid_sqlite_header: bool,
+    /// SQLite page size parsed from the header, when available.
+    pub page_size: Option<u32>,
+    /// SQLite file format write version byte (1 = rollback journal, 2 = WAL).
+    pub write_version: Option<u8>,
+    /// SQLite `user_version` parsed from bytes 60..64 of the main header.
+    pub schema_version: Option<i64>,
+    /// Maximum schema version supported by this binary for this database role.
+    pub supported_schema_version: i64,
+    /// True when startup admission can open this database in place without validation copies.
+    pub settled: bool,
+    /// Approximate free space in bytes needed beside the database when copy validation runs.
+    pub copy_validation_bytes: u64,
+    /// Startup WAL/SHM/journal admission result from `admission_wal::validate`.
+    pub wal: WalInspection,
+    /// Count of leftover `.sqlite-admission-*` scratch directories beside this database.
+    pub leftover_admission_dirs: usize,
+    /// Count of retained `.sqlite-recovery-*` backup directories beside this database.
+    pub recovery_backup_dirs: usize,
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+/// Inspect a SQLite database family strictly read-only, reusing startup WAL admission checks.
+///
+/// Never opens any file for writing, never takes `owner.lock`, never invokes SQLite
+/// (so no `-shm` is created or modified), and never creates or removes scratch directories.
+pub fn inspect_readonly(path: &Path, supported_schema_version: i64) -> DatabaseInspection {
+    let mut members = Vec::new();
+    let mut family_map = BTreeMap::new();
+    let mut main_header = None;
+    let mut exists = false;
+    let mut wal_skip_reason: Option<String> = None;
+
+    for suffix in SUFFIXES {
+        let Ok(name) = member_path(path, suffix) else {
+            wal_skip_reason = Some("database path needs a filename".into());
+            break;
+        };
+        let meta = match fs::symlink_metadata(&name) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                if suffix.is_empty() {
+                    exists = true;
+                }
+                members.push(DatabaseMemberInspection {
+                    suffix: suffix.into(),
+                    bytes: 0,
+                    is_link: false,
+                    is_regular_file: false,
+                    private: false,
+                    header_hex: String::new(),
+                    read_error: Some(e.to_string()),
+                });
+                wal_skip_reason
+                    .get_or_insert_with(|| format!("cannot inspect {suffix} metadata: {e}"));
+                continue;
+            }
+            Ok(meta) => meta,
+        };
+        if suffix.is_empty() {
+            exists = true;
+        }
+        let is_link = wechat_platform::is_link(&meta);
+        let is_regular_file = meta.is_file() && !is_link;
+        let private = !is_link && wechat_platform::private_path(&name).unwrap_or(false);
+        let length = meta.len();
+        if !is_regular_file {
+            members.push(DatabaseMemberInspection {
+                suffix: suffix.into(),
+                bytes: length,
+                is_link,
+                is_regular_file: false,
+                private,
+                header_hex: String::new(),
+                read_error: Some(if is_link {
+                    "path is a symlink or reparse point".into()
+                } else {
+                    "path is not a regular file".into()
+                }),
+            });
+            wal_skip_reason
+                .get_or_insert_with(|| "database family must contain regular files".into());
+            continue;
+        }
+        match wechat_platform::OpenOptions::new().read(true).open(&name) {
+            Ok(mut file) => {
+                let header_cap = if suffix.is_empty() {
+                    100
+                } else if suffix == "-shm" {
+                    96
+                } else {
+                    32
+                };
+                let to_read = (length as usize).min(header_cap);
+                let mut buf = vec![0u8; to_read];
+                let read_error = if to_read > 0 {
+                    match file.read_exact(&mut buf) {
+                        Ok(()) => {
+                            if suffix.is_empty() && buf.len() == 100 {
+                                main_header = Some(buf.clone());
+                            }
+                            None
+                        }
+                        Err(e) => Some(e.to_string()),
+                    }
+                } else {
+                    None
+                };
+                let _ = file.seek(SeekFrom::Start(0));
+                let file_meta = file.metadata().ok();
+                let actual_len = file_meta.as_ref().map_or(length, fs::Metadata::len);
+                let modified = file_meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                #[cfg(unix)]
+                let changed = file_meta.as_ref().map_or((0, 0), |m| {
+                    use std::os::unix::fs::MetadataExt;
+                    (m.ctime(), m.ctime_nsec())
+                });
+                let preview_len = buf.len().min(if suffix == "-shm" { 48 } else { 32 });
+                members.push(DatabaseMemberInspection {
+                    suffix: suffix.into(),
+                    bytes: actual_len,
+                    is_link,
+                    is_regular_file: true,
+                    private,
+                    header_hex: hex_encode(&buf[..preview_len]),
+                    read_error: read_error.clone(),
+                });
+                if let Some(err) = read_error {
+                    wal_skip_reason
+                        .get_or_insert_with(|| format!("cannot read database file: {err}"));
+                } else {
+                    family_map.insert(
+                        suffix,
+                        Member {
+                            file,
+                            length: actual_len,
+                            modified,
+                            #[cfg(unix)]
+                            changed,
+                        },
+                    );
+                }
+            }
+            Err(e) => {
+                members.push(DatabaseMemberInspection {
+                    suffix: suffix.into(),
+                    bytes: length,
+                    is_link,
+                    is_regular_file: true,
+                    private,
+                    header_hex: String::new(),
+                    read_error: Some(e.to_string()),
+                });
+                wal_skip_reason
+                    .get_or_insert_with(|| format!("cannot open database file read-only: {e}"));
+            }
+        }
+    }
+
+    let (valid_sqlite_header, page_size, write_version, schema_version) =
+        if let Some(header) = &main_header {
+            let valid = &header[..16] == b"SQLite format 3\0";
+            if valid {
+                let raw_page = u16::from_be_bytes([header[16], header[17]]);
+                let page = if raw_page == 1 {
+                    65536
+                } else {
+                    u32::from(raw_page)
+                };
+                let write_ver = header[18];
+                let user_ver = i64::from(i32::from_be_bytes([
+                    header[60], header[61], header[62], header[63],
+                ]));
+                (true, Some(page), Some(write_ver), Some(user_ver))
+            } else {
+                (false, None, None, None)
+            }
+        } else {
+            (false, None, None, None)
+        };
+
+    let family = Family(family_map);
+    let settled = exists
+        && wal_skip_reason.is_none()
+        && family.settled(supported_schema_version).unwrap_or(false);
+    let total_bytes: u64 = members.iter().map(|m| m.bytes).sum();
+    let copy_validation_bytes = if exists && !settled {
+        total_bytes.saturating_mul(2)
+    } else {
+        0
+    };
+    let wal = if !exists {
+        WalInspection::Skipped {
+            reason: "database file does not exist".into(),
+        }
+    } else if let Some(reason) = wal_skip_reason {
+        WalInspection::Skipped { reason }
+    } else {
+        match wal::validate(&family) {
+            Ok(retain_recovery) => WalInspection::Valid { retain_recovery },
+            Err(error) => WalInspection::Refused {
+                reason: error.to_string(),
+            },
+        }
+    };
+
+    let mut leftover_admission_dirs = 0;
+    let mut recovery_backup_dirs = 0;
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !fs::symlink_metadata(entry.path())
+                    .is_ok_and(|m| m.is_dir() && !wechat_platform::is_link(&m))
+                {
+                    continue;
+                }
+                if name.starts_with(SCRATCH) {
+                    leftover_admission_dirs += 1;
+                } else if name.starts_with(".sqlite-recovery-") {
+                    recovery_backup_dirs += 1;
+                }
+            }
+        }
+    }
+
+    DatabaseInspection {
+        exists,
+        members,
+        valid_sqlite_header,
+        page_size,
+        write_version,
+        schema_version,
+        supported_schema_version,
+        settled,
+        copy_validation_bytes,
+        wal,
+        leftover_admission_dirs,
+        recovery_backup_dirs,
+    }
+}
+
+fn normalize_uri_path(raw: &str, windows: bool) -> String {
+    let normalized = if windows {
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            format!("//{}", unc.replace('\\', "/"))
+        } else if let Some(verbatim) = raw.strip_prefix(r"\\?\") {
+            verbatim.replace('\\', "/")
+        } else {
+            raw.replace('\\', "/")
+        }
+    } else {
+        raw.to_owned()
+    };
+    let mut encoded = String::with_capacity(normalized.len() + 24);
+    encoded.push_str("file:");
+    if windows && !normalized.starts_with('/') {
+        encoded.push('/');
+    }
+    for ch in normalized.chars() {
+        match ch {
+            '%' => encoded.push_str("%25"),
+            '?' => encoded.push_str("%3F"),
+            '#' => encoded.push_str("%23"),
+            _ => encoded.push(ch),
+        }
+    }
+    encoded.push_str("?immutable=1");
+    encoded
+}
+
+/// Encode a filesystem path for a SQLite `file:` URI without mutating or opening files.
+fn sqlite_immutable_uri(path: &Path) -> Result<String> {
+    let raw = path.to_str().context("database path is not valid UTF-8")?;
+    Ok(normalize_uri_path(raw, cfg!(windows)))
+}
+
+/// Read registered accounts from `registry.sqlite` strictly read-only (`immutable=1`).
+///
+/// With `immutable=1`, SQLite reads only the main database file and never creates
+/// `-shm`, acquires file locks, or replays WAL/journal files.
+pub fn read_accounts_immutable(registry_path: &Path) -> Result<Vec<crate::Account>> {
+    let meta = fs::symlink_metadata(registry_path)?;
+    ensure!(
+        meta.is_file() && !wechat_platform::is_link(&meta),
+        "registry must be a regular file"
+    );
+    let uri = sqlite_immutable_uri(registry_path)?;
+    let db = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let has_accounts: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='accounts')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_accounts {
+        return Ok(Vec::new());
+    }
+    let has_removed_at: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('accounts') WHERE name='removed_at')",
+        [],
+        |r| r.get(0),
+    )?;
+    let sql = if has_removed_at {
+        "SELECT id, storage_mode, profile_path, schema_compatibility FROM accounts WHERE removed_at IS NULL ORDER BY id"
+    } else {
+        "SELECT id, storage_mode, profile_path, schema_compatibility FROM accounts ORDER BY id"
+    };
+    let mut stmt = db.prepare(sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::Account {
+            id: r.get(0)?,
+            storage_mode: r.get(1)?,
+            profile_path: PathBuf::from(r.get::<_, String>(2)?),
+            schema_compatibility: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +1032,118 @@ mod tests {
             b"only copy"
         );
         assert!(other.is_dir());
+    }
+
+    #[test]
+    fn inspect_readonly_checks_wal_and_schema_without_modifying_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = database(temp.path(), 4);
+        let original_bytes = fs::read(&path).unwrap();
+
+        // Settled current database
+        let ok = inspect_readonly(&path, 4);
+        assert!(ok.exists);
+        assert!(ok.valid_sqlite_header);
+        assert_eq!(ok.schema_version, Some(4));
+        assert!(ok.settled);
+        assert_eq!(
+            ok.wal,
+            WalInspection::Valid {
+                retain_recovery: false
+            }
+        );
+
+        // Newer schema version than this binary supports
+        let newer = inspect_readonly(&path, 3);
+        assert_eq!(newer.schema_version, Some(4));
+        assert_eq!(newer.supported_schema_version, 3);
+        assert!(!newer.settled);
+
+        // #665 / #753 shape: 3-byte zero -shm beside 0-byte -wal is admissible with recovery retention
+        let shm = member_path(&path, "-shm").unwrap();
+        let wal = member_path(&path, "-wal").unwrap();
+        private(&shm, &[0, 0, 0]);
+        private(&wal, &[]);
+        let shape_665 = inspect_readonly(&path, 4);
+        assert!(matches!(
+            shape_665.wal,
+            WalInspection::Valid {
+                retain_recovery: true
+            }
+        ));
+        let shm_member = shape_665
+            .members
+            .iter()
+            .find(|m| m.suffix == "-shm")
+            .unwrap();
+        assert_eq!(shm_member.bytes, 3);
+        assert_eq!(shm_member.header_hex, "000000");
+
+        // Unrecognized 3-byte -shm contents are still refused (byte-for-byte unchanged)
+        private(&shm, &[0xde, 0xad, 0xbe]);
+        let refused_shm = inspect_readonly(&path, 4);
+        assert!(matches!(
+            refused_shm.wal,
+            WalInspection::Refused { ref reason } if reason.contains("unrecognized database WAL index")
+        ));
+        let refused_member = refused_shm
+            .members
+            .iter()
+            .find(|m| m.suffix == "-shm")
+            .unwrap();
+        assert_eq!(refused_member.bytes, 3);
+        assert_eq!(refused_member.header_hex, "deadbe");
+
+        // Leftover admission & recovery dirs are counted without being swept
+        let leftover = temp.path().join(format!("{SCRATCH}leftover"));
+        let recovery = temp.path().join(".sqlite-recovery-abcd");
+        fs::create_dir_all(&leftover).unwrap();
+        fs::create_dir_all(&recovery).unwrap();
+        let with_dirs = inspect_readonly(&path, 4);
+        assert_eq!(with_dirs.leftover_admission_dirs, 1);
+        assert_eq!(with_dirs.recovery_backup_dirs, 1);
+
+        // Files remain byte-for-byte identical and leftover dirs untouched
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(fs::read(&shm).unwrap(), [0xde, 0xad, 0xbe]);
+        assert_eq!(fs::read(&wal).unwrap(), b"");
+        assert!(leftover.is_dir());
+        assert!(recovery.is_dir());
+    }
+
+    #[test]
+    fn read_accounts_immutable_reads_registry_without_creating_shm() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let store = crate::Store::open(&root).unwrap();
+        store.create_account("bob").unwrap();
+        drop(store);
+
+        let registry = root.join("registry.sqlite");
+        let before_bytes = fs::read(&registry).unwrap();
+        let shm = member_path(&registry, "-shm").unwrap();
+        assert!(!shm.exists());
+
+        let accounts = read_accounts_immutable(&registry).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "bob");
+        assert!(!shm.exists(), "immutable read must not create -shm");
+        assert_eq!(fs::read(&registry).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn sqlite_immutable_uri_handles_special_chars_and_windows_verbatim_paths() {
+        assert_eq!(
+            normalize_uri_path("/tmp/a?b#c%20/registry.sqlite", false),
+            "file:/tmp/a%3Fb%23c%2520/registry.sqlite?immutable=1"
+        );
+        assert_eq!(
+            normalize_uri_path(r"\\?\C:\Users\Demo\registry.sqlite", true),
+            "file:/C:/Users/Demo/registry.sqlite?immutable=1"
+        );
+        assert_eq!(
+            normalize_uri_path(r"\\?\UNC\server\share\registry.sqlite", true),
+            "file://server/share/registry.sqlite?immutable=1"
+        );
     }
 }

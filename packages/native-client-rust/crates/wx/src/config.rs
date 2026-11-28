@@ -99,10 +99,29 @@ fn absolute(path: &Path, base: &Path) -> Result<PathBuf> {
     })
 }
 
-pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<ServerConfig> {
-    if !cwd.is_absolute() {
-        bail!("working directory must be absolute");
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataDirSource {
+    Flag,
+    Env,
+    ServerConfig,
+    XdgDataHome,
+    Default,
+}
+
+impl DataDirSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flag => "--data-dir",
+            Self::Env => "AGENT_WECHAT_DATA_DIR",
+            Self::ServerConfig => "server config",
+            Self::XdgDataHome => "XDG_DATA_HOME",
+            Self::Default => "default",
+        }
     }
+}
+
+pub fn default_config_file(env: &Environment) -> Option<PathBuf> {
     let home = env.home.as_ref().filter(|p| p.is_absolute());
     let config_root = env
         .config_home
@@ -110,12 +129,37 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         .filter(|p| p.is_absolute())
         .cloned()
         .or_else(|| home.map(|p| p.join(".config")));
+    config_root.map(|root| root.join("agent-wechat/server/config.toml"))
+}
+
+pub fn default_data_dir(env: &Environment) -> Option<(PathBuf, DataDirSource)> {
+    if let Some(data_home) = env.data_home.as_ref().filter(|p| p.is_absolute()) {
+        return Some((data_home.join("agent-wechat"), DataDirSource::XdgDataHome));
+    }
+    env.home.as_ref().filter(|p| p.is_absolute()).map(|home| {
+        (
+            home.join(".local/share/agent-wechat"),
+            DataDirSource::Default,
+        )
+    })
+}
+
+pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<ServerConfig> {
+    resolve_with_source(flags, env, cwd).map(|(config, _)| config)
+}
+
+pub fn resolve_with_source(
+    flags: &Overrides,
+    env: &Environment,
+    cwd: &Path,
+) -> Result<(ServerConfig, DataDirSource)> {
+    if !cwd.is_absolute() {
+        bail!("working directory must be absolute");
+    }
     let explicit = flags.server_config.as_ref().or(env.server_config.as_ref());
     let config_file = match explicit {
         Some(p) => absolute(p, cwd)?,
-        None => config_root
-            .context("HOME or absolute XDG_CONFIG_HOME is required")?
-            .join("agent-wechat/server/config.toml"),
+        None => default_config_file(env).context("HOME or absolute XDG_CONFIG_HOME is required")?,
     };
     let (file, present) = match std::fs::File::open(&config_file) {
         Ok(input) => {
@@ -143,18 +187,14 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
     let base = config_file
         .parent()
         .context("configuration path has no parent")?;
-    let data_dir = if let Some(p) = flags.data_dir.as_ref().or(env.data_dir.as_ref()) {
-        absolute(p, cwd)?
+    let (data_dir, source) = if let Some(p) = flags.data_dir.as_ref() {
+        (absolute(p, cwd)?, DataDirSource::Flag)
+    } else if let Some(p) = env.data_dir.as_ref() {
+        (absolute(p, cwd)?, DataDirSource::Env)
     } else if let Some(p) = &file.data_dir {
-        absolute(p, base)?
+        (absolute(p, base)?, DataDirSource::ServerConfig)
     } else {
-        env.data_home
-            .as_ref()
-            .filter(|p| p.is_absolute())
-            .cloned()
-            .or_else(|| home.map(|p| p.join(".local/share")))
-            .context("HOME or absolute XDG_DATA_HOME is required")?
-            .join("agent-wechat")
+        default_data_dir(env).context("HOME or absolute XDG_DATA_HOME is required")?
     };
     let token_explicit = flags.token_file.is_some() || file.token_file.is_some();
     let token_file = match (&flags.token_file, &file.token_file) {
@@ -201,20 +241,23 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
     {
         bail!("network listener requires a separate, nonzero port");
     }
-    Ok(ServerConfig {
-        schema_version: 1,
-        config_file,
-        config_present: present,
-        data_dir,
-        token_file,
-        token_explicit,
-        storage_key_file,
-        profile_format_key_file,
-        listen,
-        network_listen,
-        tls_cert_file,
-        tls_key_file,
-    })
+    Ok((
+        ServerConfig {
+            schema_version: 1,
+            config_file,
+            config_present: present,
+            data_dir,
+            token_file,
+            token_explicit,
+            storage_key_file,
+            profile_format_key_file,
+            listen,
+            network_listen,
+            tls_cert_file,
+            tls_key_file,
+        },
+        source,
+    ))
 }
 
 #[cfg(test)]

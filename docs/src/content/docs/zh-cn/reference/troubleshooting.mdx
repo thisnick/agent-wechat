@@ -1,10 +1,10 @@
 ---
 title: 故障排查
 description: 常见安装、登录、Profile 数据、多媒体及 OpenClaw 问题的排查指南。
-sourceHash: "bb092c73935c"
+sourceHash: "a0c6d90deb90"
 ---
 
-遇到问题时，首先执行 `wx accounts status`。它会明确展示你是否已登录 (`authenticated`)、长连接状态 (`connection`) 以及是否有后台任务阻塞挂起。
+如果 Daemon 无法启动，或者你不确定哪个本地 Daemon 拥有某个数据目录，请先执行 `wx daemon doctor`。如果 Daemon 正在运行，并想检查登录和连接状态，请执行 `wx accounts status`。
 
 ## 安装问题 \{#install}
 
@@ -12,16 +12,44 @@ sourceHash: "bb092c73935c"
 
 ## 启动 Daemon 服务 \{#starting-the-daemon}
 
-**地址已被占用 (Address already in use)。** 说明端口已有其他 Daemon 实例正在监听，可能是通过 `wx daemon`、systemd、Docker 或 OpenClaw 托管模式启动的。请停止冲突实例，或者直接连接到已存在的该实例。切勿仅因其占用端口，就杀掉你不认识的进程。
+请在保存数据目录的机器上执行 `wx daemon doctor`。当 Daemon 处于停止状态时，它只读取文件：绝不会以写入方式打开数据库，绝不会占用 `owner.lock`，绝不会启动 Daemon，也绝不会联系微信服务器。
+
+```bash
+wx daemon doctor
+```
+
+```text
+Target: /home/you/.local/share/agent-wechat (chosen from: default)
+Listen: http://127.0.0.1:6174  State: stopped (read-only check)
+
+Status  Check            Summary
+OK      server_config    Using default server settings
+OK      data_dir         Data folder is owned by UID 1000 with mode 0700
+OK      sqlite.registry  registry.sqlite OK (schema v4/4, 36.0 KiB)
+OK      disk.space       42.3 GiB free of 100.0 GiB
+OK      media_tools      FFmpeg and FFprobe available
+
+For daemons running in Docker, run `docker exec <container> wx daemon doctor`.
+```
+
+| 标志 | 作用 |
+| --- | --- |
+| `--all` | 对本机每个 Daemon 数据目录（`wx daemon`、systemd、桌面端 Hub 以及正在运行的 `wx serve` 进程）执行完整的检查项。 |
+| `--fix` | 仅执行安全的清理操作，例如为已终止的进程删除残留的 `daemon/process.json`。绝不会修改、移动或删除数据库文件。 |
+| `--json` | 以 JSON 格式输出目标、`checks[]`、`others[]` 以及已脱敏的缺陷报告（如有）。 |
+
+使用 `--data-dir PATH` 或 `--server-config FILE` 可检查非默认的数据目录。对于在 Docker 中运行的 Daemon，请执行 `docker exec <container> wx daemon doctor`。
+
+**地址已被占用 (Address already in use)。** 说明端口已有其他 Daemon 实例正在监听，可能是通过 `wx daemon`、systemd、Docker 或 OpenClaw 托管模式启动的。请执行 `wx daemon doctor` 查看是哪个进程占用了端口，然后停止该进程，或改为连接到它。切勿仅因其占用端口，就杀掉你不认识的进程。
 
 **旧版 `serverUrl` 或 `backend` 配置被拒绝。** 说明你正在使用 0.x 版本的旧配置。参考[从旧容器迁移](/setup/migrate/)进行升级调整。
 
-**提示 "cannot open … database WAL …; existing files preserved"。** 说明 Daemon 自身的某个 SQLite 数据库与其日志（旁边的 `-wal` 文件）不一致，或者其 `-shm` 索引文件无法识别。通常发生于计算机、虚拟机或 WSL 突发断电或异常关机，或者磁盘写满之后。Daemon 会自动修复常见情况（包括索引过期，或因中断启动而留下的 3 字节 `-shm` 文件），并把原始文件的副本保存在数据库旁边的 `.sqlite-recovery-…` 文件夹中。如果依然拒绝启动：
+**提示 "cannot open … database WAL …; existing files preserved"。** 说明 Daemon 自身的某个 SQLite 数据库与其日志（旁边的 `-wal` 文件）不一致，或者其 `-shm` 索引文件无法识别。通常发生于计算机、虚拟机或 WSL 突发断电或异常关机，或者磁盘写满之后。请执行 `wx daemon doctor` 在不修改文件的前提下检查这些文件。Daemon 会自动修复常见情况（包括索引过期，或因中断启动而留下的 3 字节 `-shm` 文件），并把原始文件的副本保存在数据库旁边的 `.sqlite-recovery-…` 文件夹中。如果依然拒绝启动：
 
 1. 停止 Daemon 服务。
 2. 将报错信息中提及的数据库文件以及旁边的 `-wal` 与 `-shm` 文件备份复制到安全位置。
 3. 如果报错信息包含 `commits from a newer log generation`、`index exceeds log` 或 `published frame is not a verified commit`，说明日志缺少最新变更。若要不带这些最新变更启动，可将该目录下的 `-shm` 文件移出目录，然后启动 Daemon。Daemon 在使用日志前会再次校验它。
-4. 若为其他报错信息，说明日志或索引文件已损坏或无法识别。请从备份中恢复数据目录，或携带完整报错信息[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。
+4. 若为其他报错信息，说明日志或索引文件已损坏或无法识别。请从备份中恢复数据目录；或者附上 `wx daemon doctor` 输出的已脱敏缺陷报告，[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。
 
 ## 登录相关 \{#login}
 

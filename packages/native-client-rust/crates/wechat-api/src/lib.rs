@@ -3030,4 +3030,32 @@ mod tests {
         assert_eq!(queue_full.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(queue_full.1, "media_queue_full");
     }
+    #[tokio::test]
+    async fn account_storage_route_reports_usage_and_enforces_read_scope() {
+        let (_t, core, app) = setup();
+        let (status, usage) = call(
+            app.clone(),
+            "GET",
+            "/v1/accounts/one/storage",
+            Some(OWNER),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(usage["fileBytes"].as_i64().unwrap() > 0);
+        assert_eq!(usage["unresolved"]["syncBatchesBlocked"], 0);
+        assert_eq!(usage["unresolved"]["sendsNeedReview"], 0);
+
+        let token = "send-only-token-0123456789abcdef01234567";
+        let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        core.store
+            .issue_token("send only", &hash, &["one".into()], &["send".into()], None)
+            .unwrap();
+        assert_eq!(
+            call(app, "GET", "/v1/accounts/one/storage", Some(token), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
 }

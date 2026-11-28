@@ -64,6 +64,67 @@
         ],
         "type": "object"
       },
+      "BlockedControlCount": {
+        "description": "Commands of one form that keep sync batches blocked. Labels only: never a\npeer's identity or the control's contents.",
+        "properties": {
+          "batches": {
+            "description": "Number of distinct sync batches blocked by this form.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "commands": {
+            "description": "Number of blocked commands matching this form.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "messageType": {
+            "description": "AddMsg type, such as 51 (status) or 10002 (system).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operationIds": {
+            "description": "Status operation IDs, as a JSON array.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peerKind": {
+            "description": "`group`, `excluded`, `classified` or `ordinary`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the command is blocked.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "systemKind": {
+            "description": "System message kind, such as `dynacfg`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "messageType",
+          "operationIds",
+          "systemKind",
+          "peerKind",
+          "reason",
+          "commands",
+          "batches"
+        ],
+        "type": "object"
+      },
       "CallAudioFormat": {
         "additionalProperties": false,
         "description": "The PCM format of call audio. The daemon currently supports only 16,000 Hz,\nmono, 20 ms frames.",
@@ -4439,6 +4500,84 @@
         ],
         "type": "object"
       },
+      "SkippedControlCount": {
+        "description": "Commands of one form that were skipped as handled because this build\ncan't apply them. Labels only: never a peer's identity or the command's\ncontents.",
+        "properties": {
+          "batches": {
+            "description": "Number of distinct sync batches containing this skipped form.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "classification": {
+            "description": "What kind of command it was, such as `status_notification`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commandId": {
+            "description": "Sync command ID, such as 5 (AddMsg) or 44.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "commands": {
+            "description": "Number of skipped commands matching this form.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "messageType": {
+            "description": "AddMsg type, such as 51 (status) or 10002 (system).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operationIds": {
+            "description": "Status operation IDs, as a JSON array.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peerKind": {
+            "description": "`group`, `excluded`, `classified` or `ordinary`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why this build can't apply it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "systemKind": {
+            "description": "System message kind, such as `dynacfg`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "commandId",
+          "messageType",
+          "classification",
+          "operationIds",
+          "systemKind",
+          "peerKind",
+          "reason",
+          "commands",
+          "batches"
+        ],
+        "type": "object"
+      },
       "StickerCollection": {
         "description": "A derived composer collection; only Saved supports individual mutations.",
         "properties": {
@@ -4966,6 +5105,98 @@
             "type": "string"
           }
         ]
+      },
+      "StorageCount": {
+        "description": "Row count and stored bytes of one table or runtime family.",
+        "properties": {
+          "bytes": {
+            "description": "Stored payload bytes across those rows.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Table name or runtime key family prefix.",
+            "type": "string"
+          },
+          "rows": {
+            "description": "Number of stored rows in this table or family.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "rows",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "StorageUsage": {
+        "description": "Size of an account sidecar and the unresolved work that keeps records whole.",
+        "properties": {
+          "blockedControls": {
+            "description": "Status and system controls (AddMsg types 51 and 10002) recorded by an\nearlier version as keeping sync batches blocked, by form. Such\ncontrols are now skipped (see `skipped_controls`), so this only lists\nbatches no retry has reached yet. Batches waiting on local work, such\nas a group refresh, aren't listed.",
+            "items": {
+              "$ref": "#/components/schemas/BlockedControlCount"
+            },
+            "type": "array"
+          },
+          "fileBytes": {
+            "description": "Total allocated size of `control.sqlite` in bytes.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "freeBytes": {
+            "description": "Unused freelist bytes inside `control.sqlite`.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "retiredKeys": {
+            "description": "Number of retired idempotency key and operation ID digests kept to prevent replay.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "runtimeFamilies": {
+            "description": "The largest runtime key families, by stored bytes.",
+            "items": {
+              "$ref": "#/components/schemas/StorageCount"
+            },
+            "type": "array"
+          },
+          "skippedControls": {
+            "description": "Commands this build couldn't apply and skipped as handled, by form.\nThe labels are kept for good, like the commands' raw bytes, so a later\nversion can find and apply them.",
+            "items": {
+              "$ref": "#/components/schemas/SkippedControlCount"
+            },
+            "type": "array"
+          },
+          "tables": {
+            "description": "Per-table row and byte counts, largest first.",
+            "items": {
+              "$ref": "#/components/schemas/StorageCount"
+            },
+            "type": "array"
+          },
+          "unresolved": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "description": "Records retention keeps whole until they finish or expire.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "fileBytes",
+          "freeBytes",
+          "tables",
+          "runtimeFamilies",
+          "unresolved",
+          "blockedControls",
+          "skippedControls",
+          "retiredKeys"
+        ],
+        "type": "object"
       },
       "TextMentionPosition": {
         "additionalProperties": false,
@@ -11435,6 +11666,51 @@
           {
             "$ref": "#/components/schemas/MediaJob"
           }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/storage": {
+      "get": {
+        "operationId": "getAccountStorage",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageUsage"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "Report the size of the account's control database and counts of pending, blocked or needs-review work.",
+        "tags": [
+          "accounts"
         ]
       }
     },

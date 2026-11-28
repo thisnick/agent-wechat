@@ -25,6 +25,7 @@ fn configure(command: Command, parents: &[&str]) -> Command {
         _ if command.has_subcommands() => "Run this command with a subcommand and --help to see its arguments and options.",
         ["wx", "profiles", ..] => "Uses stopped local files. Select them with wx profiles select NAME or --local-profile NAME.\nUse --source-stopped only after stopping the owner or making a consistent snapshot.",
         ["wx", "config", ..] => "CLI server choices are saved locally. Use --config FILE to choose another client configuration.",
+        ["wx", "daemon", "doctor"] => "Examples:\n  wx daemon doctor\n  wx daemon doctor --all\n  wx daemon doctor --fix\n  wx --data-dir /path/to/data daemon doctor --json\n\nRuns read-only checks on the data folder when the daemon is stopped, without taking owner.lock or modifying databases.",
         ["wx", "daemon" | "store" | "serve", ..] => "Runs on this computer. Use --data-dir PATH and --server-config FILE for the local daemon store.",
         ["wx", "completions"] => "Examples:\n  wx completions bash\n  wx completions zsh\n  wx completions fish\n  wx completions powershell\n\nPrints a completion script to stdout. Runs locally without a server connection or API token.",
         ["wx", "version" | "licenses"] => "Runs locally without a server connection or API token.",
