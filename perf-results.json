@@ -1,0 +1,62 @@
+{
+  "durationSeconds": 12.9,
+  "files": {
+    "mp4Bytes": 578747,
+    "gifBytes": 2555742,
+    "framesBytes": 727157
+  },
+  "report": {
+    "trimStartSec": 3.59,
+    "mediaHits": {
+      "v1Bytes": 20971520,
+      "v1Ms": 145.7,
+      "v2Bytes": 0,
+      "v2Ms": 159.1
+    },
+    "avatarHits": {
+      "v1Bytes": 1024000,
+      "v1Ms": 136,
+      "v2Bytes": 0,
+      "v2Ms": 141.1
+    },
+    "stats": {
+      "v1Bytes": 23019520,
+      "v1Ms": 77.3,
+      "v1Total": 23019520,
+      "v2Bytes": 0,
+      "v2Ms": 4.5,
+      "v2Total": 23019520
+    },
+    "saveBlobEvict": {
+      "v1Bytes": 29310976,
+      "v1Ms": 143.9,
+      "v2Bytes": 0,
+      "v2Ms": 81.6
+    },
+    "invalidate": {
+      "v1Bytes": 25165824,
+      "v1Ms": 49.3,
+      "v2Bytes": 0,
+      "v2Ms": 3.2
+    },
+    "statsAfter": {
+      "v1": 19898368,
+      "v2": 19898368
+    },
+    "migration": {
+      "bytes": 2117632,
+      "payloadPuts": 0,
+      "ms": 15.2
+    },
+    "blockedClose": {
+      "origPrMs": 370.5,
+      "fixedMs": 0
+    },
+    "totals": {
+      "rewrittenV1": 21995520,
+      "scannedV1": 77496320,
+      "msV1": 552.2,
+      "msV2": 389.5
+    }
+  }
+}
