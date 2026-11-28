@@ -1670,6 +1670,14 @@ async fn run(cli: Cli) -> Result<()> {
             return calls_cli::session::run_local(cmd.clone(), cli.json).await;
         }
     }
+    if matches!(cli.command, Command::Licenses) {
+        return output.print(
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+        );
+    }
+    if matches!(cli.command, Command::Version) {
+        return output.print(&wechat_api::version());
+    }
     if cli.token_stdin
         && matches!(
             &cli.command,
@@ -1683,14 +1691,6 @@ async fn run(cli: Cli) -> Result<()> {
         )
     {
         bail!("--token-stdin is supported by serve and HTTP client commands");
-    }
-    if matches!(cli.command, Command::Licenses) {
-        return output.print(
-            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
-        );
-    }
-    if matches!(cli.command, Command::Version) {
-        return output.print(&wechat_api::version());
     }
     if let Command::Completions { shell } = cli.command {
         return completions::write(shell, &mut std::io::stdout().lock());
