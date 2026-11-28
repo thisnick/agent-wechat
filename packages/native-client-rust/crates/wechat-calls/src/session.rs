@@ -9,7 +9,7 @@ use wechat_protocol::calls::{
     app_session::{AppAuthority, AppSession, PendingAppAuth},
     host_policy::CallHostRoute,
     personal::{self, VoiceInputs, VoiceRoom},
-    relay::SelectedRelay,
+    relay::{RelayTarget, SelectedRelay},
     signaling::{CallOperation, CommonRequest, CommonResponse},
 };
 use wechat_protocol::{
@@ -213,16 +213,44 @@ impl NativePersonalSession {
         parameters: VoiceParameters,
     ) -> Result<Self> {
         ensure!(host_task != 0, "Missing app auth task");
+        Self::validate_parameters(&parameters)?;
+        let pending = PendingAppAuth::new(authority, device32)?;
+        let request = common(state, host_task, &pending.request_body()?)?;
+        let reply = client.call_rpc(state, CallHostRoute::AppAuth, &request)?;
+        let app = pending.complete(&reply, authority)?;
+        let mut session = Self::idle(state, authority, parameters, app);
+        session.host_tasks.insert(host_task);
+        Ok(session)
+    }
+
+    /// Start an idle direct call with an app identity already verified for this authority.
+    pub fn from_authenticated(
+        state: &AccountState,
+        authority: AppAuthority,
+        app: AppSession,
+        parameters: VoiceParameters,
+    ) -> Result<Self> {
+        Self::validate_parameters(&parameters)?;
+        app.validate_authority(authority)?;
+        Ok(Self::idle(state, authority, parameters, app))
+    }
+
+    fn validate_parameters(parameters: &VoiceParameters) -> Result<()> {
         parameters.inputs().validate()?;
         ensure!(
             number(&fields(&parameters.group)?, 5, None)? == 1,
             "Selected caller sync requires group mode1"
         );
-        let pending = PendingAppAuth::new(authority, device32)?;
-        let request = common(state, host_task, &pending.request_body()?)?;
-        let reply = client.call_rpc(state, CallHostRoute::AppAuth, &request)?;
-        let app = pending.complete(&reply, authority)?;
-        Ok(Self {
+        Ok(())
+    }
+
+    fn idle(
+        state: &AccountState,
+        authority: AppAuthority,
+        parameters: VoiceParameters,
+        app: AppSession,
+    ) -> Self {
+        Self {
             ignored_controls: 0,
             app,
             authority,
@@ -231,12 +259,18 @@ impl NativePersonalSession {
             phase: PersonalPhase::Idle,
             active: None,
             control: None,
-            host_tasks: BTreeSet::from([host_task]),
+            host_tasks: BTreeSet::new(),
             sdk_tasks: BTreeSet::new(),
             video_mode: false,
             av_timestamp: 0,
-        })
+        }
     }
+
+    /// The verified app identity bound to this call.
+    pub fn app_session(&self) -> &AppSession {
+        &self.app
+    }
+
     pub fn ignored_control_count(&self) -> u64 {
         self.ignored_controls
     }
@@ -863,6 +897,53 @@ impl NativePersonalSession {
             .ok_or_else(|| anyhow::anyhow!("Missing personal room"))?;
         SelectedRelay::strategy_candidates(&active.strategy)
     }
+    /// List valid UDP relay candidates from the Invite strategy while the peer is ringing.
+    pub fn ringing_relay_candidates(&self) -> Result<Vec<(usize, usize, std::net::SocketAddr)>> {
+        ensure!(
+            self.phase == PersonalPhase::Ringing,
+            "Personal ringing relay unavailable"
+        );
+        self.relay_candidates()
+    }
+
+    /// Extract a check-in target while ringing, without admitting media or requiring a media key.
+    /// Returns `Ok(None)` if the selected ringing relay is unavailable.
+    pub fn ringing_relay_target(
+        &self,
+        state: &AccountState,
+        current: AppAuthority,
+        connection_index: usize,
+        udp_index: usize,
+    ) -> Result<Option<RelayTarget>> {
+        self.check(state, current)?;
+        ensure!(
+            self.phase == PersonalPhase::Ringing,
+            "Personal ringing relay unavailable"
+        );
+        self.ringing_relay_target_for_active(connection_index, udp_index, "Missing personal room")
+    }
+
+    pub(super) fn ringing_relay_target_for_active(
+        &self,
+        connection_index: usize,
+        udp_index: usize,
+        missing_room: &'static str,
+    ) -> Result<Option<RelayTarget>> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!(missing_room))?;
+        Ok(RelayTarget::from_strategy(
+            active.identity.room,
+            active.identity.room_key,
+            active.identity.own_member as u16,
+            &active.strategy,
+            connection_index,
+            udp_index,
+        )
+        .ok())
+    }
+
     /// Move one admitted media context out only after current roster/capability/AV
     /// state agrees. This never constructs a synthetic callee Join response.
     pub fn take_media(
@@ -1767,7 +1848,10 @@ mod tests {
                     assert_eq!(number(&inner, 4, None)?, 9);
                     assert_eq!(number(&inner, 5, None)?, 0);
                     let reason = number(&inner, 6, None)?;
-                    if command == 3095 {
+                    if command == 3197 {
+                        assert!(reason <= 3);
+                        assert_ne!(number(&inner, 7, None)?, 0);
+                    } else if command == 3095 {
                         assert_eq!(reason, 1);
                     } else {
                         assert!([1, 5, 6, 7].contains(&reason));
@@ -2101,6 +2185,60 @@ mod tests {
         .unwrap();
         host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
     }
+
+    #[test]
+    fn warm_invite_reuses_app_session_without_auth_rpc_and_checks_authority() {
+        let app = PendingAppAuth::new(authority(), [9; 32])
+            .unwrap()
+            .complete(&auth_reply(), authority())
+            .unwrap();
+        let transport = FakeTransport(std::cell::RefCell::new(
+            [
+                (CallHostRoute::Invite, invite_reply_profile(17, 1)),
+                (CallHostRoute::Transfer, exit_reply()),
+            ]
+            .into(),
+        ));
+        let mut state = state();
+        let changed = AppAuthority {
+            logout_epoch: 1,
+            ..authority()
+        };
+        assert!(NativePersonalSession::from_authenticated(
+            &state,
+            changed,
+            app.clone(),
+            parameters()
+        )
+        .is_err());
+        let mut session =
+            NativePersonalSession::from_authenticated(&state, authority(), app, parameters())
+                .unwrap();
+        assert_eq!(session.app_session().app_uin(), 17);
+        session
+            .invite_with_mode(
+                &transport,
+                &mut state,
+                authority(),
+                "peer",
+                personal::CallMediaMode::Voice,
+                123,
+                TaskIds { sdk: 1, host: 1 },
+            )
+            .unwrap();
+        assert_eq!(session.phase(), PersonalPhase::Joined);
+        session
+            .exit(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 2, host: 2 },
+                false,
+            )
+            .unwrap();
+        assert!(transport.0.borrow().is_empty());
+    }
+
     #[test]
     fn fake_caller_auth_invite_full_sync_media_and_exit() {
         let transport = RecordingTransport {
@@ -2384,6 +2522,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.phase(), PersonalPhase::Ringing);
+        let candidates = session.ringing_relay_candidates().unwrap();
+        assert_eq!(candidates, vec![(0, 0, "127.0.0.1:6000".parse().unwrap())]);
+        let ringing_target = session
+            .ringing_relay_target(&state, authority(), 0, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ringing_target.endpoint, candidates[0].2);
+        assert_eq!(ringing_target.connection_id, 1);
+        assert!(session
+            .ringing_relay_target(&state, authority(), 0, 1)
+            .unwrap()
+            .is_none());
+        let mut revoked = authority();
+        revoked.account_generation += 1;
+        assert!(session.ringing_relay_target(&state, revoked, 0, 0).is_err());
         assert!(!session.media_ready(&state, authority()).unwrap());
         assert!(session.take_media(&state, authority(), 0, 0).is_err());
         assert!(p::optional(
@@ -2416,13 +2569,13 @@ mod tests {
             SyncProgress::MediaReady
         );
         assert!(session.media_ready(&state, authority()).unwrap());
-        assert_eq!(
-            session
-                .take_media(&state, authority(), 0, 0)
-                .unwrap()
-                .peer_member,
-            1
-        );
+        assert!(session.ringing_relay_candidates().is_err());
+        assert!(session
+            .ringing_relay_target(&state, authority(), 0, 0)
+            .is_err());
+        let media = session.take_media(&state, authority(), 0, 0).unwrap();
+        assert!(media.relay.target() == ringing_target);
+        assert_eq!(media.peer_member, 1);
     }
     #[test]
     fn pending_capability_shapes_are_checked_before_cursor_installation() {

@@ -44,6 +44,7 @@ enum Case {
     HoldPreAuth,
     HoldJoinReply,
     LostOwnerExit,
+    UnsupportedJoinMedia,
 }
 #[derive(Default)]
 struct Gate {
@@ -246,7 +247,12 @@ impl TestCallIo for Host {
             )),
             CallHostRoute::LiveSync => Ok(host_reply(&p::bytes(2, b"cursor"))),
             CallHostRoute::Transfer => match command {
-                Some(3361) => Ok(join_reply_with_media(3, self.ready_media, self.video_mode)),
+                Some(3361) => Ok(join_reply_with_media(
+                    3,
+                    self.ready_media,
+                    self.video_mode,
+                    matches!(self.case, Case::UnsupportedJoinMedia),
+                )),
                 Some(3197) => Ok(wrapped_reply(
                     3197,
                     &p::message(&[p::uint(1, ROOM), p::uint(2, ROOM_KEY), p::uint(3, 3)])?,
@@ -360,9 +366,19 @@ fn wrapped_reply(command: u32, body: &[u8]) -> Vec<u8> {
     .unwrap();
     host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
 }
-fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>, video_mode: bool) -> Vec<u8> {
+fn join_reply_with_media(
+    own_member: u16,
+    media: Option<ReadyMedia>,
+    video_mode: bool,
+    unsupported_media: bool,
+) -> Vec<u8> {
     let format = (u64::from(media.map_or(2, |media| media.frames_per_packet)) << 8) | 6;
-    let engine = p::message(&[p::uint(5, 17), p::uint(6, format), p::uint(7, 0x800000)]).unwrap();
+    let engine = p::message(&[
+        p::uint(5, if unsupported_media { 99 } else { 17 }),
+        p::uint(6, format),
+        p::uint(7, 0x800000),
+    ])
+    .unwrap();
     let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
     let capabilities = p::message(&[
         p::uint(1, 1),
@@ -394,9 +410,10 @@ fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>, video_mode:
         strategy_fields.push(p::uint(16, 1));
     }
     let strategy = p::message(&strategy_fields).unwrap();
-    // Only the dedicated localhost fixture supplies a ready media endpoint.
-    // Other actor fixtures still cannot start a media socket.
-    let av_status = u64::from(media.is_some());
+    // Only the dedicated localhost fixture supplies a ready media endpoint,
+    // except UnsupportedJoinMedia which sets av_status=1 so Join reaches
+    // profile_for_mode and fails with UnsupportedCallMedia before media starts.
+    let av_status = u64::from(media.is_some() || unsupported_media);
     let av = p::message(&[
         p::uint(3, 1),
         p::bytes(
@@ -1219,6 +1236,60 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
         );
     }
     assert!(!f.core.store.has_unresolved_call("one").unwrap());
+    // Pre-submit fencing (`CallRpcNotSubmitted`) never sent the Transfer, so the
+    // cached AppSession must stay intact for the next call.
+    assert!(f
+        .backend
+        .inner
+        .app_sessions
+        .lock()
+        .unwrap()
+        .contains_key("one"));
+}
+
+#[tokio::test]
+async fn incoming_join_unsupported_media_preserves_cached_app_session() {
+    let f = Fixture::new(Case::UnsupportedJoinMedia);
+    let mut client = f.client().await;
+    f.stage(false, 0);
+    let offer = f.offer().await;
+    f.core
+        .call_service("one")
+        .unwrap()
+        .command(
+            &client.client_id,
+            CallCommand::Answer {
+                request_id: "answer-unsupported".into(),
+                call_id: offer.call_id.clone(),
+                expected_revision: offer.revision,
+                camera_enabled: None,
+                muted: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut client, "answer-unsupported").await,
+        CallCommandStatus::Accepted
+    );
+    f.finished().await;
+    assert_eq!(
+        f.host.seen(),
+        [
+            (CallHostRoute::AppAuth, None),
+            (CallHostRoute::RingingAck, None),
+            (CallHostRoute::Transfer, Some(3361)),
+            (CallHostRoute::Transfer, Some(3380)),
+        ]
+    );
+    assert!(!f.core.store.has_unresolved_call("one").unwrap());
+    assert!(f
+        .backend
+        .inner
+        .app_sessions
+        .lock()
+        .unwrap()
+        .contains_key("one"));
 }
 
 #[tokio::test]

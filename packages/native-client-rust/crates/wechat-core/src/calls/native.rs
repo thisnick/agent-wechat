@@ -42,12 +42,13 @@ use wechat_calls::session::{
 };
 use wechat_protocol::{
     calls::{
-        app_session::AppAuthority,
+        app_session::{AppAuthority, AppSession},
         audio_packet::MediaEpoch,
         host_policy::{
             is_reject_request, is_teardown_request, selected_policy, CallHostPolicy, CallHostRoute,
         },
         personal::CallMediaMode,
+        relay::{RelayEpoch, RelayTarget},
         voice_offer::{VideoOfferOptions, VoiceOffer},
     },
     crypto, AccountState,
@@ -69,8 +70,9 @@ use wechat_protocol::NativeOptions;
 mod conference;
 mod incoming;
 mod media;
-use media::run as run_media;
-use wechat_calls::native_media::SubmissionGate as SendAdmission;
+use wechat_calls::native_media::{
+    preconnect_relay, PreconnectedRelay, SubmissionGate as SendAdmission,
+};
 mod transport_state;
 #[cfg(test)]
 mod transport_tests;
@@ -128,9 +130,74 @@ struct Inner {
     config: NativeCallConfig,
     active: Mutex<Option<Arc<Worker>>>,
     conferences: Mutex<BTreeMap<(String, String), Arc<conference::Pending>>>,
+    app_sessions: Mutex<BTreeMap<String, CachedAppSession>>,
     #[cfg(test)]
     test_io: Option<Arc<dyn TestCallIo>>,
 }
+const APP_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
+
+struct CachedAppSession {
+    session: AppSession,
+    cached_at: Instant,
+    cached_at_wall: SystemTime,
+    lease: CallAuthorityLease,
+}
+
+impl CachedAppSession {
+    fn current(&self) -> bool {
+        self.lease.current()
+            && self.cached_at.elapsed() < APP_SESSION_TTL
+            && self
+                .cached_at_wall
+                .elapsed()
+                .is_ok_and(|elapsed| elapsed < APP_SESSION_TTL)
+    }
+}
+
+impl Inner {
+    fn cached_app_session(&self, account: &str, authority: AppAuthority) -> Option<AppSession> {
+        let mut sessions = self.app_sessions.lock().ok()?;
+        sessions.retain(|_, cached| cached.current());
+        if let Some(cached) = sessions.get(account) {
+            if cached.session.validate_authority(authority).is_ok() {
+                return Some(cached.session.clone());
+            }
+            sessions.remove(account);
+        }
+        None
+    }
+
+    fn store_app_session(&self, lease: &CallAuthorityLease, session: AppSession) {
+        if let Ok(mut sessions) = self.app_sessions.lock() {
+            if lease.current() {
+                sessions.insert(
+                    lease.authority().account_id.clone(),
+                    CachedAppSession {
+                        session,
+                        cached_at: Instant::now(),
+                        cached_at_wall: SystemTime::now(),
+                        lease: lease.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn invalidate_app_session(&self, account: &str) {
+        if let Ok(mut sessions) = self.app_sessions.lock() {
+            sessions.remove(account);
+        }
+    }
+
+    fn invalidate_app_session_on_error<T>(&self, account: &str, result: Result<T>) -> Result<T> {
+        result.inspect_err(|error| {
+            if !error.is::<CallRpcNotSubmitted>() && !error.is::<UnsupportedCallMedia>() {
+                self.invalidate_app_session(account);
+            }
+        })
+    }
+}
+
 struct Worker {
     identity: CallIdentity,
     peer_id: String,
@@ -292,6 +359,7 @@ impl NativeCallBackend {
                 config: NativeCallConfig::default(),
                 active: Mutex::new(None),
                 conferences: Mutex::new(BTreeMap::new()),
+                app_sessions: Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 test_io: None,
             }),
@@ -444,8 +512,14 @@ impl CallBackend for NativeCallBackend {
     }
     fn authority(&self, account: &str) -> Option<AccountAuthority> {
         let core = self.inner.core.upgrade()?;
-        let lease = core.cached_call_authority(account)?;
-        lease.current().then(|| lease.authority().clone())
+        let authority = core
+            .cached_call_authority(account)
+            .filter(CallAuthorityLease::current)
+            .map(|lease| lease.authority().clone());
+        if authority.is_none() {
+            self.inner.invalidate_app_session(account);
+        }
+        authority
     }
     fn capabilities(&self, account: &str) -> CallCapabilities {
         let authorized = self.authority(account).is_some();
@@ -1040,12 +1114,53 @@ impl FencedTransport {
         }
     }
 }
+fn call_timing_enabled() -> bool {
+    std::env::var("WX_CALL_TIMING").as_deref() == Ok("1")
+}
+
+struct RpcTiming {
+    started: Instant,
+    exchange_started: Option<Instant>,
+    exchange_finished: Option<Instant>,
+    lock2_started: Option<Instant>,
+}
+
 impl PersonalTransport for FencedTransport {
     fn call_rpc(
         &self,
         state: &mut AccountState,
         route: CallHostRoute,
         request: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut timing = call_timing_enabled().then(|| RpcTiming {
+            started: Instant::now(),
+            exchange_started: None,
+            exchange_finished: None,
+            lock2_started: None,
+        });
+        let result = self.call_rpc_inner(state, route, request, &mut timing);
+        if let Some(t) = timing {
+            let end = Instant::now();
+            eprintln!(
+                "[wechat-call-timing] rpc route={route:?} lock1={}ms exchange={}ms lock2={}ms total={}ms ok={}",
+                t.exchange_started.unwrap_or(end).duration_since(t.started).as_millis(),
+                t.exchange_started.map_or(0, |start| t.exchange_finished.unwrap_or(end).duration_since(start).as_millis()),
+                t.lock2_started.map_or(0, |start| end.duration_since(start).as_millis()),
+                end.duration_since(t.started).as_millis(),
+                result.is_ok(),
+            );
+        }
+        result
+    }
+}
+
+impl FencedTransport {
+    fn call_rpc_inner(
+        &self,
+        state: &mut AccountState,
+        route: CallHostRoute,
+        request: &[u8],
+        timing: &mut Option<RpcTiming>,
     ) -> Result<Vec<u8>> {
         let core = self.core.upgrade().context("Call core closed")?;
         let guard = self.runtime.block_on(core.lock_account(&self.account))?;
@@ -1124,6 +1239,9 @@ impl PersonalTransport for FencedTransport {
         // The account writer is not a network-lifetime lock. A fresh owner or
         // account change can now be accepted while this one exchange waits.
         drop(guard);
+        if let Some(t) = timing {
+            t.exchange_started = Some(Instant::now());
+        }
         // The final check runs right before transport handoff, possibly on a
         // detached task, so it owns what it reads.
         let handed_off = Arc::new(AtomicBool::new(false));
@@ -1236,6 +1354,9 @@ impl PersonalTransport for FencedTransport {
                 }),
             )
         };
+        if let Some(t) = timing {
+            t.exchange_finished = Some(Instant::now());
+        }
         #[cfg(not(test))]
         if let Ok(accepted) = native.export_account_state() {
             exchanged = accepted;
@@ -1278,6 +1399,9 @@ impl PersonalTransport for FencedTransport {
                 handed_off,
             )
         };
+        if let Some(t) = timing {
+            t.lock2_started = Some(Instant::now());
+        }
         let reacquired = self.runtime.block_on(core.lock_account(&self.account));
         retained?;
         let _guard = reacquired?;
@@ -1330,6 +1454,180 @@ fn begin_operational_call(
         "Previous call requires reconciliation"
     );
     Ok(())
+}
+
+/// Maximum time to complete the relay handshake while ringing.
+const PRECONNECT_HANDSHAKE_BUDGET: Duration = Duration::from_secs(4);
+/// Maximum wait to reuse an in-flight incoming relay handshake after joining.
+const INCOMING_PRECONNECT_HANDOFF_WAIT: Duration = Duration::from_millis(250);
+/// Maximum wait to reuse an in-flight caller relay handshake after peer answer.
+const CALLER_PRECONNECT_HANDOFF_WAIT: Duration = Duration::from_millis(600);
+/// Stop keeping a pre-connected socket alive once it exceeds direct media's reuse age limit.
+const PRECONNECT_MAX_IDLE_AGE: Duration = Duration::from_secs(20);
+
+struct PreconnectHandle {
+    target: RelayTarget,
+    ready: Arc<AtomicBool>,
+    answering: Arc<AtomicBool>,
+    handoff: Arc<AtomicBool>,
+    abort: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<Option<PreconnectedRelay>>>,
+}
+
+impl PreconnectHandle {
+    fn start(
+        worker: &Arc<Worker>,
+        target: RelayTarget,
+        role: &'static str,
+        admission_current: impl Fn(bool) -> bool + Send + 'static,
+    ) -> Option<Self> {
+        let worker = worker.clone();
+        let ready_flag = Arc::new(AtomicBool::new(false));
+        let answering = Arc::new(AtomicBool::new(false));
+        let handoff = Arc::new(AtomicBool::new(false));
+        let abort = Arc::new(AtomicBool::new(false));
+        let thread_ready = ready_flag.clone();
+        let thread_answering = answering.clone();
+        let thread_handoff = handoff.clone();
+        let thread_abort = abort.clone();
+        let thread_target = target.clone();
+        let relay_epoch = RelayEpoch {
+            account_generation: nonzero64(worker.lease.authority().generation.as_bytes()),
+            logout_epoch: 0,
+            call_generation: nonzero64(worker.identity.call_id().as_bytes()),
+            key_generation: 1,
+            socket_generation: 1,
+            attempt_id: 1,
+        };
+        let handle = thread::Builder::new()
+            .name("wechat-call-preconnect".into())
+            .spawn(move || -> Option<PreconnectedRelay> {
+                let video_trace = std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1");
+                let started = Instant::now();
+                let can_continue = || {
+                    !thread_abort.load(Ordering::Acquire)
+                        && worker.current()
+                        && !worker.stop.load(Ordering::Acquire)
+                        && admission_current(thread_answering.load(Ordering::Acquire))
+                };
+                let handshake_current =
+                    || can_continue() && started.elapsed() < PRECONNECT_HANDSHAKE_BUDGET;
+                let mut ready = match preconnect_relay(
+                    &thread_target,
+                    relay_epoch,
+                    started,
+                    handshake_current,
+                    |socket, endpoint, packet| {
+                        ensure!(handshake_current(), "Call relay pre-connect stopped");
+                        ensure!(
+                            send_datagram(socket, endpoint, packet, &worker, &[])?,
+                            "Call relay pre-connect handoff stopped"
+                        );
+                        Ok(())
+                    },
+                ) {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        if video_trace {
+                            eprintln!(
+                                "[wechat-call-video] {role} relay preconnect skipped/failed endpoint={}: {error:#}",
+                                thread_target.endpoint
+                            );
+                        }
+                        return None;
+                    }
+                };
+                thread_ready.store(true, Ordering::Release);
+                if video_trace {
+                    eprintln!(
+                        "[wechat-call-video] {role} relay preconnected endpoint={} conn={} elapsed_ms={} early_pkts={}",
+                        ready.endpoint(),
+                        ready.connection_id(),
+                        started.elapsed().as_millis(),
+                        ready.early_packet_count()
+                    );
+                }
+                while !thread_handoff.load(Ordering::Acquire) {
+                    if !can_continue() || ready.age() >= PRECONNECT_MAX_IDLE_AGE {
+                        return None;
+                    }
+                    ready.drain_early_packets();
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if !can_continue() {
+                    return None;
+                }
+                ready.drain_early_packets();
+                Some(ready)
+            })
+            .ok()?;
+        Some(Self {
+            target,
+            ready: ready_flag,
+            answering,
+            handoff,
+            abort,
+            handle: Some(handle),
+        })
+    }
+
+    fn mark_answering(&self) {
+        self.answering.store(true, Ordering::Release);
+    }
+
+    fn claim(mut self, handoff_wait: Duration) -> Option<PreconnectedRelay> {
+        self.mark_answering();
+        self.handoff.store(true, Ordering::Release);
+        let handle = self.handle.take()?;
+        let wait_started = Instant::now();
+        while !self.ready.load(Ordering::Acquire) && !handle.is_finished() {
+            if wait_started.elapsed() >= handoff_wait {
+                self.abort.store(true, Ordering::Release);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let relay = handle.join().ok().flatten();
+        if self.abort.load(Ordering::Acquire) {
+            return None;
+        }
+        relay
+    }
+}
+
+impl Drop for PreconnectHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.abort.store(true, Ordering::Release);
+            let _ = handle.join();
+        }
+    }
+}
+
+fn start_caller_preconnect(
+    worker: &Arc<Worker>,
+    session: &NativePersonalSession,
+    state: &AccountState,
+    auth: AppAuthority,
+    sink: &BackendSink,
+) -> Option<PreconnectHandle> {
+    if session.phase() != PersonalPhase::Ringing
+        || worker.stop.load(Ordering::Acquire)
+        || !worker.current()
+        || !sink.is_current()
+    {
+        return None;
+    }
+    let candidates = session.ringing_relay_candidates().ok()?;
+    if candidates.is_empty() {
+        return None;
+    }
+    let (connection_index, udp_index) = media::select_relay_indices(&candidates);
+    let target = session
+        .ringing_relay_target(state, auth, connection_index, udp_index)
+        .ok()??;
+    let sink = sink.clone();
+    PreconnectHandle::start(worker, target, "caller", move |_| sink.is_current())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1391,6 +1689,7 @@ fn run_control(
     };
     parameters.apply_offer(&voice_offer);
     if worker.is_conference() {
+        inner.invalidate_app_session(account);
         return conference::run(
             &transport,
             state,
@@ -1408,14 +1707,36 @@ fn run_control(
             },
         );
     }
-    let mut session = NativePersonalSession::authenticate(
-        &transport,
-        &mut state,
-        auth,
-        tasks.host,
-        crypto::random::<32>()?,
-        parameters,
-    )?;
+    let cached = inner.cached_app_session(account, auth);
+    let cached_app = cached.is_some();
+    let timing = call_timing_enabled();
+    let auth_started = (timing && !cached_app).then(Instant::now);
+    let mut session = match cached {
+        Some(app) => NativePersonalSession::from_authenticated(&state, auth, app, parameters)?,
+        None => match NativePersonalSession::authenticate(
+            &transport,
+            &mut state,
+            auth,
+            tasks.host,
+            crypto::random::<32>()?,
+            parameters,
+        ) {
+            Ok(session) => {
+                inner.store_app_session(&worker.lease, session.app_session().clone());
+                session
+            }
+            Err(error) => {
+                if let Some(start) = auth_started {
+                    eprintln!(
+                        "[wechat-call-timing] dial cached_app=false auth={}ms invite=0ms",
+                        start.elapsed().as_millis()
+                    );
+                }
+                return Err(error);
+            }
+        },
+    };
+    let auth_ms = auth_started.map_or(0, |start| start.elapsed().as_millis());
     if worker.stop.load(Ordering::Acquire) || !worker.authorized() {
         core.store.finish_call(account, call_id, true)?;
         let _ = admitted.send(Ok(BackendOutcome::Ended));
@@ -1431,7 +1752,8 @@ fn run_control(
     } else {
         CallMediaMode::Voice
     };
-    if let Err(error) = session.invite_with_mode(
+    let invite_started = timing.then(Instant::now);
+    let invited = session.invite_with_mode(
         &transport,
         &mut state,
         auth,
@@ -1439,7 +1761,14 @@ fn run_control(
         mode,
         unix_ms()?,
         tasks.next()?,
-    ) {
+    );
+    let invite_ms = invite_started.map_or(0, |start| start.elapsed().as_millis());
+    if timing {
+        eprintln!(
+            "[wechat-call-timing] dial cached_app={cached_app} auth={auth_ms}ms invite={invite_ms}ms"
+        );
+    }
+    if let Err(error) = invited {
         if error.is::<UnsupportedCallMedia>() {
             worker.stop.store(true, Ordering::Release);
             core.store.put_runtime(
@@ -1461,7 +1790,9 @@ fn run_control(
     if let Some(code) = session.peer_member_status() {
         let _ = runtime.block_on(sink.peer_status(code));
     }
+    let preconnect = start_caller_preconnect(worker, &session, &state, auth, &sink);
     let ringing_end = Instant::now() + inner.config.ring_timeout;
+
     while !worker.stop.load(Ordering::Acquire) {
         ensure!(worker.authorized(), "Call authority revoked");
         match session.media_ready(&state, auth) {
@@ -1500,28 +1831,47 @@ fn run_control(
             Err(error) => return Err(error),
         }
     }
+    let prepared_media = if worker.stop.load(Ordering::Acquire) {
+        drop(preconnect);
+        None
+    } else {
+        ensure!(
+            session.phase() == PersonalPhase::Joined,
+            "Peer call admission incomplete"
+        );
+        let (connection_index, udp_index) =
+            media::select_relay_indices(&session.relay_candidates()?);
+        let negotiated = session.take_media(&state, auth, connection_index, udp_index)?;
+        let preconnected = preconnect
+            .filter(|pre| pre.target == negotiated.relay.target())
+            .and_then(|pre| pre.claim(CALLER_PRECONNECT_HANDOFF_WAIT));
+        Some((negotiated, preconnected))
+    };
     if worker.stop.load(Ordering::Acquire) {
+        drop(prepared_media);
         let _ = runtime.block_on(sink.ending());
         let result = if session.phase() == PersonalPhase::Finished {
             Ok(())
         } else if session.phase() == PersonalPhase::TerminalPending {
-            session.finish_remote(&transport, &mut state, auth, tasks.next()?, false)
+            inner.invalidate_app_session_on_error(
+                account,
+                session.finish_remote(&transport, &mut state, auth, tasks.next()?, false),
+            )
         } else if session.phase() == PersonalPhase::Ringing {
             session.cancel(&transport, &mut state, auth, tasks.next()?)
         } else if session.phase() == PersonalPhase::Joined {
-            session.exit(&transport, &mut state, auth, tasks.next()?, false)
+            inner.invalidate_app_session_on_error(
+                account,
+                session.exit(&transport, &mut state, auth, tasks.next()?, false),
+            )
         } else {
             bail!("Call termination state unknown")
         };
         core.store.finish_call(account, call_id, result.is_ok())?;
         return result;
     }
-    ensure!(
-        session.phase() == PersonalPhase::Joined,
-        "Peer call admission incomplete"
-    );
-    let (connection_index, udp_index) = media::select_relay_indices(&session.relay_candidates()?);
-    let negotiated = session.take_media(&state, auth, connection_index, udp_index)?;
+    ensure!(worker.current(), "Call authority revoked");
+    let (negotiated, preconnected) = prepared_media.context("Peer call admission incomplete")?;
     if let Some(code) = session.peer_member_status() {
         let _ = runtime.block_on(sink.peer_status(code));
     }
@@ -1538,13 +1888,14 @@ fn run_control(
     let media_thread = thread::Builder::new()
         .name("wechat-call-media".into())
         .spawn(move || {
-            let result = run_media(
+            let result = media::run_with_preconnected_relay(
                 &cfg,
                 &media_worker,
                 negotiated,
                 audio,
                 is_video.then_some(video),
                 keyframe_rx,
+                preconnected,
                 &media_sink,
                 &media_runtime,
             );
@@ -1584,14 +1935,17 @@ fn run_control(
                 let cam = is_video && cam;
                 let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
                 last_av_ts = last_av_ts.saturating_add(1).max(now);
-                session.switch_av(
-                    &transport,
-                    &mut state,
-                    auth,
-                    mic,
-                    cam,
-                    last_av_ts,
-                    tasks.next()?,
+                inner.invalidate_app_session_on_error(
+                    account,
+                    session.switch_av(
+                        &transport,
+                        &mut state,
+                        auth,
+                        mic,
+                        cam,
+                        last_av_ts,
+                        tasks.next()?,
+                    ),
                 )
             })?;
             match session.poll(&transport, &mut state, auth, tasks.next()?) {
@@ -1647,10 +2001,14 @@ fn run_control(
     ensure!(worker.authorized(), "Call authority revoked before Exit");
     let ended = match session.phase() {
         PersonalPhase::Finished => Ok(()),
-        PersonalPhase::TerminalPending => {
-            session.finish_remote(&transport, &mut state, auth, tasks.next()?, false)
-        }
-        PersonalPhase::Joined => session.exit(&transport, &mut state, auth, tasks.next()?, false),
+        PersonalPhase::TerminalPending => inner.invalidate_app_session_on_error(
+            account,
+            session.finish_remote(&transport, &mut state, auth, tasks.next()?, false),
+        ),
+        PersonalPhase::Joined => inner.invalidate_app_session_on_error(
+            account,
+            session.exit(&transport, &mut state, auth, tasks.next()?, false),
+        ),
         _ => bail!("Call termination state unknown"),
     };
     core.store.finish_call(account, call_id, ended.is_ok())?;

@@ -99,6 +99,38 @@ impl NativeIncomingSession {
         notification: &InviteNotification,
         expected_caller: &str,
     ) -> Result<Self> {
+        let invite = Self::prepare_invite(state, &mut parameters, notification, expected_caller)?;
+        let base = NativePersonalSession::authenticate(
+            client, state, authority, host_task, device32, parameters,
+        )?;
+        Ok(Self::with_base(base, invite))
+    }
+
+    /// Prepare an incoming call using an already verified app identity.
+    pub fn from_authenticated(
+        state: &AccountState,
+        authority: AppAuthority,
+        app: AppSession,
+        mut parameters: VoiceParameters,
+        invite: &InviteNotification,
+        caller: &str,
+    ) -> Result<Self> {
+        let invite = Self::prepare_invite(state, &mut parameters, invite, caller)?;
+        let base = NativePersonalSession::from_authenticated(state, authority, app, parameters)?;
+        Ok(Self::with_base(base, invite))
+    }
+
+    /// The verified app identity used by this incoming call.
+    pub fn app_session(&self) -> &AppSession {
+        self.base.app_session()
+    }
+
+    fn prepare_invite(
+        state: &AccountState,
+        parameters: &mut VoiceParameters,
+        notification: &InviteNotification,
+        expected_caller: &str,
+    ) -> Result<Invite> {
         ensure!(
             notification.unknown_fields.is_empty(),
             "Unknown incoming invitation fields"
@@ -181,12 +213,20 @@ impl NativeIncomingSession {
                 "Incoming member collision"
             );
         }
-        let mut base = NativePersonalSession::authenticate(
-            client, state, authority, host_task, device32, parameters,
-        )?;
+        Ok(Invite {
+            room,
+            caller: expected_caller.to_owned(),
+            caller_openid,
+            callee_openid,
+            caller_member,
+            video_mode,
+        })
+    }
+
+    fn with_base(mut base: NativePersonalSession, invite: Invite) -> Self {
         base.control = Some(PersonalControl {
-            identity: room,
-            peer: expected_caller.to_owned(),
+            identity: invite.room,
+            peer: invite.caller.clone(),
             origin: ControlOrigin::Incoming,
             peer_status: None,
             peer_joined: None,
@@ -195,22 +235,15 @@ impl NativeIncomingSession {
             pending_recipients: vec![],
         });
         base.phase = PersonalPhase::Ringing;
-        base.video_mode = video_mode;
-        Ok(Self {
+        base.video_mode = invite.video_mode;
+        Self {
             base,
-            invite: Invite {
-                room,
-                caller: expected_caller.to_owned(),
-                caller_openid,
-                callee_openid,
-                caller_member,
-                video_mode,
-            },
+            invite,
             phase: IncomingPhase::Invited,
             ack_spent: false,
             join_spent: false,
             reject_spent: false,
-        })
+        }
     }
     pub fn phase(&self) -> IncomingPhase {
         self.phase
@@ -798,22 +831,11 @@ impl NativeIncomingSession {
             self.phase == IncomingPhase::Acknowledged,
             "Incoming ringing relay unavailable"
         );
-        let active = self
-            .base
-            .active
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Missing incoming room"))?;
-        match RelayTarget::from_strategy(
-            active.identity.room,
-            active.identity.room_key,
-            active.identity.own_member as u16,
-            &active.strategy,
+        self.base.ringing_relay_target_for_active(
             connection_index,
             udp_index,
-        ) {
-            Ok(target) => Ok(Some(target)),
-            Err(_) => Ok(None),
-        }
+            "Missing incoming room",
+        )
     }
     pub fn take_media(
         &mut self,
@@ -931,6 +953,40 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn from_authenticated_reuses_only_matching_app_authority() {
+        let state = state();
+        let authority = authority();
+        let app = PendingAppAuth::new(authority, [9; 32])
+            .unwrap()
+            .complete(&auth_reply(), authority)
+            .unwrap();
+        let invite = notification();
+        let mismatched = AppAuthority {
+            logout_epoch: 1,
+            ..authority
+        };
+        assert!(NativeIncomingSession::from_authenticated(
+            &state,
+            mismatched,
+            app.clone(),
+            parameters(),
+            &invite,
+            "peer"
+        )
+        .is_err());
+        let session = NativeIncomingSession::from_authenticated(
+            &state,
+            authority,
+            app,
+            parameters(),
+            &invite,
+            "peer",
+        )
+        .unwrap();
+        assert_eq!(session.app_session().app_uin(), 17);
+    }
+
     fn ack_reply() -> Vec<u8> {
         host_reply(&p::bytes(
             1,

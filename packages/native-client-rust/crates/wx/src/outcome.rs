@@ -162,6 +162,29 @@ pub fn record(value: &Value) {
         set_exit(result_exit(value));
     }
 }
+pub fn json_error(described: &ClassifiedError) -> Value {
+    let mut error = json!({
+        "code": described.code,
+        "message": described.message,
+        "retryable": described.retryable,
+    });
+    if !described.next.is_empty() {
+        error["next"] = json!(described.next);
+    }
+    if described.exit == 1 && described.code == "operation_failed" {
+        error["report"] = json!("wx feedback --json");
+    }
+    json!({ "error": error })
+}
+pub fn human_error_hint(described: &ClassifiedError) -> Option<&'static str> {
+    (described.exit == 1
+        && described.code == "operation_failed"
+        && !described
+            .next
+            .iter()
+            .any(|step| step.contains("wx feedback")))
+    .then_some("If this looks like a bug, run `wx feedback` to file a bug report.")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +225,62 @@ mod tests {
         assert_eq!(described.code, "daemon_not_running");
         assert!(described.retryable);
         assert_eq!(described.next, vec!["wx daemon start"]);
+    }
+    #[test]
+    fn unexpected_operation_failed_errors_include_feedback_report_guidance() {
+        let described = describe(&anyhow::anyhow!("unexpected internal state"));
+        assert_eq!(
+            (described.exit, described.code.as_str()),
+            (1, "operation_failed")
+        );
+        let unexpected = json_error(&described);
+        assert_eq!(unexpected["error"]["report"], "wx feedback --json");
+        assert_eq!(unexpected["error"]["retryable"], false);
+        assert!(unexpected["error"].get("next").is_none());
+        assert!(human_error_hint(&described)
+            .unwrap()
+            .contains("wx feedback"));
+
+        // Exit-1 error with a `next` step (e.g. `wx serve` -> `wx daemon doctor`)
+        // preserves `next` alongside `report` without duplicating or contradicting it.
+        let mut with_doctor = described.clone();
+        with_doctor.next.push("wx daemon doctor".into());
+        let with_doctor_json = json_error(&with_doctor);
+        assert_eq!(
+            with_doctor_json["error"]["next"],
+            json!(["wx daemon doctor"])
+        );
+        assert_eq!(with_doctor_json["error"]["report"], "wx feedback --json");
+        assert!(human_error_hint(&with_doctor)
+            .unwrap()
+            .contains("wx feedback"));
+
+        // Classified errors (including #764 structured errors with `next`) omit
+        // the bug-report field and hint.
+        let daemon_stopped = describe(&failure_with_next(
+            3,
+            "daemon_not_running",
+            "No wx daemon is listening on 127.0.0.1:6174.",
+            true,
+            vec!["wx daemon start".into()],
+        ));
+        let daemon_json = json_error(&daemon_stopped);
+        assert_eq!(daemon_json["error"]["next"], json!(["wx daemon start"]));
+        assert!(daemon_json["error"].get("report").is_none());
+        assert!(human_error_hint(&daemon_stopped).is_none());
+
+        for (classified_exit, classified_code) in [
+            (2, "invalid_configuration_or_input"),
+            (3, "endpoint_unavailable"),
+            (4, "unauthorized"),
+            (5, "needs_login"),
+            (9, "browser_open_failed"),
+        ] {
+            let classified = describe(&failure(classified_exit, classified_code, "classified"));
+            let payload = json_error(&classified);
+            assert!(payload["error"].get("report").is_none());
+            assert_eq!(payload["error"]["retryable"], classified_exit == 3);
+            assert!(human_error_hint(&classified).is_none());
+        }
     }
 }
