@@ -1,5 +1,28 @@
 # @agent-wechat/desktop
 
+## 3.3.0
+
+### Minor Changes
+
+- [#738](https://github.com/thisnick/agent-wechat/pull/738) [`d68e787`](https://github.com/thisnick/agent-wechat/commit/d68e78773c14f84c82ecee060abadd05bb4c433a) Thanks [@thisnick](https://github.com/thisnick)! - Add headless, automation-friendly `wx calls session` commands with synthetic audio/video sources, live FFT and video metrics, frame snapshots, WAV/video recording, and event/media wait predicates. Emit direct-call `call.peer_status` signaling updates on Calls Protocol v3, propagate direct voice call mute/unmute state over `SwitchAV`, and ignore unknown future post-handshake call server event types in Rust and TypeScript clients.
+
+  Because `call.peer_status` is emitted on protocol v3 and older released clients disconnect on unknown event types, upgrade call clients (`wx`, desktop app, OpenClaw plugin, and `@agent-wechat/shared` SDK consumers) together with the daemon.
+
+### Patch Changes
+
+- [#746](https://github.com/thisnick/agent-wechat/pull/746) [`e117dde`](https://github.com/thisnick/agent-wechat/commit/e117ddee0297d4191dcc0568db58e172f5da528a) Thanks [@teest114514](https://github.com/teest114514)! - Split `PlaybackHandle`'s producer resampler lock from the audio output queue lock so real-time audio drain never blocks on producer resampling, while preserving stale-token checks and resampling capacity preflight.
+
+- [#745](https://github.com/thisnick/agent-wechat/pull/745) [`fad3078`](https://github.com/thisnick/agent-wechat/commit/fad3078288019c5c5b2e7206091387f937162fe0) Thanks [@teest114514](https://github.com/teest114514)! - Reduce direct-call setup and media-startup latency by caching lease-fenced `AppSession` identities per account and reusing ringing-phase UDP relay pre-connection for outgoing calls as well as incoming calls.
+
+- [#748](https://github.com/thisnick/agent-wechat/pull/748) [`4f821a4`](https://github.com/thisnick/agent-wechat/commit/4f821a44c264e92bfcebf1ad5adf5981dfb48720) Thanks [@teest114514](https://github.com/teest114514)! - Stream desktop HTTP proxy uploads as raw binary Tauri IPC chunks instead of JSON byte arrays, and stream responses as binary frames instead of base64 strings.
+
+- [#747](https://github.com/thisnick/agent-wechat/pull/747) [`18f18dc`](https://github.com/thisnick/agent-wechat/commit/18f18dcbd87f896106d7371ff0d65374a01dd84f) Thanks [@teest114514](https://github.com/teest114514)! - Keep cached media and avatar recency metadata separate from their file bytes so opening a cached image, video, or avatar does not write its contents back to disk or load full payloads for cache stats and eviction. Local cache storage is upgraded to a new schema version (waiting up to 3 seconds if another open tab holds the previous version); installing an earlier version afterwards turns off local cache persistence (including reading saved drafts and pending-send receipts) until app data is cleared or you upgrade again.
+
+- [#760](https://github.com/thisnick/agent-wechat/pull/760) [`8f3602d`](https://github.com/thisnick/agent-wechat/commit/8f3602d16b5bd370573937bb3e470eb595880d34) Thanks [@thisnick](https://github.com/thisnick)! - The daemon now starts when an interrupted open (for example after a crash, power loss, or full disk) leaves SQLite's 3-byte `-shm` file beside `registry.sqlite` or `control.sqlite`. It keeps a pre-open copy in `.sqlite-recovery-…`, verifies any `-wal` log standalone, and lets SQLite rebuild the `-shm` index. Unexpected 3-byte contents and other non-block `-shm` lengths are still refused with existing files preserved.
+
+- Updated dependencies [[`4f821a4`](https://github.com/thisnick/agent-wechat/commit/4f821a44c264e92bfcebf1ad5adf5981dfb48720), [`18f18dc`](https://github.com/thisnick/agent-wechat/commit/18f18dcbd87f896106d7371ff0d65374a01dd84f)]:
+  - @agent-wechat/client-ui@0.7.3
+
 ## 3.2.1
 
 ### Patch Changes
