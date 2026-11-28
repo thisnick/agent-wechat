@@ -90,10 +90,49 @@ jobs:
           ctx="$RUNNER_TEMP/review-context"
           mkdir -p "$ctx"
           gh pr view "$PR_NUMBER" -R "$GITHUB_REPOSITORY" \
-            --json title,body,author,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,files,commits,labels > "$ctx/pr.json"
+            --json title,body,author,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,files,commits,labels,closingIssuesReferences > "$ctx/pr.json"
           gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --jq '.[]' > "$ctx/comments.jsonl"
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --paginate --jq '.[]' > "$ctx/review-comments.jsonl"
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' > "$ctx/reviews.jsonl"
+          mkdir -p "$ctx/issues"
+          python3 - "$ctx/pr.json" "$GITHUB_REPOSITORY" "$PR_NUMBER" <<'PY' | while IFS= read -r num; do
+          import json, re, sys
+          with open(sys.argv[1]) as fh:
+              pr = json.load(fh)
+          repo_name = sys.argv[2]
+          repo = re.escape(repo_name)
+          self_num = sys.argv[3]
+          seen = []
+          for item in pr.get("closingIssuesReferences") or []:
+              ref_repo = item.get("repository") or {}
+              owner = (ref_repo.get("owner") or {}).get("login", "")
+              name = ref_repo.get("name", "")
+              if f"{owner}/{name}".lower() != repo_name.lower():
+                  continue
+              num = item.get("number")
+              if isinstance(num, int) and not isinstance(num, bool) and num > 0:
+                  num_str = str(num)
+                  if num_str != self_num and num_str not in seen:
+                      seen.append(num_str)
+          text = "\n".join(filter(None, [pr.get("title"), pr.get("body")]))
+          pattern = re.compile(
+              rf"(?<![A-Za-z0-9_./-])#([1-9][0-9]{{0,6}})\b|https?://github\.com/{repo}/(?:issues|pull)/([1-9][0-9]{{0,6}})\b",
+              re.IGNORECASE,
+          )
+          for match in pattern.finditer(text):
+              num = match.group(1) or match.group(2)
+              if num != self_num and num not in seen:
+                  seen.append(num)
+                  if len(seen) >= 10:
+                      break
+          for num in seen[:10]:
+              print(num)
+          PY
+            if ! gh issue view "$num" -R "$GITHUB_REPOSITORY" \
+              --json number,title,state,body,labels,comments > "$ctx/issues/$num.json" 2>/dev/null; then
+              rm -f "$ctx/issues/$num.json"
+            fi
+          done
           git diff --stat=200 review/base...review/head > "$ctx/diffstat.txt"
           git diff review/base...review/head > "$ctx/diff.patch"
           { echo "PR_DIR=$RUNNER_TEMP/pr"; echo "CONTEXT_DIR=$ctx"; echo "HEAD_SHA=$head"; } >> "$GITHUB_ENV"
@@ -127,18 +166,18 @@ jobs:
           # The inline-comment MCP server starts only when --allowedTools names it.
           # dontAsk denies every tool call the lists below don't allow, instead of
           # the action's default auto mode. The reviewer reads and comments: it
-          # can't edit files, use the web or redirect gh to another host/repo,
-          # write files through git's --output or read outside the checkouts
-          # through --no-index or /proc / /sys, or call gh api (comments and
-          # reviews are pre-fetched into $CONTEXT_DIR).
+          # can't edit files, use the web or gh (PR metadata, comments, reviews
+          # and linked issues are pre-fetched into $CONTEXT_DIR), write files
+          # through git's --output, or read outside the checkouts through
+          # --no-index or /proc / /sys.
           claude_args: |
             --model claude-opus-5-5
             --permission-mode dontAsk
             --add-dir ${{ env.PR_DIR }}
             --add-dir ${{ env.CONTEXT_DIR }}
             --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The review summary in Markdown, in the layout the instructions give"},"confidence":{"type":"integer","minimum":1,"maximum":10,"description":"Confidence in the pull request, from 1 to 10, as the instructions define it"},"important":{"type":"integer","minimum":0,"description":"Number of Important findings"},"nits":{"type":"integer","minimum":0,"description":"Number of Nit findings"},"preexisting":{"type":"integer","minimum":0,"description":"Number of Pre-existing findings"}},"required":["summary","confidence","important","nits","preexisting"],"additionalProperties":false}'
-            --allowedTools "Read" "Grep" "Glob" "mcp__github_inline_comment__create_inline_comment" "Agent" "Task" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh issue view:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git -C ${{ env.PR_DIR }} log:*)" "Bash(git -C ${{ env.PR_DIR }} show:*)" "Bash(git -C ${{ env.PR_DIR }} diff:*)"
-            --disallowedTools "Edit" "Write" "NotebookEdit" "WebFetch" "WebSearch" "Read(//proc/**)" "Read(//sys/**)" "Grep(//proc/**)" "Grep(//sys/**)" "Glob(//proc/**)" "Glob(//sys/**)" "Bash(*--output*)" "Bash(*--no-index*)" "Bash(gh * -R*)" "Bash(gh * -cR*)" "Bash(gh * -cw*)" "Bash(gh * -eR*)" "Bash(gh *--repo*)" "Bash(gh *--hostname*)" "Bash(gh *://*)" "Bash(gh * -w*)" "Bash(gh *--web*)"
+            --allowedTools "Read" "Grep" "Glob" "mcp__github_inline_comment__create_inline_comment" "Agent" "Task" "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git -C ${{ env.PR_DIR }} log:*)" "Bash(git -C ${{ env.PR_DIR }} show:*)" "Bash(git -C ${{ env.PR_DIR }} diff:*)"
+            --disallowedTools "Edit" "Write" "NotebookEdit" "WebFetch" "WebSearch" "Read(//proc/**)" "Read(//sys/**)" "Grep(//proc/**)" "Grep(//sys/**)" "Glob(//proc/**)" "Glob(//sys/**)" "Bash(*--output*)" "Bash(*--no-index*)"
 
       # The steps below trust two files from the workspace. Stop if anything
       # during the review changed them.
