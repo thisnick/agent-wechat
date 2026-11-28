@@ -3,18 +3,103 @@
 use super::*;
 use crate::{
     call_types::*,
-    calls::{notifications::*, service::ControlConnection},
+    calls::{
+        notifications::*,
+        service::{CallService, ControlConnection},
+    },
     Store,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::sync::Condvar;
 use wechat_protocol::{
+    calls::app_session::PendingAppAuth,
     wire::{self, SyncBatch, SyncCommand},
     AuthSnapshot, DeviceProfile,
 };
 
 const OWN: &str = "synthetic_self";
 const PEER: &str = "synthetic_peer";
+
+fn synthetic_account() -> (tempfile::TempDir, Arc<Core>) {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+    store.create_account("one").unwrap();
+    let core = Core::new(store.clone(), None).unwrap();
+    store.put_runtime("one", "desired", b"connected").unwrap();
+    store
+        .mark_validated_if_active("one", &core.ownership_generation)
+        .unwrap();
+    let mut auth_snapshot = AuthSnapshot::default();
+    auth_snapshot.response = p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 0)]).unwrap();
+    let state = AccountState {
+        schema: 1,
+        device: DeviceProfile::generate("Synthetic Linux".into()).unwrap(),
+        uin: 1,
+        own_username: OWN.into(),
+        cookie: vec![],
+        session_key: vec![1; 16],
+        request_key: vec![2; 24],
+        response_key: vec![3; 24],
+        auto_auth_key: vec![],
+        key_info: vec![],
+        database_password: vec![],
+        auth_snapshot,
+        long_host: "synthetic-unused.weixin.qq.com".into(),
+        short_host: "synthetic-unused.weixin.qq.com".into(),
+    };
+    core.save_state("one", &state).unwrap();
+    (temp, core)
+}
+
+fn app_authority(core: &Core, lease: &CallAuthorityLease) -> AppAuthority {
+    AppAuthority {
+        account_generation: nonzero64(lease.authority().generation.as_bytes()),
+        logout_epoch: 0,
+        credential_digest: authorization(&core.account_state("one").unwrap()).unwrap(),
+    }
+}
+
+#[test]
+fn app_session_cache_is_fenced_by_errors_and_account_authority() {
+    let (_temp, core) = synthetic_account();
+    let backend = NativeCallBackend::new(Arc::downgrade(&core));
+    let inner = &backend.inner;
+    let lease = core.call_authority("one").unwrap();
+    let auth = app_authority(&core, &lease);
+    let app = PendingAppAuth::new(auth, [9; 32])
+        .unwrap()
+        .complete(&reply(CallHostRoute::AppAuth), auth)
+        .unwrap();
+
+    assert!(inner.cached_app_session("one", auth).is_none());
+    inner.store_app_session(&lease, app.clone());
+    inner
+        .invalidate_app_session_on_error("one", Ok(()))
+        .unwrap();
+    assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
+    assert!(inner.cached_app_session("other", auth).is_none());
+    let error = inner.invalidate_app_session_on_error::<()>(
+        "one",
+        Err(anyhow::anyhow!("synthetic app failure")),
+    );
+    assert_eq!(error.unwrap_err().to_string(), "synthetic app failure");
+    assert!(inner.cached_app_session("one", auth).is_none());
+
+    inner.store_app_session(&lease, app.clone());
+    let changed = AppAuthority {
+        logout_epoch: 1,
+        ..auth
+    };
+    assert!(inner.cached_app_session("one", changed).is_none());
+    assert!(inner.cached_app_session("one", auth).is_none());
+
+    inner.store_app_session(&lease, app);
+    core.fence_call_authority("one");
+    assert!(!lease.current());
+    assert!(inner.cached_app_session("one", auth).is_none());
+    assert!(inner.app_sessions.lock().unwrap().is_empty());
+}
+
 struct Captured {
     request: IncomingRequest,
     complete: oneshot::Sender<IncomingPreparation>,
@@ -274,6 +359,7 @@ fn reply(route: CallHostRoute) -> Vec<u8> {
             p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &unify)]).unwrap()
         }
         CallHostRoute::LiveSync => p::bytes(2, b"synthetic-cursor"),
+        CallHostRoute::Cancel => p::bytes(1, &p::message(&[p::uint(1, 7), p::uint(2, 9)]).unwrap()),
         _ => panic!("unexpected synthetic host route"),
     };
     p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
@@ -290,33 +376,8 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(hold: Hold) -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
-        store.create_account("one").unwrap();
-        let core = Core::new(store.clone(), None).unwrap();
-        store.put_runtime("one", "desired", b"connected").unwrap();
-        store
-            .mark_validated_if_active("one", &core.ownership_generation)
-            .unwrap();
-        let mut auth_snapshot = AuthSnapshot::default();
-        auth_snapshot.response = p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 0)]).unwrap();
-        let state = AccountState {
-            schema: 1,
-            device: DeviceProfile::generate("Synthetic Linux".into()).unwrap(),
-            uin: 1,
-            own_username: OWN.into(),
-            cookie: vec![],
-            session_key: vec![1; 16],
-            request_key: vec![2; 24],
-            response_key: vec![3; 24],
-            auto_auth_key: vec![],
-            key_info: vec![],
-            database_password: vec![],
-            auth_snapshot,
-            long_host: "synthetic-unused.weixin.qq.com".into(),
-            short_host: "synthetic-unused.weixin.qq.com".into(),
-        };
-        core.save_state("one", &state).unwrap();
+        let (temp, core) = synthetic_account();
+        let store = &core.store;
         let (captured, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let backend = Arc::new(Backend {
             core: Arc::downgrade(&core),
@@ -460,6 +521,7 @@ impl Fixture {
                         .body()
                         .to_vec()
                 }
+                CallHostRoute::Invite | CallHostRoute::Cancel => p::bytes(1, b"forbidden"),
                 _ => panic!("unsupported synthetic request"),
             }),
             unknown_fields: vec![],
@@ -491,6 +553,314 @@ impl Drop for Fixture {
         }
     }
 }
+
+#[tokio::test]
+async fn outgoing_app_auth_cleanup_admits_only_app_auth_without_an_owner_sink() {
+    let mut f = Fixture::new(Hold::AfterHandoff).await;
+    Arc::get_mut(&mut f.transport).unwrap().admission = ControlAdmission::OutgoingAppAuthCleanup;
+    f.host.release();
+    for route in [CallHostRoute::Invite, CallHostRoute::Cancel] {
+        let (_, result) = f.start(route, 1).await.unwrap();
+        assert!(result.unwrap_err().is::<CallRpcNotSubmitted>());
+    }
+    let (_, result) = f.start(CallHostRoute::AppAuth, 2).await.unwrap();
+    assert_eq!(result.unwrap(), reply(CallHostRoute::AppAuth));
+    assert_eq!(f.host.submitted.load(Ordering::Acquire), 1);
+    let records = f.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, CallHostRoute::AppAuth.command());
+}
+
+fn dial_invite_reply(peer_status: u64) -> Vec<u8> {
+    let member = |name: &str, id, status| {
+        p::bytes(
+            2,
+            &p::message(&[
+                p::bytes(1, name.as_bytes()),
+                p::uint(2, id),
+                p::uint(3, status),
+                p::bytes(7, name.as_bytes()),
+            ])
+            .unwrap(),
+        )
+    };
+    let roster = p::message(&[
+        p::uint(1, 1),
+        member(OWN, 0, 1),
+        member(PEER, 1, peer_status),
+    ])
+    .unwrap();
+    let engine = p::message(&[p::uint(5, 17), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap();
+    let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
+    let cap = p::message(&[
+        p::uint(1, 1),
+        p::bytes(
+            2,
+            &p::message(&[p::bytes(1, &engine), p::bytes(2, &channel)]).unwrap(),
+        ),
+    ])
+    .unwrap();
+    // Deliberately omit relay endpoints: the ringing actor cannot open a socket.
+    let strategy = p::message(&[p::bytes(13, &cap), p::uint(14, 0)]).unwrap();
+    let av = p::message(&[
+        p::uint(3, 1),
+        p::bytes(4, &p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap()),
+        p::bytes(4, &p::message(&[p::uint(1, 1), p::uint(2, 0)]).unwrap()),
+    ])
+    .unwrap();
+    let client = p::message(&[
+        p::bytes(1, &strategy),
+        p::bytes(2, &roster),
+        p::bytes(3, &av),
+        p::uint(5, 99),
+        p::bytes(6, b"initial"),
+    ])
+    .unwrap();
+    let body = p::message(&[
+        p::uint(1, 7),
+        p::uint(2, 9),
+        p::uint(3, 0),
+        p::bytes(4, b"group"),
+        p::bytes(5, &client),
+    ])
+    .unwrap();
+    p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
+}
+
+struct DialHost {
+    peer_status: u64,
+    fail_auth: bool,
+    drop_owner: Mutex<Option<ControlConnection>>,
+    submitted: Mutex<Vec<CallHostRoute>>,
+}
+impl TestCallIo for DialHost {
+    fn call(
+        &self,
+        _: &mut AccountState,
+        route: CallHostRoute,
+        _: &[u8],
+        handoff: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        handoff()?;
+        self.submitted.lock().unwrap().push(route);
+        match route {
+            CallHostRoute::Invite => {
+                drop(self.drop_owner.lock().unwrap().take());
+                Ok(dial_invite_reply(self.peer_status))
+            }
+            CallHostRoute::AppAuth if self.fail_auth => {
+                bail!("synthetic post-handoff AppAuth failure")
+            }
+            CallHostRoute::AppAuth | CallHostRoute::Cancel => Ok(reply(route)),
+            _ => bail!("unexpected synthetic dial route {route:?}"),
+        }
+    }
+}
+
+struct DialFixture {
+    _temp: tempfile::TempDir,
+    core: Arc<Core>,
+    backend: Arc<NativeCallBackend>,
+    service: Arc<CallService>,
+    host: Arc<DialHost>,
+}
+impl DialFixture {
+    fn new(peer_status: u64, fail_auth: bool) -> Self {
+        let (temp, core) = synthetic_account();
+        let host = Arc::new(DialHost {
+            peer_status,
+            fail_auth,
+            drop_owner: Mutex::new(None),
+            submitted: Mutex::new(vec![]),
+        });
+        let mut backend = NativeCallBackend::new(Arc::downgrade(&core));
+        let inner = Arc::get_mut(&mut backend.inner).unwrap();
+        inner.test_io = Some(host.clone());
+        // Cancel immediately after auth instead of waiting or polling for a peer.
+        inner.config.ring_timeout = Duration::ZERO;
+        let backend = Arc::new(backend);
+        let service = Arc::new(CallService::new(backend.clone()));
+        Self {
+            _temp: temp,
+            core,
+            backend,
+            service,
+            host,
+        }
+    }
+
+    async fn dial(
+        &self,
+        request_id: &str,
+        drop_owner: bool,
+    ) -> (String, BackendOutcome, Vec<CallHostRoute>) {
+        let mut observer = self
+            .service
+            .connect("one", "dial-observer", false)
+            .await
+            .unwrap();
+        let mut owner = self
+            .service
+            .connect("one", "dial-owner", true)
+            .await
+            .unwrap();
+        let owner_id = owner.client_id.clone();
+        self.service
+            .command(
+                &owner_id,
+                CallCommand::Ready {
+                    request_id: "ready".into(),
+                    ready: true,
+                    format: CallAudioFormat::default(),
+                    video: None,
+                    scope: None,
+                },
+            )
+            .await
+            .unwrap();
+        loop {
+            if let CallEvent::CommandResult { status, .. } = owner.events.try_recv().unwrap() {
+                assert_eq!(status, CallCommandStatus::Accepted);
+                break;
+            }
+        }
+        let _owner = if drop_owner {
+            *self.host.drop_owner.lock().unwrap() = Some(owner);
+            None
+        } else {
+            Some(owner)
+        };
+        self.service
+            .command(
+                &owner_id,
+                CallCommand::Dial {
+                    request_id: request_id.into(),
+                    target: CallTarget::Direct {
+                        contact_id: PEER.into(),
+                    },
+                    call_type: CallType::Voice,
+                    camera_enabled: None,
+                    muted: None,
+                },
+            )
+            .await
+            .unwrap();
+        let (call_id, outcome) = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = observer.events.recv().await {
+                if let CallEvent::State { call } = event {
+                    if matches!(call.state, CallState::Ended | CallState::Uncertain) {
+                        let worker = self.backend.inner.active.lock().unwrap().clone().unwrap();
+                        assert_eq!(worker.identity.call_id(), call.call_id);
+                        return (call.call_id, worker.wait().await.unwrap());
+                    }
+                }
+            }
+            panic!("synthetic dial observer closed");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "synthetic dial did not finish after {:?}",
+                self.host.submitted.lock().unwrap()
+            )
+        });
+        let routes = std::mem::take(&mut *self.host.submitted.lock().unwrap());
+        (call_id, outcome, routes)
+    }
+}
+
+#[tokio::test]
+async fn cold_dial_authenticates_after_invite_and_warm_dial_reuses_cached_app() {
+    use CallHostRoute::{AppAuth, Cancel, Invite};
+    let f = DialFixture::new(2, false);
+    let (_, outcome, routes) = f.dial("cold", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [Invite, AppAuth, Cancel]);
+    let lease = f.core.call_authority("one").unwrap();
+    let auth = app_authority(&f.core, &lease);
+    assert_eq!(
+        f.backend
+            .inner
+            .cached_app_session("one", auth)
+            .unwrap()
+            .app_uin(),
+        17
+    );
+
+    let (_, outcome, routes) = f.dial("warm", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [Invite, Cancel]);
+}
+
+#[tokio::test]
+async fn post_handoff_app_auth_failure_allows_ringing_cancel() {
+    use CallHostRoute::{AppAuth, Cancel, Invite};
+    let f = DialFixture::new(2, true);
+    let (call_id, outcome, routes) = f.dial("ringing-failure", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [Invite, AppAuth, Cancel]);
+    let records = f.core.store.call_action_records("one", &call_id).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| (r.route, r.outcome.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (Invite.command(), "received"),
+            (AppAuth.command(), "needs_review"),
+            (Cancel.command(), "received"),
+        ]
+    );
+    // Cancel's journal claim requires an active session, and its confirmed
+    // reply closes the session without changing the unconfirmed AppAuth receipt.
+    let status = f
+        .core
+        .store
+        .call_session_status("one", &call_id)
+        .unwrap()
+        .unwrap();
+    assert!(status.local_closed && status.remote_terminal_confirmed);
+    assert!(!f.core.store.has_unresolved_call("one").unwrap());
+}
+
+#[tokio::test]
+async fn terminal_pending_app_auth_can_submit_after_owner_revocation_but_failure_is_uncertain() {
+    use CallHostRoute::{AppAuth, Invite};
+    // A busy peer classifies the invite reply as TerminalPending, not Ringing.
+    let f = DialFixture::new(6, true);
+    let (call_id, outcome, routes) = f.dial("terminal-auth-failure", true).await;
+    assert!(matches!(outcome, BackendOutcome::Uncertain));
+    assert_eq!(routes, [Invite, AppAuth]);
+    let records = f.core.store.call_action_records("one", &call_id).unwrap();
+    assert_eq!(records[1].route, AppAuth.command());
+    assert_eq!(records[1].outcome, "needs_review");
+    let status = f
+        .core
+        .store
+        .call_session_status("one", &call_id)
+        .unwrap()
+        .unwrap();
+    assert!(!status.remote_terminal_confirmed);
+    if !status.local_closed {
+        let request = records[0].encrypted_request.as_deref().unwrap();
+        assert_eq!(
+            f.core
+                .store
+                .begin_call_action(
+                    "one",
+                    &call_id,
+                    "cleanup",
+                    Invite.command(),
+                    &records[0].request_digest,
+                    request
+                )
+                .unwrap_err()
+                .to_string(),
+            "call_needs_review"
+        );
+    }
+}
+
 fn stage(core: &Arc<Core>, cancel: bool) {
     let inner = if cancel {
         p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0), p::uint(4, 2)]).unwrap()

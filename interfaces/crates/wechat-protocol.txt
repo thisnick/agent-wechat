@@ -1802,6 +1802,7 @@ impl core::clone::Clone for wechat_protocol::TextSendOptions | impl | -
 impl core::clone::Clone for wechat_protocol::TextSendResult | impl | -
 impl core::clone::Clone for wechat_protocol::VoiceChunk | impl | -
 impl core::clone::Clone for wechat_protocol::calls::app_session::AppAuthority | impl | -
+impl core::clone::Clone for wechat_protocol::calls::app_session::AppSession | impl | -
 impl core::clone::Clone for wechat_protocol::calls::audio_packet::MediaContext | impl | -
 impl core::clone::Clone for wechat_protocol::calls::audio_packet::MediaEpoch | impl | -
 impl core::clone::Clone for wechat_protocol::calls::host_policy::CallHostPolicy | impl | -

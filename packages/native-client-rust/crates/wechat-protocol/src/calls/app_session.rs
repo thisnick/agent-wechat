@@ -119,6 +119,7 @@ impl PendingAppAuth {
 /// does not install the encrypted branch's default expiry. Host account/logout
 /// authority still fences every use; hosts may impose a separate local deadline.
 /// Private app identities intentionally do not implement Debug or Serialize.
+#[derive(Clone)]
 pub struct AppSession {
     authority: AppAuthority,
     own_device: [u8; 32],
