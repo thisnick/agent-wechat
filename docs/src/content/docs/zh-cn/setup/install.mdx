@@ -1,7 +1,7 @@
 ---
 title: 安装
 description: 通过 npm、pnpm、独立二进制或 Docker 镜像安装 wx 工具。
-sourceHash: 210a1f9316e3
+sourceHash: "8e134df7c9f8"
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -58,5 +58,6 @@ docker pull ghcr.io/thisnick/agent-wechat-native:latest
 
 <Aside title="使用提示">
 - 如果 `wx` 提示未安装 Native 运行时，说明安装脚本未成功执行。可运行 `wx-native-install` 进行修复。
+- 如果全局安装后终端提示找不到 `wx`，说明 npm 或 pnpm 的全局 bin 目录不在 `PATH` 中。请在该 bin 目录下运行 `wx-native-install --link`（例如 `"$(npm prefix -g)/bin/wx-native-install" --link` 或 `"$(pnpm bin -g)/wx-native-install" --link`），将 `wx` 链接到 `~/.local/bin`，或输出适合你所用 Shell 的 `PATH` 配置行。若只想在不修改 `PATH` 的情况下运行一次已安装的全局 `wx`，请使用 `npx -p @agent-wechat/cli wx`；不要运行 `npx wx`，它指向一个无关的 npm 包。
 - 如果需要发送语音或视频，请确保运行 Daemon 的机器上已安装 FFmpeg 和 FFprobe（例如通过 `apt install ffmpeg`、`brew install ffmpeg` 或 `winget install Gyan.FFmpeg`）。
 </Aside>
