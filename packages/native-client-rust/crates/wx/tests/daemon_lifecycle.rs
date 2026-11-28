@@ -17,6 +17,7 @@ fn free_port() -> u16 {
 struct DaemonEnv {
     home: PathBuf,
     config_home: PathBuf,
+    runtime_dir: PathBuf,
     data_dir: PathBuf,
     listen: String,
     started: bool,
@@ -26,11 +27,14 @@ impl DaemonEnv {
     fn new(root: &Path) -> Self {
         let home = root.join("home");
         let config_home = home.join(".config");
+        let runtime_dir = root.join("runtime");
         let data_dir = root.join("data");
         std::fs::create_dir_all(&config_home).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
         Self {
             home,
             config_home,
+            runtime_dir,
             data_dir,
             listen: format!("127.0.0.1:{}", free_port()),
             started: false,
@@ -49,6 +53,8 @@ impl DaemonEnv {
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_DATA_HOME", self.home.join(".local/share"))
+            .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("AGENT_WECHAT_TOKEN")
             .env_remove("AGENT_WECHAT_TOKEN_FILE")
             .env_remove("AGENT_WECHAT_SERVER_CONFIG")
