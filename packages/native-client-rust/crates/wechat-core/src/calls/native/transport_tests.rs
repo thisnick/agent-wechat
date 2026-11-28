@@ -3,18 +3,135 @@
 use super::*;
 use crate::{
     call_types::*,
-    calls::{notifications::*, service::ControlConnection},
+    calls::{
+        notifications::*,
+        service::{CallService, ControlConnection},
+    },
     Store,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::sync::Condvar;
 use wechat_protocol::{
+    calls::app_session::PendingAppAuth,
     wire::{self, SyncBatch, SyncCommand},
     AuthSnapshot, DeviceProfile,
 };
 
 const OWN: &str = "synthetic_self";
 const PEER: &str = "synthetic_peer";
+
+fn synthetic_account() -> (tempfile::TempDir, Arc<Core>) {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+    store.create_account("one").unwrap();
+    let core = Core::new(store.clone(), None).unwrap();
+    store.put_runtime("one", "desired", b"connected").unwrap();
+    store
+        .mark_validated_if_active("one", &core.ownership_generation)
+        .unwrap();
+    let mut auth_snapshot = AuthSnapshot::default();
+    auth_snapshot.response = p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 0)]).unwrap();
+    let state = AccountState {
+        schema: 1,
+        device: DeviceProfile::generate("Synthetic Linux".into()).unwrap(),
+        uin: 1,
+        own_username: OWN.into(),
+        cookie: vec![],
+        session_key: vec![1; 16],
+        request_key: vec![2; 24],
+        response_key: vec![3; 24],
+        auto_auth_key: vec![],
+        key_info: vec![],
+        database_password: vec![],
+        auth_snapshot,
+        long_host: "synthetic-unused.weixin.qq.com".into(),
+        short_host: "synthetic-unused.weixin.qq.com".into(),
+    };
+    core.save_state("one", &state).unwrap();
+    (temp, core)
+}
+
+fn app_authority(core: &Core, lease: &CallAuthorityLease) -> AppAuthority {
+    AppAuthority {
+        account_generation: nonzero64(lease.authority().generation.as_bytes()),
+        logout_epoch: 0,
+        credential_digest: authorization(&core.account_state("one").unwrap()).unwrap(),
+    }
+}
+
+#[test]
+fn app_session_cache_is_fenced_by_errors_and_account_authority() {
+    let (_temp, core) = synthetic_account();
+    let backend = NativeCallBackend::new(Arc::downgrade(&core));
+    let inner = &backend.inner;
+    let lease = core.call_authority("one").unwrap();
+    let auth = app_authority(&core, &lease);
+    let app = PendingAppAuth::new(auth, [9; 32])
+        .unwrap()
+        .complete(&reply(CallHostRoute::AppAuth), auth)
+        .unwrap();
+
+    assert!(inner.cached_app_session("one", auth).is_none());
+    inner.store_app_session(&lease, app.clone());
+    inner
+        .invalidate_app_session_on_error("one", Ok(()))
+        .unwrap();
+    assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
+    assert!(inner.cached_app_session("other", auth).is_none());
+    let unsent =
+        inner.invalidate_app_session_on_error::<()>("one", Err(CallRpcNotSubmitted.into()));
+    assert!(unsent.unwrap_err().is::<CallRpcNotSubmitted>());
+    assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
+    let unsupported =
+        inner.invalidate_app_session_on_error::<()>("one", Err(UnsupportedCallMedia.into()));
+    assert!(unsupported.unwrap_err().is::<UnsupportedCallMedia>());
+    assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
+    let error = inner.invalidate_app_session_on_error::<()>(
+        "one",
+        Err(anyhow::anyhow!("synthetic app failure")),
+    );
+    assert_eq!(error.unwrap_err().to_string(), "synthetic app failure");
+    assert!(inner.cached_app_session("one", auth).is_none());
+
+    inner.store_app_session(&lease, app.clone());
+    let changed = AppAuthority {
+        logout_epoch: 1,
+        ..auth
+    };
+    assert!(inner.cached_app_session("one", changed).is_none());
+    assert!(inner.cached_app_session("one", auth).is_none());
+
+    inner.store_app_session(&lease, app.clone());
+    // Wall-clock expiry (for example across OS sleep where monotonic Instant pauses) evicts the entry.
+    inner
+        .app_sessions
+        .lock()
+        .unwrap()
+        .get_mut("one")
+        .unwrap()
+        .cached_at_wall = SystemTime::now() - APP_SESSION_TTL - Duration::from_secs(1);
+    assert!(inner.cached_app_session("one", auth).is_none());
+    assert!(inner.app_sessions.lock().unwrap().is_empty());
+
+    // Backward wall-clock jumps conservatively expire cached sessions too.
+    inner.store_app_session(&lease, app.clone());
+    inner
+        .app_sessions
+        .lock()
+        .unwrap()
+        .get_mut("one")
+        .unwrap()
+        .cached_at_wall = SystemTime::now() + Duration::from_secs(60);
+    assert!(inner.cached_app_session("one", auth).is_none());
+    assert!(inner.app_sessions.lock().unwrap().is_empty());
+
+    inner.store_app_session(&lease, app);
+    core.fence_call_authority("one");
+    assert!(!lease.current());
+    assert!(inner.cached_app_session("one", auth).is_none());
+    assert!(inner.app_sessions.lock().unwrap().is_empty());
+}
+
 struct Captured {
     request: IncomingRequest,
     complete: oneshot::Sender<IncomingPreparation>,
@@ -274,6 +391,7 @@ fn reply(route: CallHostRoute) -> Vec<u8> {
             p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &unify)]).unwrap()
         }
         CallHostRoute::LiveSync => p::bytes(2, b"synthetic-cursor"),
+        CallHostRoute::Cancel => p::bytes(1, &p::message(&[p::uint(1, 7), p::uint(2, 9)]).unwrap()),
         _ => panic!("unexpected synthetic host route"),
     };
     p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
@@ -290,33 +408,8 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(hold: Hold) -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
-        store.create_account("one").unwrap();
-        let core = Core::new(store.clone(), None).unwrap();
-        store.put_runtime("one", "desired", b"connected").unwrap();
-        store
-            .mark_validated_if_active("one", &core.ownership_generation)
-            .unwrap();
-        let mut auth_snapshot = AuthSnapshot::default();
-        auth_snapshot.response = p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 0)]).unwrap();
-        let state = AccountState {
-            schema: 1,
-            device: DeviceProfile::generate("Synthetic Linux".into()).unwrap(),
-            uin: 1,
-            own_username: OWN.into(),
-            cookie: vec![],
-            session_key: vec![1; 16],
-            request_key: vec![2; 24],
-            response_key: vec![3; 24],
-            auto_auth_key: vec![],
-            key_info: vec![],
-            database_password: vec![],
-            auth_snapshot,
-            long_host: "synthetic-unused.weixin.qq.com".into(),
-            short_host: "synthetic-unused.weixin.qq.com".into(),
-        };
-        core.save_state("one", &state).unwrap();
+        let (temp, core) = synthetic_account();
+        let store = &core.store;
         let (captured, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let backend = Arc::new(Backend {
             core: Arc::downgrade(&core),
@@ -460,6 +553,7 @@ impl Fixture {
                         .body()
                         .to_vec()
                 }
+                CallHostRoute::Invite | CallHostRoute::Cancel => p::bytes(1, b"forbidden"),
                 _ => panic!("unsupported synthetic request"),
             }),
             unknown_fields: vec![],
@@ -491,6 +585,569 @@ impl Drop for Fixture {
         }
     }
 }
+
+fn dial_invite_reply(peer_status: u64, relay_ep: Option<std::net::SocketAddr>) -> Vec<u8> {
+    let member = |name: &str, id, status| {
+        p::bytes(
+            2,
+            &p::message(&[
+                p::bytes(1, name.as_bytes()),
+                p::uint(2, id),
+                p::uint(3, status),
+                p::bytes(7, name.as_bytes()),
+            ])
+            .unwrap(),
+        )
+    };
+    let roster = p::message(&[
+        p::uint(1, 1),
+        member(OWN, 0, 1),
+        member(PEER, 1, peer_status),
+    ])
+    .unwrap();
+    let engine = p::message(&[p::uint(5, 17), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap();
+    let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
+    let cap = p::message(&[
+        p::uint(1, 1),
+        p::bytes(
+            2,
+            &p::message(&[p::bytes(1, &engine), p::bytes(2, &channel)]).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let mut strategy_fields = vec![p::bytes(13, &cap), p::uint(14, 0)];
+    if let Some(ep) = relay_ep {
+        let addr = p::message(&[
+            p::bytes(1, ep.ip().to_string().as_bytes()),
+            p::uint(2, u64::from(ep.port())),
+        ])
+        .unwrap();
+        strategy_fields.push(p::bytes(10, &[7u8; 32]));
+        strategy_fields.push(p::bytes(
+            15,
+            &p::message(&[p::uint(1, 1), p::bytes(4, &addr)]).unwrap(),
+        ));
+    }
+    let strategy = p::message(&strategy_fields).unwrap();
+    let av = p::message(&[
+        p::uint(3, 1),
+        p::bytes(4, &p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap()),
+        p::bytes(4, &p::message(&[p::uint(1, 1), p::uint(2, 0)]).unwrap()),
+    ])
+    .unwrap();
+    let client = p::message(&[
+        p::bytes(1, &strategy),
+        p::bytes(2, &roster),
+        p::bytes(3, &av),
+        p::uint(5, 99),
+        p::bytes(6, b"initial"),
+    ])
+    .unwrap();
+    let body = p::message(&[
+        p::uint(1, 7),
+        p::uint(2, 9),
+        p::uint(3, 0),
+        p::bytes(4, b"group"),
+        p::bytes(5, &client),
+    ])
+    .unwrap();
+    p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
+}
+
+fn dial_joined_sync_reply() -> Vec<u8> {
+    let member = |name: &str, id, status| {
+        p::bytes(
+            4,
+            &p::message(&[
+                p::bytes(1, name.as_bytes()),
+                p::uint(2, id),
+                p::uint(3, status),
+                p::bytes(7, name.as_bytes()),
+            ])
+            .unwrap(),
+        )
+    };
+    let members = p::message(&[
+        p::uint(1, 7),
+        p::uint(2, 9),
+        p::uint(3, 2),
+        member(OWN, 0, 1),
+        member(PEER, 1, 1),
+    ])
+    .unwrap();
+    let av = p::message(&[
+        p::uint(3, 2),
+        p::bytes(4, &p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap()),
+        p::bytes(4, &p::message(&[p::uint(1, 1), p::uint(2, 1)]).unwrap()),
+    ])
+    .unwrap();
+    let notify = p::message(&[
+        p::uint(3, 7),
+        p::uint(4, 9),
+        p::bytes(
+            5,
+            &p::message(&[p::uint(1, 10), p::bytes(2, &members)]).unwrap(),
+        ),
+        p::bytes(5, &p::message(&[p::uint(1, 12), p::bytes(2, &av)]).unwrap()),
+    ])
+    .unwrap();
+    let message = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+    let body = p::message(&[
+        p::bytes(
+            1,
+            &p::message(&[p::uint(1, 1), p::bytes(2, &message)]).unwrap(),
+        ),
+        p::bytes(2, b"joined"),
+    ])
+    .unwrap();
+    p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
+}
+
+fn dial_exit_transfer_reply() -> Vec<u8> {
+    let room = p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0)]).unwrap();
+    let frame = wechat_protocol::calls::app_frame::TaskFrame {
+        command: 3380,
+        integers: BTreeMap::from([
+            (4, 0),
+            (7, 0),
+            (8, 0),
+            (21, 0),
+            (22, 17),
+            (23, 0),
+            (25, 0),
+            (26, 0),
+        ]),
+        strings: BTreeMap::new(),
+        payload: p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 17), p::bytes(3, &room)]).unwrap(),
+    }
+    .encode()
+    .unwrap();
+    let body = p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap();
+    p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &body)]).unwrap()
+}
+
+fn spawn_synthetic_relay(
+    step_delay: Duration,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<AtomicBool>,
+    thread::JoinHandle<()>,
+) {
+    use wechat_protocol::calls::relay::{
+        decrypt_checkin, encrypt_checkin, frame_outer, unframe_outer,
+    };
+    let server = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = server.local_addr().unwrap();
+    server.set_nonblocking(true).unwrap();
+    let checkins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let checkins_thread = checkins.clone();
+    let stop_thread = stop.clone();
+    let key: [u8; 16] = crypto::md5(&9u64.to_le_bytes()).try_into().unwrap();
+    let relay_reply = move |cmd: u64, body: &[u8]| -> Vec<u8> {
+        let public = p::message(&[p::uint(1, cmd), p::uint(2, 3), p::uint(3, 0)]).unwrap();
+        let header = p::message(&[p::bytes(1, &public), p::uint(2, 7), p::uint(3, 10)]).unwrap();
+        let rand = vec![5; (8 - (body.len() + 10) % 8) % 8 + 3];
+        let cipher = encrypt_checkin(body, &key, &rand).unwrap();
+        frame_outer(
+            &p::message(&[
+                p::bytes(1, &header),
+                p::uint(2, cipher.len() as u64),
+                p::bytes(3, &cipher),
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let handle = thread::spawn(move || {
+        let mut buf = [0u8; 8198];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stop_thread.load(Ordering::Acquire) && Instant::now() < deadline {
+            match server.recv_from(&mut buf) {
+                Ok((n, src)) if n > 0 && buf[0] == 0xd5 => {
+                    let outer = p::decode(unframe_outer(&buf[..n]).unwrap()).unwrap();
+                    let cipher = p::data(&outer, 3).unwrap();
+                    let clear = decrypt_checkin(cipher, &key, 4096).unwrap();
+                    let body = p::decode(&clear).unwrap();
+                    let server_text = p::optional_data(&body, 15).unwrap().unwrap_or_default();
+                    if !step_delay.is_zero() {
+                        thread::sleep(step_delay);
+                    }
+                    checkins_thread.fetch_add(1, Ordering::AcqRel);
+                    if server_text.is_empty() {
+                        let resp = p::message(&[
+                            p::uint(1, 0),
+                            p::uint(2, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                            p::uint(3, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                            p::uint(4, u64::from(src.port())),
+                            p::uint(5, u64::from(endpoint.port())),
+                            p::uint(6, 1),
+                            p::uint(7, 0),
+                            p::uint(8, 2),
+                            p::uint(9, 1),
+                            p::bytes(12, b"127.0.0.1"),
+                            p::bytes(13, b"127.0.0.1"),
+                            p::uint(14, 0),
+                        ])
+                        .unwrap();
+                        let _ = server.send_to(&relay_reply(0x1002, &resp), src);
+                    } else {
+                        let ready = p::message(&[
+                            p::uint(1, 0),
+                            p::uint(2, 7),
+                            p::uint(3, 0),
+                            p::uint(5, 0),
+                            p::uint(6, 1),
+                            p::uint(7, 0),
+                        ])
+                        .unwrap();
+                        let _ = server.send_to(&relay_reply(0x1004, &ready), src);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (endpoint, checkins, stop, handle)
+}
+
+struct DialHost {
+    peer_status: u64,
+    fail_auth: bool,
+    relay_ep: Option<std::net::SocketAddr>,
+    answer_after_checkins: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+    live_sync_calls: std::sync::atomic::AtomicUsize,
+    checkins_at_answer: Mutex<Option<usize>>,
+    drop_owner: Mutex<Option<ControlConnection>>,
+    submitted: Mutex<Vec<CallHostRoute>>,
+}
+impl TestCallIo for DialHost {
+    fn call(
+        &self,
+        _: &mut AccountState,
+        route: CallHostRoute,
+        _: &[u8],
+        handoff: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        handoff()?;
+        self.submitted.lock().unwrap().push(route);
+        match route {
+            CallHostRoute::Invite => {
+                drop(self.drop_owner.lock().unwrap().take());
+                Ok(dial_invite_reply(self.peer_status, self.relay_ep))
+            }
+            CallHostRoute::AppAuth if self.fail_auth => {
+                bail!("synthetic post-handoff AppAuth failure")
+            }
+            CallHostRoute::AppAuth | CallHostRoute::Cancel => Ok(reply(route)),
+            CallHostRoute::LiveSync => {
+                let n = self.live_sync_calls.fetch_add(1, Ordering::AcqRel);
+                if let Some((checkins, needed)) = &self.answer_after_checkins {
+                    if n == 0 {
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while checkins.load(Ordering::Acquire) < *needed
+                            && Instant::now() < deadline
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        *self.checkins_at_answer.lock().unwrap() =
+                            Some(checkins.load(Ordering::Acquire));
+                        return Ok(dial_joined_sync_reply());
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
+                Ok(reply(CallHostRoute::LiveSync))
+            }
+            CallHostRoute::Transfer => Ok(dial_exit_transfer_reply()),
+            _ => bail!("unexpected synthetic dial route {route:?}"),
+        }
+    }
+}
+
+struct DialFixture {
+    _temp: tempfile::TempDir,
+    core: Arc<Core>,
+    backend: Arc<NativeCallBackend>,
+    service: Arc<CallService>,
+    host: Arc<DialHost>,
+}
+impl DialFixture {
+    fn new(peer_status: u64, fail_auth: bool) -> Self {
+        Self::with_relay(peer_status, fail_auth, None, None, Duration::ZERO)
+    }
+
+    fn with_relay(
+        peer_status: u64,
+        fail_auth: bool,
+        relay_ep: Option<std::net::SocketAddr>,
+        answer_after_checkins: Option<(Arc<std::sync::atomic::AtomicUsize>, usize)>,
+        ring_timeout: Duration,
+    ) -> Self {
+        let (temp, core) = synthetic_account();
+        let host = Arc::new(DialHost {
+            peer_status,
+            fail_auth,
+            relay_ep,
+            answer_after_checkins,
+            live_sync_calls: std::sync::atomic::AtomicUsize::new(0),
+            checkins_at_answer: Mutex::new(None),
+            drop_owner: Mutex::new(None),
+            submitted: Mutex::new(vec![]),
+        });
+        let mut backend = NativeCallBackend::new(Arc::downgrade(&core));
+        let inner = Arc::get_mut(&mut backend.inner).unwrap();
+        inner.test_io = Some(host.clone());
+        inner.config.ring_timeout = ring_timeout;
+        let backend = Arc::new(backend);
+        let service = Arc::new(CallService::new(backend.clone()));
+        Self {
+            _temp: temp,
+            core,
+            backend,
+            service,
+            host,
+        }
+    }
+
+    async fn dial(
+        &self,
+        request_id: &str,
+        drop_owner: bool,
+    ) -> (String, BackendOutcome, Vec<CallHostRoute>) {
+        let mut observer = self
+            .service
+            .connect("one", "dial-observer", false)
+            .await
+            .unwrap();
+        let mut owner = self
+            .service
+            .connect("one", "dial-owner", true)
+            .await
+            .unwrap();
+        let owner_id = owner.client_id.clone();
+        self.service
+            .command(
+                &owner_id,
+                CallCommand::Ready {
+                    request_id: "ready".into(),
+                    ready: true,
+                    format: CallAudioFormat::default(),
+                    video: None,
+                    scope: None,
+                },
+            )
+            .await
+            .unwrap();
+        loop {
+            if let CallEvent::CommandResult { status, .. } = owner.events.try_recv().unwrap() {
+                assert_eq!(status, CallCommandStatus::Accepted);
+                break;
+            }
+        }
+        let _owner = if drop_owner {
+            *self.host.drop_owner.lock().unwrap() = Some(owner);
+            None
+        } else {
+            Some(owner)
+        };
+        self.service
+            .command(
+                &owner_id,
+                CallCommand::Dial {
+                    request_id: request_id.into(),
+                    target: CallTarget::Direct {
+                        contact_id: PEER.into(),
+                    },
+                    call_type: CallType::Voice,
+                    camera_enabled: None,
+                    muted: None,
+                },
+            )
+            .await
+            .unwrap();
+        let (call_id, outcome) = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = observer.events.recv().await {
+                if let CallEvent::State { call } = event {
+                    if matches!(call.state, CallState::Ended | CallState::Uncertain) {
+                        let worker = self.backend.inner.active.lock().unwrap().clone().unwrap();
+                        assert_eq!(worker.identity.call_id(), call.call_id);
+                        return (call.call_id, worker.wait().await.unwrap());
+                    }
+                }
+            }
+            panic!("synthetic dial observer closed");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "synthetic dial did not finish after {:?}",
+                self.host.submitted.lock().unwrap()
+            )
+        });
+        let routes = std::mem::take(&mut *self.host.submitted.lock().unwrap());
+        (call_id, outcome, routes)
+    }
+}
+
+#[tokio::test]
+async fn cold_dial_authenticates_before_invite_and_warm_dial_reuses_cached_app() {
+    use CallHostRoute::{AppAuth, Cancel, Invite};
+    let f = DialFixture::new(2, false);
+    let (_, outcome, routes) = f.dial("cold", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [AppAuth, Invite, Cancel]);
+    let lease = f.core.call_authority("one").unwrap();
+    let auth = app_authority(&f.core, &lease);
+    assert_eq!(
+        f.backend
+            .inner
+            .cached_app_session("one", auth)
+            .unwrap()
+            .app_uin(),
+        17
+    );
+
+    let (_, outcome, routes) = f.dial("warm", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [Invite, Cancel]);
+}
+
+#[tokio::test]
+async fn cold_dial_app_auth_failure_ends_before_invite_without_ringing_peer() {
+    use CallHostRoute::AppAuth;
+    let f = DialFixture::new(2, true);
+    let (call_id, outcome, routes) = f.dial("auth-failure", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [AppAuth]);
+    let records = f.core.store.call_action_records("one", &call_id).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].route, AppAuth.command());
+    assert_eq!(records[0].outcome, "needs_review");
+    let status = f
+        .core
+        .store
+        .call_session_status("one", &call_id)
+        .unwrap()
+        .unwrap();
+    assert!(status.local_closed);
+    assert!(!f.core.store.has_unresolved_call("one").unwrap());
+}
+
+#[tokio::test]
+async fn caller_ringing_relay_preconnect_completes_while_ringing_and_reuses_on_join() {
+    let (endpoint, checkins, stop_relay, relay_handle) =
+        spawn_synthetic_relay(Duration::from_millis(20));
+    let f = DialFixture::with_relay(
+        2,
+        false,
+        Some(endpoint),
+        Some((checkins.clone(), 2)),
+        Duration::from_secs(5),
+    );
+    let mut owner = f
+        .service
+        .connect("one", "preconnect-owner", true)
+        .await
+        .unwrap();
+    let owner_id = owner.client_id.clone();
+    f.service
+        .command(
+            &owner_id,
+            CallCommand::Ready {
+                request_id: "ready".into(),
+                ready: true,
+                format: CallAudioFormat::default(),
+                video: None,
+                scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    loop {
+        if let CallEvent::CommandResult { status, .. } = owner.events.recv().await.unwrap() {
+            assert_eq!(status, CallCommandStatus::Accepted);
+            break;
+        }
+    }
+    f.service
+        .command(
+            &owner_id,
+            CallCommand::Dial {
+                request_id: "dial-preconnect".into(),
+                target: CallTarget::Direct {
+                    contact_id: PEER.into(),
+                },
+                call_type: CallType::Voice,
+                camera_enabled: None,
+                muted: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (call_id, revision) = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = owner.events.recv().await {
+            if let CallEvent::State { call } = event {
+                if call.state == CallState::Connected {
+                    return (call.call_id, call.revision);
+                }
+            }
+        }
+        panic!("closed before connected");
+    })
+    .await
+    .unwrap();
+    assert_eq!(*f.host.checkins_at_answer.lock().unwrap(), Some(2));
+    // Reusing the pre-connected relay must not perform a second check-in after Join.
+    assert_eq!(checkins.load(Ordering::Acquire), 2);
+    f.service
+        .command(
+            &owner_id,
+            CallCommand::Hangup {
+                request_id: "hangup-preconnect".into(),
+                call_id,
+                expected_revision: revision,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = owner.events.recv().await {
+            if let CallEvent::State { call } = event {
+                if call.state == CallState::Ended {
+                    let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
+                    assert!(matches!(
+                        worker.wait().await.unwrap(),
+                        BackendOutcome::Ended
+                    ));
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    stop_relay.store(true, Ordering::Release);
+    relay_handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn caller_ringing_relay_preconnect_aborts_cleanly_on_ringing_cancel() {
+    use CallHostRoute::{AppAuth, Cancel, Invite};
+    let (endpoint, _checkins, stop_relay, relay_handle) =
+        spawn_synthetic_relay(Duration::from_millis(10));
+    let f = DialFixture::with_relay(2, false, Some(endpoint), None, Duration::ZERO);
+    let (_, outcome, routes) = f.dial("cancel-preconnect", false).await;
+    assert!(matches!(outcome, BackendOutcome::Ended));
+    assert_eq!(routes, [AppAuth, Invite, Cancel]);
+    stop_relay.store(true, Ordering::Release);
+    relay_handle.join().unwrap();
+}
+
 fn stage(core: &Arc<Core>, cancel: bool) {
     let inner = if cancel {
         p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0), p::uint(4, 2)]).unwrap()

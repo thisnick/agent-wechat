@@ -1389,30 +1389,6 @@ impl DirectMediaHost for Host<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run(
-    config: &NativeCallConfig,
-    worker: &Arc<Worker>,
-    media: wechat_calls::session::NegotiatedMedia,
-    audio: Receiver<QueuedAudio>,
-    video_rx: Option<Receiver<QueuedVideo>>,
-    keyframe_rx: Receiver<u32>,
-    sink: &BackendSink,
-    runtime: &tokio::runtime::Handle,
-) -> Result<()> {
-    run_with_preconnected_relay(
-        config,
-        worker,
-        media,
-        audio,
-        video_rx,
-        keyframe_rx,
-        None,
-        sink,
-        runtime,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_with_preconnected_relay(
     config: &NativeCallConfig,
     worker: &Arc<Worker>,
