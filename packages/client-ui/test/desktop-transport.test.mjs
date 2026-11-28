@@ -83,12 +83,36 @@ test("native transport streams bytes arriving before response headers and omits 
   assert.equal(acknowledged, 2);
 });
 
+test("native transport decodes Tauri postMessage fallback byte-array frames", async (t) => {
+  t.after(clearMocks);
+  let acknowledged = 0;
+  mockIPC((command, args) => {
+    if (command === "http_ack") {
+      acknowledged++;
+      return;
+    }
+    assert.equal(command, "http_request");
+    args.channel.onmessage([0, 0, 128, 255]);
+    args.channel.onmessage([1]);
+    return { status: 200, headers: {} };
+  });
+  const response = await desktopFetch(session)(session.endpoint + "/v1/status");
+  assert.deepEqual(
+    new Uint8Array(await response.arrayBuffer()),
+    Uint8Array.of(0, 128, 255),
+  );
+  assert.equal(acknowledged, 1);
+});
+
 for (const [kind, packet] of [
   ["A binary error", frame(2)],
+  ["A fallback error", [2]],
   ["An unknown tag", frame(99, 1, 2)],
   ["An empty binary", new ArrayBuffer(0)],
+  ["An empty byte-array", []],
+  ["An out-of-range byte-array", [0, 256]],
+  ["A non-numeric byte-array", [0, "1"]],
   ["A legacy JSON", { type: "data", bytes: "AP8=" }],
-  ["A byte-array", [0, 1, 2]],
   ["A null", null],
 ]) {
   test(`${kind} frame rejects a pending reader and cancels native work`, async (t) => {

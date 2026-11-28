@@ -1,13 +1,13 @@
 use crate::Desktop;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 use tauri::{http::HeaderValue, ipc::Channel, State};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
-const STREAM_CHUNK_BYTES: usize = 256 * 1024;
-const STREAM_CREDITS: usize = 4;
+const STREAM_CHUNK_BYTES: usize = 128 * 1024;
+const STREAM_CREDITS: usize = 8;
 const MAX_ACTIVE_REQUESTS: usize = 64;
 const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
 const FRAME_DATA: u8 = 0;
@@ -123,18 +123,35 @@ pub async fn http_body_begin(state: State<'_, Desktop>, id: String) -> Result<()
 fn parse_upload_chunk<'a>(
     id_header: Option<&'a HeaderValue>,
     body: &'a tauri::ipc::InvokeBody,
-) -> Result<(&'a str, &'a [u8]), String> {
+) -> Result<(&'a str, Cow<'a, [u8]>), String> {
     let id = id_header
         .and_then(|value| value.to_str().ok())
         .ok_or("Invalid request identity")?;
     request_id(id).map_err(|_| "Invalid request identity")?;
     let bytes = match body {
-        tauri::ipc::InvokeBody::Raw(bytes) => bytes.as_slice(),
+        tauri::ipc::InvokeBody::Raw(bytes) => {
+            if bytes.len() > UPLOAD_CHUNK_BYTES {
+                return Err("Upload chunk is too large".into());
+            }
+            Cow::Borrowed(bytes.as_slice())
+        }
+        // Tauri's postMessage fallback JSON-encodes a Uint8Array payload as a byte array.
+        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(items)) => {
+            if items.len() > UPLOAD_CHUNK_BYTES {
+                return Err("Upload chunk is too large".into());
+            }
+            let mut decoded = Vec::with_capacity(items.len());
+            for item in items {
+                let byte = item
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or("Binary upload chunk is required")?;
+                decoded.push(byte);
+            }
+            Cow::Owned(decoded)
+        }
         tauri::ipc::InvokeBody::Json(_) => return Err("Binary upload chunk is required".into()),
     };
-    if bytes.len() > UPLOAD_CHUNK_BYTES {
-        return Err("Upload chunk is too large".into());
-    }
     Ok((id, bytes))
 }
 #[tauri::command]
@@ -150,7 +167,7 @@ pub async fn http_body_chunk(
     }
     upload
         .file
-        .write_all(bytes)
+        .write_all(bytes.as_ref())
         .await
         .map_err(|_| "Cannot store upload")?;
     upload.length += bytes.len();
@@ -334,10 +351,9 @@ mod tests {
     fn upload_chunk_accepts_raw_bytes() {
         let header = HeaderValue::from_static(UPLOAD_ID);
         let body = tauri::ipc::InvokeBody::Raw(vec![0, 128, 255]);
-        assert_eq!(
-            parse_upload_chunk(Some(&header), &body).unwrap(),
-            (UPLOAD_ID, &[0, 128, 255][..])
-        );
+        let (id, bytes) = parse_upload_chunk(Some(&header), &body).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert_eq!(bytes.as_ref(), &[0, 128, 255][..]);
     }
 
     #[test]
@@ -354,29 +370,51 @@ mod tests {
     }
 
     #[test]
-    fn upload_chunk_rejects_json() {
+    fn upload_chunk_accepts_postmessage_fallback_json_byte_array() {
         let header = HeaderValue::from_static(UPLOAD_ID);
         let body = tauri::ipc::InvokeBody::Json(serde_json::json!([0, 128, 255]));
+        let (id, bytes) = parse_upload_chunk(Some(&header), &body).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert_eq!(bytes.as_ref(), &[0, 128, 255][..]);
+
+        let oversized = tauri::ipc::InvokeBody::Json(serde_json::Value::Array(vec![
+            serde_json::Value::from(0);
+            UPLOAD_CHUNK_BYTES + 1
+        ]));
         assert_eq!(
-            parse_upload_chunk(Some(&header), &body).unwrap_err(),
-            "Binary upload chunk is required"
+            parse_upload_chunk(Some(&header), &oversized).unwrap_err(),
+            "Upload chunk is too large"
         );
+    }
+
+    #[test]
+    fn upload_chunk_rejects_invalid_json() {
+        let header = HeaderValue::from_static(UPLOAD_ID);
+        for body in [
+            tauri::ipc::InvokeBody::Json(serde_json::json!({ "bytes": [0, 1] })),
+            tauri::ipc::InvokeBody::Json(serde_json::json!([256])),
+            tauri::ipc::InvokeBody::Json(serde_json::json!([-1])),
+            tauri::ipc::InvokeBody::Json(serde_json::json!(["0"])),
+        ] {
+            assert_eq!(
+                parse_upload_chunk(Some(&header), &body).unwrap_err(),
+                "Binary upload chunk is required"
+            );
+        }
     }
 
     #[test]
     fn upload_chunk_accepts_empty_and_max_sized_raw_bytes() {
         let header = HeaderValue::from_static(UPLOAD_ID);
         let empty = tauri::ipc::InvokeBody::Raw(Vec::new());
-        assert_eq!(
-            parse_upload_chunk(Some(&header), &empty).unwrap(),
-            (UPLOAD_ID, &[][..])
-        );
+        let (id, bytes) = parse_upload_chunk(Some(&header), &empty).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert!(bytes.is_empty());
         let max = vec![0x5a; UPLOAD_CHUNK_BYTES];
         let body = tauri::ipc::InvokeBody::Raw(max.clone());
-        assert_eq!(
-            parse_upload_chunk(Some(&header), &body).unwrap(),
-            (UPLOAD_ID, max.as_slice())
-        );
+        let (id, bytes) = parse_upload_chunk(Some(&header), &body).unwrap();
+        assert_eq!(id, UPLOAD_ID);
+        assert_eq!(bytes.as_ref(), max.as_slice());
     }
 
     #[test]

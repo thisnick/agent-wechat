@@ -218,18 +218,32 @@ export function desktopFetch(session: DesktopSession): typeof fetch {
         },
         { highWaterMark: 0 },
       );
-      const channel = new Channel<ArrayBuffer>();
+      const channel = new Channel<ArrayBuffer | number[]>();
       const interrupt = () => {
         cancel();
         controller!.error(new Error("The hub connection was interrupted"));
       };
       channel.onmessage = (packet) => {
         if (finished) return;
-        if (!(packet instanceof ArrayBuffer)) {
+        let view: Uint8Array;
+        if (packet instanceof ArrayBuffer) {
+          view = new Uint8Array(packet);
+        } else if (
+          Array.isArray(packet) &&
+          packet.every(
+            (byte) =>
+              typeof byte === "number" &&
+              Number.isInteger(byte) &&
+              byte >= 0 &&
+              byte <= 255,
+          )
+        ) {
+          // Tauri's postMessage fallback delivers raw channel frames as byte arrays.
+          view = Uint8Array.from(packet);
+        } else {
           interrupt();
           return;
         }
-        const view = new Uint8Array(packet);
         if (view.byteLength === 0) {
           interrupt();
           return;
