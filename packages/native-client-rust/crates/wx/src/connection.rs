@@ -254,6 +254,27 @@ pub fn classify_failure(
         return classify_remote_failure(target, failure);
     }
     let address = target.display_address();
+    // Seam for #752 (`wx daemon doctor`): once implemented, switch this status hint to `wx daemon doctor`.
+    let status_diagnostic = if options.is_status_command {
+        "wx daemon status"
+    } else {
+        "wx status"
+    };
+
+    // An HTTP 401 response already proved the server rejected our token; never
+    // downgrade exit 4 / `unauthorized` to exit 3 if the follow-up `/health`
+    // probe times out or the daemon exits between requests.
+    if matches!(failure, ConnectionFailure::Unauthorized) {
+        return classify_loopback_auth_failure(
+            target,
+            &address,
+            "unauthorized",
+            "it rejected this CLI's API token",
+            owner.as_ref(),
+            status_diagnostic,
+        );
+    }
+
     let mut next: Vec<String> = Vec::new();
     match probe {
         Some(HealthProbe::NotListening) => {
@@ -268,7 +289,7 @@ pub fn classify_failure(
                 next.push("wx daemon start".into());
             }
             if options.is_status_command {
-                next.push("wx daemon doctor".into());
+                next.push(status_diagnostic.into());
             }
             outcome::failure_with_next(
                 3,
@@ -284,7 +305,7 @@ pub fn classify_failure(
                 target.endpoint
             ));
             if options.is_status_command {
-                next.push("wx daemon doctor".into());
+                next.push(status_diagnostic.into());
             }
             outcome::failure_with_next(
                 3,
@@ -297,102 +318,20 @@ pub fn classify_failure(
             )
         }
         Some(HealthProbe::WxOk) => match failure {
-            ConnectionFailure::MissingOrInvalidToken | ConnectionFailure::Unauthorized => {
-                let (code, reason) = match failure {
-                    ConnectionFailure::MissingOrInvalidToken => (
-                        "invalid_api_token",
-                        format!(
-                            "this CLI does not have its access key (token file {} is missing or invalid)",
-                            target.configured_token_file.display()
-                        ),
-                    ),
-                    ConnectionFailure::Unauthorized => (
-                        "unauthorized",
-                        "it rejected this CLI's API token".to_owned(),
-                    ),
-                    ConnectionFailure::ConnectError(_) => unreachable!(),
-                };
-                match owner {
-                    Some(PortOwner::DesktopHub { .. }) => {
-                        next.push("In AgentWechat, open Settings → Export key for CLI".into());
-                        next.push(format!(
-                            "wx config servers add desktop --url {} --token-file /path/to/exported-key",
-                            target.endpoint
-                        ));
-                        next.push("wx config servers select desktop".into());
-                        if options.is_status_command {
-                            next.push("wx daemon doctor".into());
-                        }
-                        outcome::failure_with_next(
-                            4,
-                            code,
-                            format!(
-                                "The AgentWechat desktop app's hub is listening on {address}, and {reason}. Open AgentWechat and go to Settings → Export key for CLI."
-                            ),
-                            false,
-                            next,
-                        )
-                    }
-                    Some(
-                        ref daemon @ PortOwner::WxDaemon {
-                            ref data_dir,
-                            exit_with_parent,
-                            ..
-                        },
-                    ) => {
-                        let owner_desc = daemon
-                            .describe()
-                            .unwrap_or_else(|| "another wx daemon".into());
-                        if let Some(dir) = data_dir {
-                            if !exit_with_parent {
-                                next.push(format!(
-                                    "wx --token-file {} status",
-                                    quote_path(&dir.join("api-token"))
-                                ));
-                            } else {
-                                next.push(
-                                    "Pass --token-file <PATH> or set AGENT_WECHAT_TOKEN for that daemon"
-                                        .into(),
-                                );
-                            }
-                        } else {
-                            next.push("Pass --token-file <PATH> or set AGENT_WECHAT_TOKEN".into());
-                        }
-                        if options.is_status_command {
-                            next.push("wx daemon doctor".into());
-                        } else {
-                            next.push("wx status".into());
-                        }
-                        outcome::failure_with_next(
-                            4,
-                            code,
-                            format!(
-                                "A daemon ({owner_desc}) is listening on {address}, and {reason}."
-                            ),
-                            false,
-                            next,
-                        )
-                    }
-                    _ => {
-                        next.push("Pass --token-file <PATH> or set AGENT_WECHAT_TOKEN".into());
-                        if options.is_status_command {
-                            next.push("wx daemon doctor".into());
-                        } else {
-                            next.push("wx status".into());
-                        }
-                        outcome::failure_with_next(
-                            4,
-                            code,
-                            format!("A wx daemon is listening on {address}, and {reason}."),
-                            false,
-                            next,
-                        )
-                    }
-                }
-            }
+            ConnectionFailure::MissingOrInvalidToken => classify_loopback_auth_failure(
+                target,
+                &address,
+                "invalid_api_token",
+                &format!(
+                    "this CLI does not have its access key (token file {} is missing or invalid)",
+                    target.configured_token_file.display()
+                ),
+                owner.as_ref(),
+                status_diagnostic,
+            ),
             ConnectionFailure::ConnectError(detail) => {
                 if options.is_status_command {
-                    next.push("wx daemon doctor".into());
+                    next.push(status_diagnostic.into());
                 }
                 outcome::failure_with_next(
                     3,
@@ -402,6 +341,7 @@ pub fn classify_failure(
                     next,
                 )
             }
+            ConnectionFailure::Unauthorized => unreachable!(),
         },
         Some(HealthProbe::OtherService { status }) => {
             let suffix = status
@@ -428,12 +368,10 @@ pub fn classify_failure(
             } else {
                 format!("{owner_desc} is listening on {address}, not a wx daemon{suffix}.")
             };
-            next.push(format!("wx --listen 127.0.0.1:{alt_port} daemon start"));
-            if options.is_status_command {
-                next.push("wx daemon doctor".into());
-            } else {
-                next.push("wx status".into());
+            if !is_wx_owner {
+                next.push(format!("wx --listen 127.0.0.1:{alt_port} daemon start"));
             }
+            next.push(status_diagnostic.into());
             outcome::failure_with_next(3, "endpoint_unavailable", message, false, next)
         }
         None => match failure {
@@ -446,20 +384,9 @@ pub fn classify_failure(
                 ),
                 false,
                 if options.is_status_command {
-                    vec!["wx daemon doctor".into()]
+                    vec![status_diagnostic.into()]
                 } else {
                     vec![]
-                },
-            ),
-            ConnectionFailure::Unauthorized => outcome::failure_with_next(
-                4,
-                "unauthorized",
-                format!("The daemon on {address} rejected this CLI's API token."),
-                false,
-                if options.is_status_command {
-                    vec!["wx daemon doctor".into()]
-                } else {
-                    vec!["wx status".into()]
                 },
             ),
             ConnectionFailure::ConnectError(detail) => outcome::failure_with_next(
@@ -468,12 +395,87 @@ pub fn classify_failure(
                 format!("Cannot reach wx daemon at {} ({detail}).", target.endpoint),
                 true,
                 if options.is_status_command {
-                    vec!["wx daemon doctor".into()]
+                    vec![status_diagnostic.into()]
                 } else {
                     vec![]
                 },
             ),
+            ConnectionFailure::Unauthorized => unreachable!(),
         },
+    }
+}
+
+fn classify_loopback_auth_failure(
+    target: &ClientTarget,
+    address: &str,
+    code: &str,
+    reason: &str,
+    owner: Option<&PortOwner>,
+    status_diagnostic: &str,
+) -> anyhow::Error {
+    let mut next: Vec<String> = Vec::new();
+    match owner {
+        Some(PortOwner::DesktopHub { .. }) => {
+            next.push("In AgentWechat, open Settings → Export key for CLI".into());
+            next.push(format!(
+                "wx config servers add desktop --url {} --token-file /path/to/exported-key",
+                target.endpoint
+            ));
+            next.push("wx config servers select desktop".into());
+            outcome::failure_with_next(
+                4,
+                code,
+                format!(
+                    "The AgentWechat desktop app's hub is listening on {address}, and {reason}. Open AgentWechat and go to Settings → Export key for CLI."
+                ),
+                false,
+                next,
+            )
+        }
+        Some(
+            daemon @ PortOwner::WxDaemon {
+                data_dir,
+                exit_with_parent,
+                ..
+            },
+        ) => {
+            let owner_desc = daemon
+                .describe()
+                .unwrap_or_else(|| "another wx daemon".into());
+            if let Some(dir) = data_dir {
+                if !exit_with_parent {
+                    next.push(format!(
+                        "wx --token-file {} status",
+                        quote_path(&dir.join("api-token"))
+                    ));
+                } else {
+                    next.push(
+                        "Pass --token-file <PATH> or set AGENT_WECHAT_TOKEN for that daemon".into(),
+                    );
+                }
+            } else {
+                next.push("Pass --token-file <PATH> or set AGENT_WECHAT_TOKEN".into());
+            }
+            next.push(status_diagnostic.into());
+            outcome::failure_with_next(
+                4,
+                code,
+                format!("A daemon ({owner_desc}) is listening on {address}, and {reason}."),
+                false,
+                next,
+            )
+        }
+        _ => {
+            next.push("Pass --token-file <PATH> or set AGENT_WECHAT_TOKEN".into());
+            next.push(status_diagnostic.into());
+            outcome::failure_with_next(
+                4,
+                code,
+                format!("A wx daemon is listening on {address}, and {reason}."),
+                false,
+                next,
+            )
+        }
     }
 }
 
@@ -840,7 +842,59 @@ mod tests {
         assert!(status_described
             .next
             .iter()
-            .any(|step| step == "wx daemon doctor"));
+            .any(|step| step == "wx daemon status"));
+    }
+
+    #[test]
+    fn unauthorized_always_preserves_exit_4_even_if_health_probe_fails_or_times_out() {
+        for (probe, owner) in [
+            (
+                Some(HealthProbe::OtherService { status: None }),
+                Some(PortOwner::DesktopHub {
+                    pid: Some(42),
+                    data_dir: None,
+                }),
+            ),
+            (Some(HealthProbe::OtherService { status: Some(500) }), None),
+            (Some(HealthProbe::NotListening), None),
+            (Some(HealthProbe::TlsError), None),
+            (None, None),
+        ] {
+            let error = classify_failure(
+                &local_target(),
+                ConnectionFailure::Unauthorized,
+                probe.clone(),
+                owner,
+                ClassificationOptions::default(),
+            );
+            let described = outcome::describe(&error);
+            assert_eq!(described.exit, 4, "probe={probe:?}");
+            assert_eq!(described.code, "unauthorized", "probe={probe:?}");
+            assert!(!described.retryable, "probe={probe:?}");
+            assert!(
+                !described
+                    .next
+                    .iter()
+                    .any(|step| step.contains("daemon start")),
+                "must never suggest daemon start on 401: {:?}",
+                described.next
+            );
+        }
+
+        let wx_other = classify_failure(
+            &local_target(),
+            ConnectionFailure::ConnectError("timeout".into()),
+            Some(HealthProbe::OtherService { status: None }),
+            Some(PortOwner::DesktopHub {
+                pid: Some(42),
+                data_dir: None,
+            }),
+            ClassificationOptions::default(),
+        );
+        assert!(!outcome::describe(&wx_other)
+            .next
+            .iter()
+            .any(|step| step.contains("daemon start")));
     }
 
     #[test]

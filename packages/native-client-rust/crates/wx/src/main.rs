@@ -2041,6 +2041,19 @@ async fn run(cli: Cli) -> Result<()> {
     )?;
     let (mut client, selected_server, endpoint_source) =
         settings.client_with_source(cli.server_name.as_deref(), cli.url.as_deref(), &config)?;
+    let has_local_server_override = cli.token_file.is_some()
+        || cli.listen.is_some()
+        || cli.data_dir.is_some()
+        || cli.server_config.is_some()
+        || env.data_dir.is_some()
+        || env.server_config.is_some();
+    if has_local_server_override
+        && selected_server.is_none()
+        && cli.account.is_none()
+        && std::env::var_os("AGENT_WECHAT_ACCOUNT").is_none()
+    {
+        client.account = None;
+    }
     if let Some(url) = cli.url {
         client.endpoint = url;
     }
@@ -2071,12 +2084,7 @@ async fn run(cli: Cli) -> Result<()> {
     let is_status_command = matches!(cli.command, Command::Status);
     let is_local_default = endpoint_source == settings::EndpointSource::Default
         && env_token.is_none()
-        && cli.token_file.is_none()
-        && cli.listen.is_none()
-        && cli.data_dir.is_none()
-        && cli.server_config.is_none()
-        && env.data_dir.is_none()
-        && env.server_config.is_none()
+        && !has_local_server_override
         && !config.token_explicit
         && std::env::var_os("AGENT_WECHAT_TOKEN_FILE").is_none()
         && config.listen.port() != 0;
@@ -2299,12 +2307,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let Some(chosen) = chosen else {
                     return Err(connection::account_ambiguous_error());
                 };
-                let can_save_local_default = selected_server.is_none()
-                    && target.is_local_default
-                    && settings.settings.servers.get("local").is_none_or(|server| {
-                        server.url.trim_end_matches('/') == target.endpoint.trim_end_matches('/')
-                            && server.token_file == target.configured_token_file
-                    });
+                let can_save_local_default = selected_server.is_none() && target.is_local_default;
                 if selected_server.is_some() || can_save_local_default {
                     let save_default = {
                         let stdin = std::io::stdin();
@@ -2328,21 +2331,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 );
                             }
                         } else if can_save_local_default {
-                            let existing_profile = settings
-                                .settings
-                                .servers
-                                .get("local")
-                                .and_then(|server| server.local_profile.clone());
-                            settings.settings.servers.insert(
-                                "local".into(),
-                                settings::Server {
-                                    url: target.endpoint.clone(),
-                                    token_file: target.configured_token_file.clone(),
-                                    default_account_id: Some(chosen.id.clone()),
-                                    local_profile: existing_profile,
-                                },
-                            );
-                            settings.settings.active_server = Some("local".into());
+                            settings.settings.default_account_id = Some(chosen.id.clone());
                             settings.save()?;
                             eprintln!("Saved {} as the default account.", chosen.label());
                         }
@@ -2498,16 +2487,24 @@ async fn run(cli: Cli) -> Result<()> {
             AccountCommand::Select { id } => {
                 let account = r.get(&format!("v1/accounts/{}", encode(&id))).await?;
                 let id = account["id"].as_str().context("invalid account response")?;
-                let server = selected_server
-                    .context("save a server with wx config servers add, then run wx config servers select NAME before selecting its default account")?;
-                settings
-                    .settings
-                    .servers
-                    .get_mut(&server)
-                    .context("saved server not found")?
-                    .default_account_id = Some(id.into());
-                settings.save()?;
-                json!({"server":server,"accountId":id})
+                if let Some(server) = selected_server {
+                    settings
+                        .settings
+                        .servers
+                        .get_mut(&server)
+                        .context("saved server not found")?
+                        .default_account_id = Some(id.into());
+                    settings.save()?;
+                    json!({"server":server,"accountId":id})
+                } else if target.is_local_default {
+                    settings.settings.default_account_id = Some(id.into());
+                    settings.save()?;
+                    json!({"server":Value::Null,"accountId":id})
+                } else {
+                    bail!(
+                        "save a server with wx config servers add, then run wx config servers select NAME before selecting its default account"
+                    );
+                }
             }
             AccountCommand::Settings {
                 auto_download_max_mb,
