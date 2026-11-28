@@ -8391,6 +8391,73 @@ mod tests {
             substituted_filetype: Option<u32>,
             picture_format: Option<u32>,
         }
+        fn aes_ecb_encrypt(plain: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+            ensure!(key.len() == 16, "expected 16-byte AES key");
+            let mut padded = plain.to_vec();
+            let pad = 16 - (padded.len() % 16);
+            padded.resize(padded.len() + pad, pad as u8);
+            let mut out = Vec::with_capacity(padded.len());
+            for block in padded.chunks_exact(16) {
+                let mut xored = [0u8; 16];
+                for i in 0..16 {
+                    xored[i] = block[i] ^ key[i];
+                }
+                let enc = wechat_protocol::crypto::cbc_encrypt(&xored, key)?;
+                out.extend_from_slice(&enc[..16]);
+            }
+            Ok(out)
+        }
+        struct MockCdnHttp {
+            ciphertext: Vec<u8>,
+            substituted_filetype: Option<u32>,
+            picture_format: Option<u32>,
+        }
+        impl wechat_protocol::transport::HttpTransport for MockCdnHttp {
+            fn send<'a>(
+                &'a self,
+                request: wechat_protocol::transport::HttpRequest,
+            ) -> wechat_protocol::transport::TransportFuture<
+                'a,
+                Result<wechat_protocol::transport::HttpResponse>,
+            > {
+                let outcome = (|| {
+                    let fields = wechat_protocol::media::unpack_cdn(&request.body)?;
+                    let parse_usize = |k: &str| -> Result<usize> {
+                        let raw = fields.get(k).context("missing CDN request field")?;
+                        Ok(std::str::from_utf8(raw)?.parse()?)
+                    };
+                    let start = parse_usize("rangestart")?;
+                    let end = parse_usize("rangeend")?.min(self.ciphertext.len() - 1);
+                    let mut reply = wechat_protocol::media::CdnFields::new();
+                    for (k, v) in [
+                        ("ver", 0usize),
+                        ("seq", parse_usize("seq")?),
+                        ("retcode", 0),
+                        ("istrans", 999),
+                        ("videoformat", 0),
+                        ("backsrcnum", 0),
+                        ("rangestart", start),
+                        ("rangeend", end),
+                        ("totalsize", self.ciphertext.len()),
+                    ] {
+                        reply.insert(k.into(), v.to_string().into_bytes());
+                    }
+                    if let Some(v) = self.picture_format {
+                        reply.insert("rsppicformat".into(), v.to_string().into_bytes());
+                    }
+                    if let Some(v) = self.substituted_filetype {
+                        reply.insert("substituteftype".into(), v.to_string().into_bytes());
+                    }
+                    reply.insert("filedata".into(), self.ciphertext[start..=end].to_vec());
+                    Ok(wechat_protocol::transport::HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: wechat_protocol::media::pack_cdn(&reply)?,
+                    })
+                })();
+                Box::pin(async move { outcome })
+            }
+        }
         struct MockCdnTransport {
             entries: BTreeMap<String, MockCdnEntry>,
         }
@@ -8404,37 +8471,34 @@ mod tests {
                     .entries
                     .get(&descriptor.file_id)
                     .context("missing_mock_cdn_entry")?;
-                let bytes = entry.bytes.clone();
-                let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
-                let transcoded_original_jpeg = descriptor.quality == MediaQuality::Original
-                    && !descriptor.strict_size
-                    && entry.picture_format == Some(1)
-                    && entry.substituted_filetype == Some(1)
-                    && bytes.starts_with(&[0xff, 0xd8, 0xff]);
-                if (descriptor.strict_size
-                    || (descriptor.quality == MediaQuality::Original && !transcoded_original_jpeg))
-                    && size_matches == Some(false)
-                {
-                    bail!("Advertised media size mismatch");
-                }
-                let md5 = format!("{:x}", md5::Md5::digest(&bytes));
-                if !transcoded_original_jpeg {
-                    if let Some(expected) = descriptor.expected_md5.as_deref() {
-                        ensure!(
-                            md5.eq_ignore_ascii_case(expected),
-                            "Advertised media checksum mismatch"
-                        );
-                    }
-                }
-                let sha256 = digest(&bytes);
-                Ok(wechat_protocol::media::DownloadedMedia {
-                    bytes,
-                    requested_quality: descriptor.quality,
+                let ciphertext = aes_ecb_encrypt(&entry.bytes, &descriptor.aes_key)?;
+                let cdn = wechat_protocol::media::CdnClient::new(
+                    wechat_protocol::media::CdnConfig {
+                        version: 1,
+                        uin: 9,
+                        client_version: 456,
+                        client_os_type: "UnifiedPCLinux x86_64".into(),
+                        auth_key: b"synthetic-auth".to_vec(),
+                        server_ips: vec![std::net::Ipv4Addr::new(1, 1, 1, 1)],
+                        front_id: 0,
+                        location: None,
+                    },
+                    std::time::Duration::from_secs(10),
+                )?;
+                let http = MockCdnHttp {
+                    ciphertext,
                     substituted_filetype: entry.substituted_filetype,
                     picture_format: entry.picture_format,
-                    md5,
-                    sha256,
-                    advertised_size_matches: size_matches,
+                };
+                let clock = wechat_protocol::transport::SystemClock::new();
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()?
+                            .block_on(cdn.download_async(descriptor, &http, &clock))
+                    })
+                    .join()
+                    .expect("mock CDN download thread panicked")
                 })
             }
             fn upload(

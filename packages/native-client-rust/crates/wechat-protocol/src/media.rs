@@ -368,6 +368,11 @@ pub struct MediaDescriptor {
     pub quality: MediaQuality,
     pub expected_bytes: Option<u64>,
     pub expected_md5: Option<String>,
+    /// Whether a mismatch with `expected_bytes` fails the download. For
+    /// `MediaQuality::Original` and `MediaQuality::Video`, a non-strict
+    /// descriptor still enforces `expected_bytes` unless the CDN reply
+    /// explicitly identifies a server-selected or transcoded representation
+    /// (`rsppicformat=1`, `substituteftype=1`, JPEG SOI prefix for images).
     pub strict_size: bool,
     pub expires_at: Option<u64>,
 }

@@ -715,7 +715,7 @@ field wechat_protocol::media::MediaDescriptor::expected_md5 | core::option::Opti
 field wechat_protocol::media::MediaDescriptor::expires_at | core::option::Option<u64> | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::file_id | alloc::string::String | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::quality | wechat_protocol::media::MediaQuality | MISSING DOC
-field wechat_protocol::media::MediaDescriptor::strict_size | bool | MISSING DOC
+field wechat_protocol::media::MediaDescriptor::strict_size | bool | Whether a mismatch with `expected_bytes` fails the download. For `MediaQuality::Original` and `MediaQuality::Video`, a non-strict descriptor still enforces `expected_bytes` unless the CDN reply explicitly identifies a server-selected or transcoded representation (`rsppicformat=1`, `substituteftype=1`, JPEG SOI prefix for images).
 field wechat_protocol::media::PreparedAsyncUpload::aes_key | alloc::vec::Vec<u8> | AES-128 key the object is encrypted with.
 field wechat_protocol::media::PreparedAsyncUpload::destination | alloc::string::String | Chat the upload is for.
 field wechat_protocol::media::PreparedAsyncUpload::file_key | alloc::string::String | Client file key that correlates the upload's requests.
