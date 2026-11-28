@@ -190,7 +190,11 @@ impl Inner {
     }
 
     fn invalidate_app_session_on_error<T>(&self, account: &str, result: Result<T>) -> Result<T> {
-        result.inspect_err(|_| self.invalidate_app_session(account))
+        result.inspect_err(|error| {
+            if !error.is::<CallRpcNotSubmitted>() {
+                self.invalidate_app_session(account);
+            }
+        })
     }
 }
 

@@ -78,6 +78,10 @@ fn app_session_cache_is_fenced_by_errors_and_account_authority() {
         .unwrap();
     assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
     assert!(inner.cached_app_session("other", auth).is_none());
+    let unsent =
+        inner.invalidate_app_session_on_error::<()>("one", Err(CallRpcNotSubmitted.into()));
+    assert!(unsent.unwrap_err().is::<CallRpcNotSubmitted>());
+    assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
     let error = inner.invalidate_app_session_on_error::<()>(
         "one",
         Err(anyhow::anyhow!("synthetic app failure")),
