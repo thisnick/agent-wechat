@@ -14,19 +14,22 @@ const stores = [
   "syncState",
   "avatars",
   "media",
+  "mediaMeta",
   "drafts",
   "receipts",
 ] as const;
 type Store = (typeof stores)[number];
-const fetched: Store[] = [
+// Media size and recency are available without loading the cached payload.
+const fetchedStats: Store[] = [
   "threads",
   "contacts",
   "messages",
   "chatState",
   "syncState",
   "avatars",
-  "media",
+  "mediaMeta",
 ];
+const fetched: Store[] = [...fetchedStats, "media"];
 export type AccountSnapshot = {
   threads: NativeThread[];
   contacts: NativeContact[];
@@ -59,6 +62,8 @@ type Row = {
   bytes?: number;
   messageId?: string;
 };
+type MediaRow = Pick<Row, "key" | "scope" | "data">;
+type MediaMetadata = Omit<Row, "data">;
 const request = <T>(value: IDBRequest<T>): Promise<T> =>
   new Promise((resolve, reject) => {
     value.onsuccess = () => resolve(value.result);
@@ -91,6 +96,7 @@ export class BrowserCache {
       now?: () => number;
       mediaBudget?: number;
       broadcast?: boolean;
+      blockedTimeoutMs?: number;
     } = {},
   ) {
     this.namespace = [new URL(origin).origin, hubId];
@@ -106,38 +112,78 @@ export class BrowserCache {
       }
       let open: IDBOpenDBRequest;
       try {
-        open = factory.open(options.name ?? "agent-wechat-cache", 1);
+        open = factory.open(options.name ?? "agent-wechat-cache", 2);
       } catch {
         this.failed = true;
         resolve(null);
         return;
       }
-      open.onupgradeneeded = () => {
+      let settled = false;
+      let blockedTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearBlockedTimer = () => {
+        if (blockedTimer === undefined) return;
+        clearTimeout(blockedTimer);
+        blockedTimer = undefined;
+      };
+      const settle = (db: IDBDatabase | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(db);
+      };
+      const failOpen = () => {
+        if (settled) return;
+        this.failed = true;
+        settle(null);
+      };
+      open.onupgradeneeded = (event) => {
+        clearBlockedTimer();
         for (const name of stores) {
+          if (open.result.objectStoreNames.contains(name)) continue;
           const store = open.result.createObjectStore(name, { keyPath: "key" });
           store.createIndex("scope", "scope");
         }
+        if (event.oldVersion === 1) {
+          const tx = open.transaction!;
+          const meta = tx.objectStore("mediaMeta");
+          // Backfill the small rows without modifying any existing media bytes.
+          const scan = tx.objectStore("media").openCursor();
+          scan.onsuccess = () => {
+            const cursor = scan.result;
+            if (!cursor) return;
+            const { key, scope, lastUsed, bytes, messageId } =
+              cursor.value as Row;
+            meta.put({
+              key,
+              scope,
+              lastUsed,
+              bytes,
+              messageId,
+            } satisfies MediaMetadata);
+            cursor.continue();
+          };
+        }
       };
       open.onerror = () => {
-        this.failed = true;
-        resolve(null);
+        clearBlockedTimer();
+        failOpen();
       };
       open.onblocked = () => {
-        this.failed = true;
-        resolve(null);
+        if (settled || blockedTimer !== undefined) return;
+        blockedTimer = setTimeout(failOpen, options.blockedTimeoutMs ?? 3000);
       };
       open.onsuccess = () => {
+        clearBlockedTimer();
         const db = open.result;
-        if (this.closed || this.failed) {
+        if (settled || this.closed) {
           db.close();
-          resolve(null);
+          settle(null);
           return;
         }
         db.onversionchange = () => {
           db.close();
           this.failed = true;
         };
-        resolve(db);
+        settle(db);
       };
     });
     if (
@@ -217,11 +263,11 @@ export class BrowserCache {
   async flush() {
     await this.tail;
   }
-  private async rows(
+  private async rows<T = Row>(
     tx: IDBTransaction,
     name: Store,
     account: string,
-  ): Promise<Row[]> {
+  ): Promise<T[]> {
     return request(
       tx.objectStore(name).index("scope").getAll(this.scope(account)),
     );
@@ -440,13 +486,22 @@ export class BrowserCache {
     id: string,
   ): Promise<SavedBlob | undefined> {
     await this.flush();
-    const data = await this.transaction([kind], "readwrite", async (tx) => {
-      const row = await request<Row | undefined>(
-        tx.objectStore(kind).get(this.key(account, id)),
-      );
+    const key = this.key(account, id);
+    const names: Store[] =
+      kind === "media" ? ["media", "mediaMeta"] : ["avatars"];
+    const data = await this.transaction(names, "readwrite", async (tx) => {
+      const store = tx.objectStore(kind);
+      const row = await request<Row | MediaRow | undefined>(store.get(key));
       if (!row) return;
-      row.lastUsed = this.now();
-      tx.objectStore(kind).put(row);
+      const lastUsed = this.now();
+      if (kind === "media") {
+        // Updating recency must not serialize the media ArrayBuffer again.
+        const meta = tx.objectStore("mediaMeta");
+        const entry = await request<MediaMetadata | undefined>(meta.get(key));
+        if (entry) meta.put({ ...entry, lastUsed });
+      } else {
+        store.put({ ...row, lastUsed });
+      }
       return row.data as StoredBlob | SavedBlob;
     });
     if (!data) return;
@@ -466,8 +521,9 @@ export class BrowserCache {
     } catch {
       // Fetch the hub's cached bytes again if a legacy Blob is no longer readable.
       await this.enqueue(() =>
-        this.transaction([kind], "readwrite", (tx) => {
-          tx.objectStore(kind).delete(this.key(account, id));
+        this.transaction(names, "readwrite", (tx) => {
+          tx.objectStore(kind).delete(key);
+          if (kind === "media") tx.objectStore("mediaMeta").delete(key);
         }),
       );
       return;
@@ -490,37 +546,65 @@ export class BrowserCache {
         etag: data.etag,
       };
       const row = {
-        ...this.row(account, id, stored),
+        key: this.key(account, id),
+        scope: this.scope(account),
+        lastUsed: this.now(),
         bytes: data.blob.size,
         messageId,
       };
-      return this.transaction(["avatars", "media"], "readwrite", async (tx) => {
-        tx.objectStore(kind).put(row);
-        const entries: { kind: "avatars" | "media"; row: Row }[] = [];
-        for (const store of ["avatars", "media"] as const) {
-          const rows = await request<Row[]>(tx.objectStore(store).getAll());
-          for (const item of rows) entries.push({ kind: store, row: item });
-        }
-        let bytes = entries.reduce(
-          (sum, item) => sum + (item.row.bytes ?? 0),
-          0,
-        );
-        for (const item of entries.sort(
-          (a, b) => a.row.lastUsed - b.row.lastUsed,
-        )) {
-          if (bytes <= this.mediaBudget) break;
-          tx.objectStore(item.kind).delete(item.row.key);
-          bytes -= item.row.bytes ?? 0;
-        }
-      });
+      return this.transaction(
+        ["avatars", "media", "mediaMeta"],
+        "readwrite",
+        async (tx) => {
+          const media = tx.objectStore("media");
+          const meta = tx.objectStore("mediaMeta");
+          const avatars = tx.objectStore("avatars");
+          if (kind === "media") {
+            media.put({
+              key: row.key,
+              scope: row.scope,
+              data: stored,
+            } satisfies MediaRow);
+            meta.put(row);
+          } else {
+            avatars.put({ ...row, data: stored });
+          }
+          const entries = (
+            await Promise.all(
+              [avatars, meta].map(async (store) =>
+                (await request<MediaMetadata[]>(store.getAll())).map((row) => ({
+                  store,
+                  row,
+                })),
+              ),
+            )
+          ).flat();
+          let bytes = entries.reduce(
+            (sum, item) => sum + (item.row.bytes ?? 0),
+            0,
+          );
+          for (const { store, row } of entries.sort(
+            (a, b) => a.row.lastUsed - b.row.lastUsed,
+          )) {
+            if (bytes <= this.mediaBudget) break;
+            store.delete(row.key);
+            if (store === meta) media.delete(row.key);
+            bytes -= row.bytes ?? 0;
+          }
+        },
+      );
     });
   }
   invalidateMessage(account: string, message: string) {
     void this.enqueue(() =>
-      this.transaction(["media"], "readwrite", async (tx) => {
-        for (const row of await this.rows(tx, "media", account))
-          if (row.messageId === message)
-            tx.objectStore("media").delete(row.key);
+      this.transaction(["media", "mediaMeta"], "readwrite", async (tx) => {
+        const meta = tx.objectStore("mediaMeta");
+        const rows = await this.rows<MediaMetadata>(tx, "mediaMeta", account);
+        for (const row of rows) {
+          if (row.messageId !== message) continue;
+          tx.objectStore("media").delete(row.key);
+          meta.delete(row.key);
+        }
       }),
     );
   }
@@ -560,9 +644,9 @@ export class BrowserCache {
     available: boolean;
   }> {
     await this.flush();
-    const result = await this.transaction(fetched, "readonly", async (tx) => {
+    const result = await this.transaction(fetchedStats, "readonly", async (tx) => {
       const rows = await Promise.all(
-        fetched.map((name) => this.rows(tx, name, account)),
+        fetchedStats.map((name) => this.rows<Pick<Row, "bytes">>(tx, name, account)),
       );
       return {
         bytes: rows.reduce(

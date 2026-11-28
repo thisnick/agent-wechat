@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { IDBFactory } from "fake-indexeddb";
+import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
 import { BrowserCache } from "../src/browser-cache.ts";
 import { savedConversationCategories } from "../src/conversation-filters.ts";
 import { MediaPreviewCache } from "../src/media-preview-cache.ts";
@@ -57,8 +57,14 @@ function setup(t, options = {}) {
     t.after(() => cache.close());
     return cache;
   };
-  return { open, storage };
+  return { factory, open, storage };
 }
+
+const idbResult = (request) =>
+  new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
 
 test("restart reconstructs normalized history and preserves opaque and 64-bit IDs", async (t) => {
   const { open } = setup(t);
@@ -174,10 +180,164 @@ test("blob budget evicts least recently used bytes across media and avatars", as
   cache.invalidateMessage("a", "m1");
   await cache.flush();
   assert.equal(await cache.blob("media", "a", "one"), undefined);
+  assert.equal((await cache.stats("a")).bytes, 0);
+  assert.equal((await cache.stats("b")).bytes, 4);
   assert.equal(
     await (await cache.blob("media", "b", "three")).blob.text(),
     "3333",
   );
+});
+
+test("a persisted media hit updates only the recency row, never the bytes", async (t) => {
+  let now = 1;
+  const { factory, open } = setup(t, { now: () => now });
+  const cache = open();
+  cache.saveBlob("media", "a", "image", {
+    blob: new Blob(["photo"], { type: "image/png" }),
+    checkedAt: 50,
+  }, "m");
+  await cache.flush();
+  const db = await idbResult(factory.open("agent-wechat-cache", 2));
+  t.after(() => db.close());
+  const key = ["https://hub.test", "hub-1", "a", "image"];
+  const peek = (store) =>
+    idbResult(db.transaction(store).objectStore(store).get(key));
+  const bytes = await peek("media");
+  assert.equal("lastUsed" in bytes, false);
+  assert.equal("data" in await peek("mediaMeta"), false);
+  const puts = t.mock.method(IDBObjectStore.prototype, "put");
+  now = 10;
+  assert.equal(await (await cache.blob("media", "a", "image")).blob.text(), "photo");
+  assert.deepEqual(puts.mock.calls.map(({ this: store }) => store.name), ["mediaMeta"]);
+  assert.deepEqual(await peek("media"), bytes);
+  assert.deepEqual(await peek("mediaMeta"), {
+    key,
+    scope: JSON.stringify(key.slice(0, -1)),
+    lastUsed: 10,
+    bytes: 5,
+    messageId: "m",
+  });
+  await cache.clearAccount("a");
+  assert.equal(await peek("media"), undefined);
+  assert.equal(await peek("mediaMeta"), undefined);
+});
+
+test("an unreadable legacy media Blob removes its payload and metadata", async (t) => {
+  const { factory, open } = setup(t);
+  const cache = open();
+  const db = await idbResult(factory.open("agent-wechat-cache", 2));
+  t.after(() => db.close());
+  const key = ["https://hub.test", "hub-1", "a", "image"];
+  const scope = JSON.stringify(key.slice(0, -1));
+  const blob = new Blob(["photo"]);
+  const tx = db.transaction(["media", "mediaMeta"], "readwrite");
+  await Promise.all([
+    idbResult(
+      tx.objectStore("media").put({ key, scope, data: { blob, checkedAt: 1 } }),
+    ),
+    idbResult(
+      tx.objectStore("mediaMeta").put({ key, scope, lastUsed: 1, bytes: blob.size }),
+    ),
+  ]);
+  assert.equal((await cache.stats("a")).bytes, blob.size);
+  const arrayBuffer = t.mock.method(Blob.prototype, "arrayBuffer", async () => {
+    throw new DOMException("Backing file is unreadable", "NotReadableError");
+  });
+
+  assert.equal(await cache.blob("media", "a", "image"), undefined);
+  assert.equal(arrayBuffer.mock.callCount(), 1);
+  for (const store of ["media", "mediaMeta"]) {
+    const row = db.transaction(store).objectStore(store).get(key);
+    assert.equal(await idbResult(row), undefined, `${store} row was not removed`);
+  }
+  const stats = await cache.stats("a");
+  assert.equal(stats.available, true);
+  assert.equal(stats.bytes, 0);
+});
+
+test("v1 upgrade preserves the payload and backfills scoped metadata for LRU and invalidation", async (t) => {
+  const { factory, open } = setup(t, { mediaBudget: 8, now: () => 30 });
+  const v1 = factory.open("agent-wechat-cache", 1);
+  const key = (account, id) => ["https://hub.test", "hub-1", account, id];
+  const seed = (account, id, photo, lastUsed) => ({
+    key: key(account, id),
+    scope: JSON.stringify(key(account, id).slice(0, -1)),
+    data: { blob: new Blob([photo]), checkedAt: 10 },
+    lastUsed,
+    bytes: 4,
+    messageId: "same-message",
+  });
+  v1.onupgradeneeded = () => {
+    for (const name of ["threads", "contacts", "messages", "chatState", "syncState", "avatars", "media", "drafts", "receipts"])
+      v1.result.createObjectStore(name, { keyPath: "key" }).createIndex("scope", "scope");
+    const media = v1.transaction.objectStore("media");
+    media.put(seed("a", "older", "old!", 10));
+    media.put(seed("a", "newer", "keep", 20));
+  };
+  (await idbResult(v1)).close();
+  const puts = t.mock.method(IDBObjectStore.prototype, "put");
+  const cache = open();
+  assert.equal((await cache.stats("a")).bytes, 8);
+  assert.deepEqual(puts.mock.calls.map(({ this: store }) => store.name), ["mediaMeta", "mediaMeta"]);
+  cache.saveBlob("media", "b", "other", { blob: new Blob(["safe"]), checkedAt: 1 }, "same-message");
+  await cache.flush();
+  assert.equal(await cache.blob("media", "a", "older"), undefined);
+  assert.equal(await (await cache.blob("media", "a", "newer")).blob.text(), "keep");
+  cache.invalidateMessage("a", "same-message");
+  await cache.flush();
+  assert.equal(await cache.blob("media", "a", "newer"), undefined);
+  assert.equal(await (await cache.blob("media", "b", "other")).blob.text(), "safe");
+  assert.equal((await cache.stats("a")).bytes, 0);
+  assert.equal((await cache.stats("b")).bytes, 4);
+});
+
+test("a v2 upgrade waits for a v1 tab up to the blocked timeout", async (t) => {
+  for (const closesInTime of [true, false]) {
+    const name = closesInTime
+      ? "tab closes before timeout"
+      : "tab stays open past timeout";
+    await t.test(name, async (t) => {
+      const blockedTimeoutMs = 20;
+      const { factory, open } = setup(t, { blockedTimeoutMs });
+      const v1 = await idbResult(factory.open("agent-wechat-cache", 1));
+      t.after(() => v1.close());
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const blocked = Promise.withResolvers();
+      const upgraded = Promise.withResolvers();
+      const openDatabase = factory.open.bind(factory);
+      t.mock.method(factory, "open", (...args) => {
+        const request = openDatabase(...args);
+        request.addEventListener("blocked", blocked.resolve, { once: true });
+        request.addEventListener("success", () => upgraded.resolve(request.result), {
+          once: true,
+        });
+        return request;
+      });
+
+      const cache = open();
+      const stats = cache.stats("a");
+      await blocked.promise;
+      t.mock.timers.tick(blockedTimeoutMs - 1);
+      assert.equal(cache.available, true);
+
+      if (closesInTime) {
+        v1.close();
+        assert.equal((await stats).available, true);
+        t.mock.timers.tick(blockedTimeoutMs);
+        assert.equal(cache.available, true);
+      } else {
+        t.mock.timers.tick(1);
+        assert.equal((await stats).available, false);
+        assert.equal(cache.available, false);
+        v1.close();
+        const lateDb = await upgraded.promise;
+        assert.throws(() => lateDb.transaction("media"), {
+          name: "InvalidStateError",
+        });
+        assert.equal((await cache.stats("a")).available, false);
+      }
+    });
+  }
 });
 
 test("blocked browser storage falls back without losing this session's draft or receipt", async (t) => {
