@@ -20,6 +20,7 @@ use std::{
 
 const MAX_PARTITIONS: usize = 512;
 const MAX_NAL_UNITS: usize = 2048;
+const MAX_DECODED_PIXELS: u64 = 16_777_216;
 const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct WxgfPartition {
@@ -100,7 +101,7 @@ fn partition(bytes: &[u8]) -> Result<WxgfPartition> {
             && height > 0
             && width <= 4096
             && height <= 4096
-            && u64::from(width) * u64::from(height) <= 16_777_216,
+            && u64::from(width) * u64::from(height) <= MAX_DECODED_PIXELS,
         "image_decode_limit"
     );
     let mut position = header + 4;
@@ -175,24 +176,48 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn clamp_rlimit(current: libc::rlimit, limit: libc::rlim_t) -> libc::rlimit {
+    let cap = |existing: libc::rlim_t| {
+        if existing == libc::RLIM_INFINITY {
+            limit
+        } else {
+            existing.min(limit)
+        }
+    };
+    let rlim_max = cap(current.rlim_max);
+    let rlim_cur = cap(current.rlim_cur).min(rlim_max);
+    libc::rlimit { rlim_cur, rlim_max }
+}
+
 fn decoder_limits(command: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // setrlimit is async-signal-safe. The pre-exec closure performs no
-        // allocation or locking and applies only to the decoder subprocess.
+        // RLIMIT_AS is intentionally omitted: it caps virtual address space
+        // rather than resident memory, so dynamically linked FFmpeg builds with
+        // many shared libraries and pipeline threads can fail in pthread_create
+        // while RSS remains small. Decoder work is bounded by per-allocation
+        // (-max_alloc) and per-frame (-max_pixels) FFmpeg limits, single-frame
+        // and input limits, wall-clock timeout, and CPU/file caps; total RSS
+        // limits belong at the container or service cgroup level.
+        // Only direct getrlimit/setrlimit syscalls run in pre_exec with no
+        // allocation or locking, applying strictly to the decoder subprocess.
         unsafe {
             command.pre_exec(|| {
                 for (resource, limit) in [
-                    (libc::RLIMIT_AS, 512 * 1024 * 1024),
                     (libc::RLIMIT_CPU, 8),
                     (libc::RLIMIT_FSIZE, MAX_IMAGE_BYTES as libc::rlim_t),
                     (libc::RLIMIT_NOFILE, 32),
                 ] {
-                    let bounds = libc::rlimit {
-                        rlim_cur: limit,
-                        rlim_max: limit,
+                    let mut current = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
                     };
+                    if libc::getrlimit(resource, &mut current) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let bounds = clamp_rlimit(current, limit);
                     if libc::setrlimit(resource, &bounds) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -203,6 +228,24 @@ fn decoder_limits(command: &mut Command) {
     }
     #[cfg(not(unix))]
     let _ = command;
+}
+
+fn classify_decoder_spawn_error(error: &std::io::Error) -> &'static str {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return "wxgf_decoder_unavailable";
+    }
+    #[cfg(unix)]
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::ENOENT | libc::ENOTDIR | libc::EACCES | libc::ENOEXEC)
+    ) {
+        return "wxgf_decoder_unavailable";
+    }
+    #[cfg(not(unix))]
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        return "wxgf_decoder_unavailable";
+    }
+    "wxgf_decode_failed"
 }
 
 fn wait_for_preview(child: &mut Child, output: &Path, timeout: Duration) -> Result<()> {
@@ -226,6 +269,10 @@ fn wait_for_preview(child: &mut Child, output: &Path, timeout: Duration) -> Resu
 }
 
 fn decode_hevc(bytes: &[u8], program: &Path) -> Result<Vec<u8>> {
+    decode_hevc_with_max_pixels(bytes, program, MAX_DECODED_PIXELS)
+}
+
+fn decode_hevc_with_max_pixels(bytes: &[u8], program: &Path, max_pixels: u64) -> Result<Vec<u8>> {
     let directory = wechat_platform::private_tempdir("wechat-wxgf-")?;
     let input = directory.path().join("frame.hevc");
     let output = directory.path().join("preview.jpg");
@@ -250,10 +297,10 @@ fn decode_hevc(bytes: &[u8], program: &Path) -> Result<Vec<u8>> {
             "hevc",
             "-threads",
             "1",
-            "-err_detect",
-            "explode",
-            "-i",
+            "-max_pixels",
         ])
+        .arg(max_pixels.to_string())
+        .args(["-err_detect", "explode", "-i"])
         .arg(&input)
         .args([
             "-map",
@@ -287,7 +334,7 @@ fn decode_hevc(bytes: &[u8], program: &Path) -> Result<Vec<u8>> {
     decoder_limits(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|_| anyhow::anyhow!("wxgf_decoder_unavailable"))?;
+        .map_err(|error| anyhow::anyhow!(classify_decoder_spawn_error(&error)))?;
     wait_for_preview(&mut child, &output, DECODE_TIMEOUT)?;
     let length = std::fs::metadata(&output)?.len();
     ensure!(
@@ -478,5 +525,235 @@ mod tests {
             "wxgf_preview_limit"
         );
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clamp_rlimit_only_tightens_inherited_limits() {
+        let inf = libc::RLIM_INFINITY;
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: inf,
+                rlim_max: inf,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (32, 32));
+
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 16,
+                rlim_max: 64,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (16, 32));
+
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 8,
+                rlim_max: 16,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (8, 16));
+
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 4,
+                rlim_max: 4,
+            },
+            8,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (4, 4));
+
+        // Mixed finite/infinity pairs (such as macOS default RLIMIT_NOFILE).
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 16,
+                rlim_max: inf,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (16, 32));
+
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 64,
+                rlim_max: inf,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (32, 32));
+
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (0, 0));
+
+        // Defensive clamp if soft limit ever exceeds hard limit.
+        let clamped = clamp_rlimit(
+            libc::rlimit {
+                rlim_cur: 64,
+                rlim_max: 16,
+            },
+            32,
+        );
+        assert_eq!((clamped.rlim_cur, clamped.rlim_max), (16, 16));
+    }
+
+    #[test]
+    fn decoder_spawn_error_classification_separates_missing_binary_from_runtime_errors() {
+        assert_eq!(
+            classify_decoder_spawn_error(&std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "wxgf_decoder_unavailable"
+        );
+        #[cfg(unix)]
+        {
+            for code in [libc::ENOENT, libc::ENOTDIR, libc::EACCES, libc::ENOEXEC] {
+                assert_eq!(
+                    classify_decoder_spawn_error(&std::io::Error::from_raw_os_error(code)),
+                    "wxgf_decoder_unavailable"
+                );
+            }
+            for code in [libc::EPERM, libc::EINVAL, libc::EAGAIN, libc::ENOMEM] {
+                assert_eq!(
+                    classify_decoder_spawn_error(&std::io::Error::from_raw_os_error(code)),
+                    "wxgf_decode_failed"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decoder_limits_preserve_address_space_and_clamp_stricter_bounds() {
+        use std::os::unix::process::CommandExt;
+
+        let mut parent_as = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut parent_as) },
+            0
+        );
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", ":"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        decoder_limits(&mut command);
+        unsafe {
+            command.pre_exec(move || {
+                let mut current = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_AS, &mut current) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if current.rlim_cur != parent_as.rlim_cur || current.rlim_max != parent_as.rlim_max
+                {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                for (resource, expected_max) in [
+                    (libc::RLIMIT_CPU, 8 as libc::rlim_t),
+                    (libc::RLIMIT_FSIZE, MAX_IMAGE_BYTES as libc::rlim_t),
+                    (libc::RLIMIT_NOFILE, 32 as libc::rlim_t),
+                ] {
+                    if libc::getrlimit(resource, &mut current) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if current.rlim_max == libc::RLIM_INFINITY
+                        || current.rlim_max > expected_max
+                        || current.rlim_cur > current.rlim_max
+                    {
+                        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                }
+                Ok(())
+            });
+        }
+        assert!(command.status().unwrap().success());
+
+        // Tighter inherited hard limits must be clamped rather than failing with EPERM.
+        let mut tighter = Command::new("/bin/sh");
+        tighter
+            .args(["-c", ":"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            tighter.pre_exec(|| {
+                for (resource, cap) in [
+                    (libc::RLIMIT_CPU, 4 as libc::rlim_t),
+                    (libc::RLIMIT_FSIZE, (1024 * 1024) as libc::rlim_t),
+                ] {
+                    let mut current = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::getrlimit(resource, &mut current) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let bounds = clamp_rlimit(current, cap);
+                    if libc::setrlimit(resource, &bounds) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        decoder_limits(&mut tighter);
+        unsafe {
+            tighter.pre_exec(|| {
+                for (resource, cap) in [
+                    (libc::RLIMIT_CPU, 4 as libc::rlim_t),
+                    (libc::RLIMIT_FSIZE, (1024 * 1024) as libc::rlim_t),
+                ] {
+                    let mut current = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::getrlimit(resource, &mut current) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if current.rlim_max == libc::RLIM_INFINITY || current.rlim_max > cap {
+                        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                }
+                Ok(())
+            });
+        }
+        assert!(tighter.status().unwrap().success());
+    }
+
+    #[test]
+    fn decode_hevc_enforces_max_pixels_inside_decoder() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let selected = partition(FIXTURE).unwrap();
+        let hevc = &FIXTURE[selected.range];
+        assert!(decode_hevc(hevc, Path::new("ffmpeg")).is_ok());
+        assert_eq!(
+            decode_hevc_with_max_pixels(hevc, Path::new("ffmpeg"), 100)
+                .unwrap_err()
+                .to_string(),
+            "wxgf_decode_failed"
+        );
     }
 }
