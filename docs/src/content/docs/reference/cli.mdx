@@ -28,6 +28,7 @@ and explains what they do. Commands show readable results by default. Use `--jso
 | `wx config` | `client`, `servers add/list/remove/select`, `show` |
 | `wx profiles` | Read a stopped profile directly, without a daemon (`add`, `avatars`, `chats`, `contacts`, `groups`, `images`, `inspect`, `keys export`, `list`, `messages`, `select`) |
 | `wx store` | Experimental: copy, import and export profiles; `usage` shows what `control.sqlite` holds |
+| `wx feedback` | Print the repository link and a pre-filled bug-report URL (`--open` opens it in a browser in human mode) |
 | `wx version` | Version and build target |
 
 `contacts find`, `groups find` and `groups members list --search` search the saved catalog. Search ignores letter case and combines whitespace-separated words: `wx contacts find "Mira work"` can match a nickname and remark on the same contact. `contacts lookup` requests one or two exact contact IDs live from WeChat. The display name uses the contact ID if both the remark and nickname are blank. `groups lookup` requests the member roster for an exact group ID live from WeChat. Neither lookup saves its result; use `contacts refresh` or `groups members refresh` to update saved data.
@@ -54,6 +55,7 @@ accepted for existing scripts, but help shows the canonical commands.
 | `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | File holding the API token |
 | | `AGENT_WECHAT_TOKEN` | The token itself (prefer a file) |
 | `--config PATH` | `AGENT_WECHAT_CONFIG` | CLI config file |
+| | `AGENT_WECHAT_NO_PROMPTS` | Set to `1` to hide one-time CLI notices (also hidden when `CI` is set) |
 | `--json` | | Machine-readable results and errors. Event watches emit one JSON event per line. |
 
 Flags win over environment variables, which win over saved settings. Commands that start background work (sends, downloads, login, recall) also take `--detach` to return as soon as the work is queued.
@@ -67,6 +69,7 @@ Use `wx daemon status --json` to parse daemon status in a script. `wx serve --js
 | Code | Meaning |
 | --- | --- |
 | 0 | Done, or queued with `--detach` |
+| 1 | Unexpected error (`operation_failed`); run `wx feedback` to report it |
 | 2 | Bad input or configuration |
 | 3 | Can't reach the daemon |
 | 4 | Token rejected or missing a scope |

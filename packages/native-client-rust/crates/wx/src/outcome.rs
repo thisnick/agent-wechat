@@ -89,6 +89,21 @@ pub fn record(value: &Value) {
         set_exit(result_exit(value));
     }
 }
+pub fn json_error(exit: i32, code: &str, message: &str) -> Value {
+    let mut error = json!({
+        "code": code,
+        "message": message,
+        "retryable": exit == 3,
+    });
+    if exit == 1 && code == "operation_failed" {
+        error["report"] = json!("wx feedback --json");
+    }
+    json!({ "error": error })
+}
+pub fn human_error_hint(exit: i32, code: &str) -> Option<&'static str> {
+    (exit == 1 && code == "operation_failed")
+        .then_some("Unexpected error. Run `wx feedback` to file a bug report.")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +125,30 @@ mod tests {
             classify(&anyhow::anyhow!("account_ambiguous: choose one")).0,
             2
         );
+    }
+    #[test]
+    fn unexpected_operation_failed_errors_include_feedback_report_guidance() {
+        let (exit, code) = classify(&anyhow::anyhow!("unexpected internal state"));
+        assert_eq!((exit, code.as_str()), (1, "operation_failed"));
+        let unexpected = json_error(exit, &code, "unexpected internal state");
+        assert_eq!(unexpected["error"]["report"], "wx feedback --json");
+        assert_eq!(unexpected["error"]["retryable"], false);
+        assert!(human_error_hint(exit, &code)
+            .unwrap()
+            .contains("wx feedback"));
+
+        // Classified errors omit the bug-report field and hint.
+        for (classified_exit, classified_code) in [
+            (2, "invalid_configuration_or_input"),
+            (3, "endpoint_unavailable"),
+            (4, "unauthorized"),
+            (5, "needs_login"),
+            (9, "browser_open_failed"),
+        ] {
+            let payload = json_error(classified_exit, classified_code, "classified");
+            assert!(payload["error"].get("report").is_none());
+            assert_eq!(payload["error"]["retryable"], classified_exit == 3);
+            assert!(human_error_hint(classified_exit, classified_code).is_none());
+        }
     }
 }

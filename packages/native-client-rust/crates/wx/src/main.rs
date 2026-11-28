@@ -17,6 +17,7 @@ mod client_actions;
 mod config;
 mod daemon;
 mod events;
+mod feedback;
 mod login;
 mod outcome;
 mod output;
@@ -98,6 +99,12 @@ enum Command {
     },
     /// Show the CLI version, build target and API capabilities.
     Version,
+    /// Show the repository link and a pre-filled bug-report URL.
+    Feedback {
+        /// Open the pre-filled bug-report URL in the default browser (human mode only).
+        #[arg(long)]
+        open: bool,
+    },
     /// Show bundled third-party license notices.
     Licenses,
     /// Inspect configuration and manage saved servers.
@@ -1303,12 +1310,12 @@ async fn main() {
     if let Err(error) = run(cli).await {
         let (exit, code) = outcome::classify(&error);
         if json {
-            eprintln!(
-                "{}",
-                json!({"error":{"code":code,"message":error.to_string(),"retryable":exit==3}})
-            );
+            eprintln!("{}", outcome::json_error(exit, &code, &error.to_string()));
         } else {
             eprintln!("{error:#}");
+            if let Some(hint) = outcome::human_error_hint(exit, &code) {
+                eprintln!("{hint}");
+            }
         }
         std::process::exit(exit);
     }
@@ -1664,14 +1671,6 @@ async fn run(cli: Cli) -> Result<()> {
             return calls_cli::session::run_local(cmd.clone(), cli.json).await;
         }
     }
-    if matches!(cli.command, Command::Licenses) {
-        return output.print(
-            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
-        );
-    }
-    if matches!(cli.command, Command::Version) {
-        return output.print(&wechat_api::version());
-    }
     if cli.token_stdin
         && matches!(
             &cli.command,
@@ -1680,10 +1679,22 @@ async fn run(cli: Cli) -> Result<()> {
                 | Command::Config { .. }
                 | Command::Profiles { .. }
                 | Command::Version
+                | Command::Feedback { .. }
                 | Command::Licenses
         )
     {
         bail!("--token-stdin is supported by serve and HTTP client commands");
+    }
+    if matches!(cli.command, Command::Licenses) {
+        return output.print(
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+        );
+    }
+    if matches!(cli.command, Command::Version) {
+        return output.print(&wechat_api::version());
+    }
+    if let Command::Feedback { open } = cli.command {
+        return feedback::run(open, cli.json);
     }
     let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
@@ -1964,6 +1975,14 @@ async fn run(cli: Cli) -> Result<()> {
             | Command::Chats {
                 command: ChatCommand::List { .. } | ChatCommand::Find { .. }
             }
+    );
+    let is_send = matches!(
+        &cli.command,
+        Command::Messages {
+            command: MessageCommand::Send(_)
+        } | Command::Stickers {
+            command: stickers_cli::StickerCommand::Send { .. }
+        }
     );
     use reqwest::Method;
     let result = match cli.command {
@@ -2516,6 +2535,7 @@ async fn run(cli: Cli) -> Result<()> {
             events::list(&r, after, None).await?
         }
         Command::Version
+        | Command::Feedback { .. }
         | Command::Licenses
         | Command::Config { .. }
         | Command::Serve { .. }
@@ -2525,11 +2545,16 @@ async fn run(cli: Cli) -> Result<()> {
             unreachable!()
         }
     };
-    if chat_list {
+    let printed = if chat_list {
         output.chats(&result)
     } else {
         output.print(&result)
+    };
+    printed?;
+    if is_send {
+        feedback::maybe_record_send_and_emit_notice(&settings.path, &result, cli.json);
     }
+    Ok(())
 }
 async fn stdin_token() -> Result<String> {
     use std::io::IsTerminal;

@@ -451,6 +451,8 @@ wx events list --limit | takes <LIMIT>, default 100 | Return at most this many e
 wx events watch | - | Stream new events, optionally saving a resume cursor
 wx events watch --after | takes <AFTER> | Start after this event cursor, such as the last one you processed. Without it, the watch resumes from --cursor-file or starts from the newest event
 wx events watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
+wx feedback | - | Show the repository link and a pre-filled bug-report URL
+wx feedback --open | switch | Open the pre-filled bug-report URL in the default browser (human mode only)
 wx groups | - | Find groups and manage their names, settings and members
 wx groups --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx groups --search | takes <SEARCH> | Only list groups whose name or ID contains this text
