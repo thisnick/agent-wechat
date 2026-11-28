@@ -142,7 +142,7 @@ This validates configuration; it does not prove native login, account synchroniz
 
 ## systemd user unit
 
-`agent-wechat-native.service` is an optional systemd **user** unit. It runs `wx serve` for one signed-in OS user and lets systemd handle stop/restart and permissions. It is an alternative process owner to foreground `serve`, `wx daemon start`, Compose or OpenClaw managed mode; choose one. Nothing copies, enables or starts the unit automatically.
+`agent-wechat-native.service` is an optional systemd **user** unit. It runs `wx serve` for one signed-in OS user and lets systemd handle stop/restart and permissions. It is an alternative process owner to foreground `serve`, `wx daemon start`, Compose or OpenClaw managed mode; choose one. Nothing copies, enables or starts the unit automatically; on Linux, `wx daemon install` renders and installs a copy after confirmation, `wx daemon restart` restarts it, and `wx daemon uninstall` removes the unit without deleting data.
 
 The example uses a separately installed native executable at `~/.local/bin/wx`. Provision the default durable directory, config and mode-0600 token before starting. The unit uses filesystem restrictions and a private temporary directory, with write access only to the default durable root. If `dataDir` differs or a direct official profile is used, explicitly extend `ReadWritePaths` and ensure the necessary parent paths exist. Do not weaken all filesystem restrictions to fix a missing path.
 

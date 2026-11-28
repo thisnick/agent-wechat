@@ -434,13 +434,19 @@ wx contacts set <ID> | position 1, required | Exact existing contact ID
 wx contacts sync | - | Refresh the catalog from WeChat
 wx contacts sync --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
-wx daemon | - | Start, inspect or stop the local background daemon
+wx daemon | - | Start, restart, inspect, stop or install the local background daemon
+wx daemon install | - | Install and enable a Linux systemd user service for the local daemon
+wx daemon install --dry-run | switch | Print the rendered systemd unit without writing or enabling it
+wx daemon install --yes | switch | Install and enable the user service without prompting for confirmation
 wx daemon logs | - | Read the local daemon log, optionally following new lines
 wx daemon logs --follow | switch | Keep printing new log lines until interrupted
+wx daemon restart | - | Restart the local daemon managed by `wx daemon start` or the installed user service
+wx daemon restart --timeout | takes <TIMEOUT>, default 30 | Seconds to wait for a managed daemon to exit before starting again (1 to 300)
 wx daemon start | - | Start the local daemon in the background and wait until ready
 wx daemon status | - | Show the local managed daemon's state and identity
 wx daemon stop | - | Stop the owned local daemon without logging out of WeChat
 wx daemon stop --timeout | takes <TIMEOUT>, default 30 | Seconds to wait for the daemon to exit (1 to 300); it is never force-killed
+wx daemon uninstall | - | Disable and remove the installed Linux systemd user service without deleting data
 wx events | - | Read account events or watch for new events
 wx events --after | takes <AFTER> | Start after this event cursor, such as the last one you processed. Without it, a listing shows the most recent events and --watch starts from the newest event
 wx events --watch | switch | Keep printing new events as they arrive instead of listing once

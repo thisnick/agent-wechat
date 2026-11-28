@@ -26,6 +26,7 @@ mod parent_watch;
 mod port_owner;
 mod profile_cli;
 mod profile_export;
+mod service;
 mod settings;
 mod stickers_cli;
 use outcome::{failure, set_exit};
@@ -119,7 +120,7 @@ enum Command {
         #[arg(long)]
         exit_with_parent: bool,
     },
-    /// Start, inspect or stop the local background daemon.
+    /// Start, restart, inspect, stop or install the local background daemon.
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
@@ -1904,22 +1905,21 @@ async fn run(cli: Cli) -> Result<()> {
                 command: ConfigCommand::Show
             }
     ) {
-        let config = crate::config::resolve(
-            &crate::config::Overrides {
-                server_config: cli.server_config.clone(),
-                data_dir: cli.data_dir.clone(),
-                token_file: cli.token_file.clone(),
-                listen: cli.listen,
-                network_listen: cli.network_listen,
-                tls_cert_file: cli.tls_cert_file.clone(),
-                tls_key_file: cli.tls_key_file.clone(),
-            },
-            &env,
-            &cwd,
-        )?;
+        let overrides = crate::config::Overrides {
+            server_config: cli.server_config.clone(),
+            data_dir: cli.data_dir.clone(),
+            token_file: cli.token_file.clone(),
+            listen: cli.listen,
+            network_listen: cli.network_listen,
+            tls_cert_file: cli.tls_cert_file.clone(),
+            tls_key_file: cli.tls_key_file.clone(),
+        };
+        let config = crate::config::resolve(&overrides, &env, &cwd)?;
         return match cli.command {
             Command::Serve { .. } => serve(config, cli.token_stdin, cli.json, parent).await,
-            Command::Daemon { command } => daemon::run(config, command, output).await,
+            Command::Daemon { command } => {
+                daemon::run(config, &overrides, &env, command, output).await
+            }
             Command::Store { command } => {
                 offline(config, cli.account.unwrap_or_default(), command, output)
             }

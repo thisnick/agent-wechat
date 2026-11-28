@@ -12,6 +12,10 @@ impl Output {
         Self { json }
     }
 
+    pub(crate) fn is_json(self) -> bool {
+        self.json
+    }
+
     pub(crate) fn print(self, value: &impl serde::Serialize) -> Result<()> {
         let value = serde_json::to_value(value)?;
         super::outcome::record(&value);
