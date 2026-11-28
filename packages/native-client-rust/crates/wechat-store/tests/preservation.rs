@@ -573,3 +573,240 @@ fn wal_log_missing_indexed_commits_or_damaged_is_refused_unchanged() {
         assert!(recovery_directories(&path).is_empty(), "{name}");
     }
 }
+
+fn three_byte_shm_prefixes() -> [(&'static str, [u8; 3]); 2] {
+    let version = 3007000u32.to_ne_bytes();
+    [
+        ("zeros", [0, 0, 0]),
+        ("header prefix", [version[0], version[1], version[2]]),
+    ]
+}
+
+#[test]
+fn three_byte_shm_with_empty_or_missing_wal_is_admitted_and_rebuilt() {
+    for (prefix_name, shm_bytes) in three_byte_shm_prefixes() {
+        for empty_wal in [false, true] {
+            let label = format!("{prefix_name}, empty_wal={empty_wal}");
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("data");
+            let store = Store::open(&root).unwrap();
+            store.create_account("one").unwrap();
+            store.put_runtime("one", "preserved", b"kept").unwrap();
+            // Switch both control.sqlite and registry.sqlite into WAL mode and
+            // close cleanly so SQLite exercises WAL-index rebuild on next open.
+            let control_path = root.join("accounts/one/agent/control.sqlite");
+            let db = rusqlite::Connection::open(&control_path).unwrap();
+            db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            drop(db);
+            drop(store);
+            let registry_path = root.join("registry.sqlite");
+            let db = rusqlite::Connection::open(&registry_path).unwrap();
+            db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            drop(db);
+
+            // Install the 3-byte -shm (and optional 0-byte -wal) on both databases.
+            for db_path in [&registry_path, &control_path] {
+                if empty_wal {
+                    companion(db_path, "-wal", b"");
+                }
+                companion(db_path, "-shm", &shm_bytes);
+            }
+            let registry_before = family(&registry_path);
+            let control_before = family(&control_path);
+
+            let store = Store::open_existing(&root).unwrap();
+            // registry.sqlite stays open inside Store, so SQLite has rebuilt
+            // its -shm to a full 32 KiB WAL-index block.
+            let rebuilt_registry_shm = fs::read(root.join("registry.sqlite-shm")).unwrap();
+            assert!(
+                rebuilt_registry_shm.len() >= 32768
+                    && rebuilt_registry_shm.len().is_multiple_of(32768),
+                "{label}: expected rebuilt 32 KiB registry -shm, got {} bytes",
+                rebuilt_registry_shm.len()
+            );
+            assert_eq!(
+                u32::from_ne_bytes(rebuilt_registry_shm[..4].try_into().unwrap()),
+                3007000,
+                "{label}: rebuilt registry -shm header version"
+            );
+            assert_eq!(
+                rebuilt_registry_shm[12], 1,
+                "{label}: rebuilt registry -shm isInit"
+            );
+            let registry_backups = recovery_directories(&registry_path);
+            assert_eq!(registry_backups.len(), 1, "{label}: registry recovery dir");
+            assert!(
+                family(&registry_backups[0].join("database.sqlite")) == registry_before,
+                "{label}: registry recovery copy differs from pre-open source"
+            );
+
+            // Opening control.sqlite admits it, keeps the recovery copy, and
+            // rebuilds/cleans up the 3-byte -shm.
+            assert_eq!(
+                store.runtime("one", "preserved").unwrap().as_deref(),
+                Some(b"kept".as_slice()),
+                "{label}"
+            );
+            let control_backups = recovery_directories(&control_path);
+            assert_eq!(control_backups.len(), 1, "{label}: control recovery dir");
+            assert!(
+                family(&control_backups[0].join("database.sqlite")) == control_before,
+                "{label}: control recovery copy differs from pre-open source"
+            );
+            let control_shm_after = control_path.with_file_name("control.sqlite-shm");
+            if control_shm_after.exists() {
+                let len = fs::metadata(&control_shm_after).unwrap().len();
+                assert!(
+                    len >= 32768 && len.is_multiple_of(32768),
+                    "{label}: control -shm was not rebuilt (len={len})"
+                );
+            }
+            // A second read succeeds cleanly without adding another recovery copy.
+            assert_eq!(
+                store.runtime("one", "preserved").unwrap().as_deref(),
+                Some(b"kept".as_slice()),
+                "{label}: second read"
+            );
+            assert_eq!(recovery_directories(&control_path), control_backups);
+        }
+    }
+}
+
+#[test]
+fn three_byte_shm_with_valid_nonempty_wal_verifies_log_and_replays_commits() {
+    type WalCase = (&'static str, fn(&Generations) -> (&[u8], &'static [u8]));
+    let wal_cases: [WalCase; 2] = [
+        ("single-generation WAL", |g| {
+            (&g.first_wal, &[b'1'; 200_000])
+        }),
+        ("multi-generation WAL", |g| (&g.second_wal, b"second")),
+    ];
+    for (prefix_name, shm_bytes) in three_byte_shm_prefixes() {
+        for (wal_name, wal_case) in wal_cases {
+            let label = format!("{prefix_name}/{wal_name}");
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("data");
+            let store = Store::open(&root).unwrap();
+            store.create_account("one").unwrap();
+            store.put_runtime("one", "initial", b"base").unwrap();
+            let path = root.join("accounts/one/agent/control.sqlite");
+            let generations = generations(&path);
+            let (wal, expected) = wal_case(&generations);
+            install_family(&path, &generations.database, wal, &shm_bytes);
+            let before = family(&path);
+
+            assert_eq!(
+                store.runtime("one", "generation").unwrap().as_deref(),
+                Some(expected),
+                "{label}"
+            );
+            let backups = recovery_directories(&path);
+            assert_eq!(backups.len(), 1, "{label}");
+            assert!(
+                family(&backups[0].join("database.sqlite")) == before,
+                "{label}: recovery family differs from pre-open source"
+            );
+        }
+    }
+}
+
+#[test]
+fn three_byte_shm_with_invalid_wal_is_refused_unchanged() {
+    type Case = fn(&Generations) -> (Vec<u8>, &'static str);
+    let cases: [(&str, Case); 4] = [
+        ("corrupt frame checksum", |g| {
+            let mut wal = g.second_wal.clone();
+            wal[32 + 24 + 7] ^= 1;
+            (wal, "checksum")
+        }),
+        ("incomplete trailing frame", |g| {
+            let mut wal = g.second_wal.clone();
+            wal.extend_from_slice(b"partial frame");
+            (wal, "incomplete database WAL")
+        }),
+        ("damaged generation identity", |g| {
+            let mut wal = g.second_wal.clone();
+            wal[32 + 8] ^= 1;
+            (wal, "frame identity")
+        }),
+        ("uncommitted frames only", |g| {
+            let page = u32::from_be_bytes(g.second_wal[8..12].try_into().unwrap()) as usize;
+            let frame_size = page + 24;
+            let wal = g.second_wal[..32 + frame_size].to_vec();
+            assert_eq!(
+                u32::from_be_bytes(wal[32 + 4..32 + 8].try_into().unwrap()),
+                0,
+                "first frame of multi-frame transaction is not a commit"
+            );
+            (wal, "no verified commit")
+        }),
+    ];
+    for (prefix_name, shm_bytes) in three_byte_shm_prefixes() {
+        for (case_name, case) in cases {
+            let label = format!("{prefix_name}/{case_name}");
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("data");
+            let store = Store::open(&root).unwrap();
+            store.create_account("one").unwrap();
+            store.put_runtime("one", "initial", b"base").unwrap();
+            let path = root.join("accounts/one/agent/control.sqlite");
+            let generations = generations(&path);
+            let (wal, expected_error) = case(&generations);
+            install_family(&path, &generations.database, &wal, &shm_bytes);
+            let before = family(&path);
+            for _ in 0..2 {
+                let error = store.runtime("one", "generation").unwrap_err().to_string();
+                assert!(error.contains(expected_error), "{label}: {error}");
+                assert!(
+                    error.starts_with("cannot open ") && error.contains("control.sqlite"),
+                    "{label}: {error}"
+                );
+                assert!(family(&path) == before, "{label}: family changed");
+            }
+            assert!(recovery_directories(&path).is_empty(), "{label}");
+        }
+    }
+}
+
+#[test]
+fn unrecognized_short_or_odd_length_shm_is_still_refused_unchanged() {
+    let version = 3007000u32.to_ne_bytes();
+    let cases: [(&str, Vec<u8>); 10] = [
+        ("3-byte ascii", b"abc".to_vec()),
+        ("3-byte non-header", vec![0x01, 0x00, 0x00]),
+        ("3-byte ones", vec![0xff, 0xff, 0xff]),
+        ("1-byte zero", vec![0]),
+        ("2-byte zero", vec![0, 0]),
+        ("4-byte version", version.to_vec()),
+        ("96-byte zero", vec![0; 96]),
+        ("4096-byte zero", vec![0; 4096]),
+        ("32767-byte zero", vec![0; 32767]),
+        ("32769-byte zero", vec![0; 32769]),
+    ];
+    for (name, shm_bytes) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let store = Store::open(&root).unwrap();
+        store.create_account("one").unwrap();
+        store.put_runtime("one", "preserved", b"kept").unwrap();
+        let path = root.join("accounts/one/agent/control.sqlite");
+        companion(&path, "-wal", b"");
+        companion(&path, "-shm", &shm_bytes);
+        let before = family(&path);
+        for _ in 0..2 {
+            let error = store.runtime("one", "preserved").unwrap_err().to_string();
+            assert!(
+                error.contains("unrecognized database WAL index"),
+                "{name}: {error}"
+            );
+            assert!(
+                error.starts_with("cannot open ") && error.contains("control.sqlite"),
+                "{name}: {error}"
+            );
+            assert!(family(&path) == before, "{name}: family changed");
+        }
+        assert!(recovery_directories(&path).is_empty(), "{name}");
+    }
+}
