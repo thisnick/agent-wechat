@@ -6,17 +6,46 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaybackToken(u64);
 
-struct State {
+struct Shared {
+    // Producers may lock queue while holding producer, never the reverse.
+    producer: Mutex<ProducerState>,
+    queue: Mutex<QueueState>,
+}
+
+struct ProducerState {
+    generation: u64,
+    resampler: Option<(u32, Resampler)>,
+}
+
+struct QueueState {
     generation: u64,
     closed: bool,
     native_rate: u32,
     max_samples: usize,
     samples: VecDeque<f32>,
-    resampler: Option<(u32, Resampler)>,
+}
+
+impl QueueState {
+    fn check_token(&self, token: PlaybackToken) -> Result<(), AudioError> {
+        if self.closed {
+            return Err(AudioError::Closed);
+        }
+        if token.0 != self.generation {
+            return Err(AudioError::StalePlayback);
+        }
+        Ok(())
+    }
+
+    fn check_capacity(&self, count: usize) -> Result<(), AudioError> {
+        if count > self.max_samples.saturating_sub(self.samples.len()) {
+            return Err(AudioError::QueueFull);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
-pub struct PlaybackHandle(Arc<Mutex<State>>);
+pub struct PlaybackHandle(Arc<Shared>);
 
 impl PlaybackHandle {
     #[cfg(any(feature = "native-audio", test))]
@@ -25,19 +54,27 @@ impl PlaybackHandle {
         if max_samples == 0 {
             return Err(AudioError::InvalidConfig);
         }
-        Ok(Self(Arc::new(Mutex::new(State {
-            generation: 0,
-            closed: false,
-            native_rate,
-            max_samples,
-            samples: VecDeque::with_capacity(max_samples),
-            resampler: None,
-        }))))
+        Ok(Self(Arc::new(Shared {
+            producer: Mutex::new(ProducerState {
+                generation: 0,
+                resampler: None,
+            }),
+            queue: Mutex::new(QueueState {
+                generation: 0,
+                closed: false,
+                native_rate,
+                max_samples,
+                samples: VecDeque::with_capacity(max_samples),
+            }),
+        })))
     }
     /// Begin a producer in the current generation. The token must stay with its
     /// source response, including tasks that are still computing audio.
     pub fn token(&self) -> Result<PlaybackToken, AudioError> {
-        let state = self.0.lock().map_err(|_| AudioError::Closed)?;
+        if self.0.producer.is_poisoned() {
+            return Err(AudioError::Closed);
+        }
+        let state = self.0.queue.lock().map_err(|_| AudioError::Closed)?;
         if state.closed {
             return Err(AudioError::Closed);
         }
@@ -56,72 +93,91 @@ impl PlaybackHandle {
         {
             return Err(AudioError::InvalidConfig);
         }
-        let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
-        if state.closed {
-            return Err(AudioError::Closed);
+        let mut producer = self.0.producer.lock().map_err(|_| AudioError::Closed)?;
+        let (native_rate, generation) = {
+            let queue = self.0.queue.lock().map_err(|_| AudioError::Closed)?;
+            queue.check_token(token)?;
+            // Preflight before advancing streaming resampler state.
+            let maximum_output = (samples.len() * queue.native_rate as usize)
+                .div_ceil(sample_rate as usize)
+                + if sample_rate == queue.native_rate {
+                    0
+                } else {
+                    queue.native_rate as usize / 100
+                };
+            queue.check_capacity(maximum_output)?;
+            (queue.native_rate, queue.generation)
+        };
+        if producer.generation != generation {
+            producer.resampler = None;
+            producer.generation = generation;
         }
-        if token.0 != state.generation {
-            return Err(AudioError::StalePlayback);
-        }
-        // Preflight before advancing streaming resampler state.
-        let maximum_output = (samples.len() * state.native_rate as usize)
-            .div_ceil(sample_rate as usize)
-            + if sample_rate == state.native_rate {
-                0
-            } else {
-                state.native_rate as usize / 100
-            };
-        if maximum_output > state.max_samples.saturating_sub(state.samples.len()) {
-            return Err(AudioError::QueueFull);
-        }
-        let output = if sample_rate == state.native_rate {
+        let resampled = if sample_rate == native_rate {
             // A rate change ends the old resampling stream, including its tail.
-            state.resampler = None;
-            samples.to_vec()
+            producer.resampler = None;
+            None
         } else {
-            if state
+            if producer
                 .resampler
                 .as_ref()
                 .is_none_or(|(rate, _)| *rate != sample_rate)
             {
-                state.resampler =
-                    Some((sample_rate, Resampler::new(sample_rate, state.native_rate)?));
+                producer.resampler = Some((sample_rate, Resampler::new(sample_rate, native_rate)?));
             }
-            state
-                .resampler
-                .as_mut()
-                .expect("resampler set")
-                .1
-                .process(samples)?
+            Some(
+                producer
+                    .resampler
+                    .as_mut()
+                    .expect("resampler set")
+                    .1
+                    .process(samples)?,
+            )
         };
-        if output.len() > state.max_samples.saturating_sub(state.samples.len()) {
-            return Err(AudioError::QueueFull);
+        let output = resampled.as_deref().unwrap_or(samples);
+        {
+            let mut queue = self.0.queue.lock().map_err(|_| AudioError::Closed)?;
+            queue.check_token(token)?;
+            queue.check_capacity(output.len())?;
+            queue.samples.extend(output.iter().copied());
         }
-        state.samples.extend(output);
         Ok(())
     }
     /// Drop queued audio and old resampling history. This cannot retract samples
     /// already submitted to an OS/hardware buffer; the backend flushes next poll.
     pub fn clear(&self) -> Result<PlaybackToken, AudioError> {
-        let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
-        if state.closed {
+        if self.0.producer.is_poisoned() {
             return Err(AudioError::Closed);
         }
-        state.generation = state.generation.checked_add(1).ok_or(AudioError::Closed)?;
-        state.samples.clear();
-        state.resampler = None;
-        Ok(PlaybackToken(state.generation))
+        let mut queue = self.0.queue.lock().map_err(|_| AudioError::Closed)?;
+        if queue.closed {
+            return Err(AudioError::Closed);
+        }
+        queue.generation = queue.generation.checked_add(1).ok_or(AudioError::Closed)?;
+        queue.samples.clear();
+        let generation = queue.generation;
+        drop(queue);
+
+        // A producer may already have started resampling in the new generation.
+        let mut producer = self.0.producer.lock().map_err(|_| AudioError::Closed)?;
+        if producer.generation < generation {
+            producer.resampler = None;
+            producer.generation = generation;
+        }
+        Ok(PlaybackToken(generation))
     }
     pub(crate) fn close(&self) {
-        if let Ok(mut state) = self.0.lock() {
-            state.closed = true;
-            state.samples.clear();
-            state.resampler = None;
+        if let Ok(mut queue) = self.0.queue.lock() {
+            queue.closed = true;
+            queue.samples.clear();
+        }
+        // Close admission before waiting for any producer to finish resampling.
+        if let Ok(mut producer) = self.0.producer.lock() {
+            producer.resampler = None;
         }
     }
     #[cfg(all(feature = "native-audio", target_os = "macos"))]
     pub(crate) fn render_callback(&self, output: &mut [f32]) {
-        if let Ok(mut state) = self.0.try_lock() {
+        if let Ok(mut state) = self.0.queue.try_lock() {
             for sample in output {
                 *sample = if state.closed {
                     0.0
@@ -139,7 +195,7 @@ impl PlaybackHandle {
     ))]
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn drain(&self, output: &mut [f32]) -> Result<u64, AudioError> {
-        let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
+        let mut state = self.0.queue.lock().map_err(|_| AudioError::Closed)?;
         for sample in output {
             *sample = if state.closed {
                 0.0
@@ -153,7 +209,7 @@ impl PlaybackHandle {
     /// tail slots with synthetic silence.
     #[cfg(any(all(feature = "native-audio", target_os = "linux"), test))]
     pub(crate) fn drain_available(&self, output: &mut [f32]) -> Result<(usize, u64), AudioError> {
-        let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
+        let mut state = self.0.queue.lock().map_err(|_| AudioError::Closed)?;
         if state.closed {
             return Ok((0, state.generation));
         }
@@ -175,6 +231,165 @@ impl PlaybackHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn wait_for_queue_fence(
+        playback: &PlaybackHandle,
+        fenced: impl Fn(&QueueState) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        // Do not block on the queue: the worker might hold it while waiting for
+        // the producer lock if the lock order regresses.
+        while Instant::now() < deadline {
+            if playback
+                .0
+                .queue
+                .try_lock()
+                .is_ok_and(|queue| fenced(&queue))
+            {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+
+    #[test]
+    fn close_fences_queue_while_producer_is_held() {
+        let playback = PlaybackHandle::new(48_000, 100).unwrap();
+        let token = playback.token().unwrap();
+        playback.enqueue(token, &[0.1; 160], 16_000).unwrap();
+        let producer = playback.0.producer.lock().unwrap();
+        assert!(producer.resampler.is_some());
+        assert!(!playback.0.queue.lock().unwrap().samples.is_empty());
+
+        let worker = playback.clone();
+        let closer = thread::spawn(move || worker.close());
+        let drained = wait_for_queue_fence(&playback, |queue| queue.closed)
+            .then(|| playback.drain_available(&mut [0.0; 480]).unwrap());
+        drop(producer);
+        closer.join().unwrap();
+
+        assert_eq!(drained, Some((0, token.0)));
+        assert!(playback.0.producer.lock().unwrap().resampler.is_none());
+        assert!(matches!(
+            playback.enqueue(token, &[0.1; 160], 16_000),
+            Err(AudioError::Closed)
+        ));
+    }
+
+    #[test]
+    fn clear_fences_queue_immediately_and_resets_resampler_once() {
+        for new_producer_started in [false, true] {
+            let playback = PlaybackHandle::new(48_000, 100).unwrap();
+            let old = playback.token().unwrap();
+            playback.enqueue(old, &[0.1; 160], 16_000).unwrap();
+            let mut producer = playback.0.producer.lock().unwrap();
+            assert!(producer.resampler.is_some());
+            assert!(!playback.0.queue.lock().unwrap().samples.is_empty());
+
+            let worker = playback.clone();
+            let clearer = thread::spawn(move || worker.clear());
+            let generation = old.0 + 1;
+            let fenced = wait_for_queue_fence(&playback, |queue| {
+                queue.generation == generation && queue.samples.is_empty()
+            });
+            if fenced && new_producer_started {
+                // Model a new-generation enqueue winning the producer lock.
+                let mut resampler = Resampler::new(16_000, 48_000).unwrap();
+                assert!(resampler.process(&[0.2; 80]).unwrap().is_empty());
+                producer.resampler = Some((16_000, resampler));
+                producer.generation = generation;
+            }
+            drop(producer);
+            let current = clearer.join().unwrap().unwrap();
+
+            assert!(
+                fenced,
+                "clear must fence the queue before waiting for the producer"
+            );
+            assert_eq!(current, PlaybackToken(generation));
+            assert_eq!(
+                playback.0.producer.lock().unwrap().resampler.is_some(),
+                new_producer_started
+            );
+            assert!(matches!(
+                playback.enqueue(old, &[0.1; 80], 16_000),
+                Err(AudioError::StalePlayback)
+            ));
+            playback.enqueue(current, &[0.3; 80], 16_000).unwrap();
+            let (count, _) = playback.drain_available(&mut [0.0; 480]).unwrap();
+            assert_eq!(count, if new_producer_started { 480 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn enqueue_resets_stale_resampler_when_ahead_of_clear() {
+        let playback = PlaybackHandle::new(48_000, 100).unwrap();
+        let old = playback.token().unwrap();
+        // Prime the generation-0 resampler with half of a 160-sample chunk.
+        playback.enqueue(old, &[0.2; 80], 16_000).unwrap();
+        assert!(playback.0.queue.lock().unwrap().samples.is_empty());
+        assert!(playback.0.producer.lock().unwrap().resampler.is_some());
+
+        // Model the window where clear() has fenced the queue to generation 1
+        // and released the queue lock, but has not yet acquired producer.
+        {
+            let mut queue = playback.0.queue.lock().unwrap();
+            queue.generation = old.0 + 1;
+            queue.samples.clear();
+        }
+        let current = playback.token().unwrap();
+        assert_eq!(current, PlaybackToken(old.0 + 1));
+        assert_eq!(playback.0.producer.lock().unwrap().generation, old.0);
+
+        // A new-generation enqueue winning producer must discard the stale
+        // generation-0 resampler instead of blending its buffered history.
+        playback.enqueue(current, &[0.3; 80], 16_000).unwrap();
+        assert_eq!(playback.0.producer.lock().unwrap().generation, current.0);
+        assert_eq!(
+            playback.drain_available(&mut [0.0; 480]).unwrap(),
+            (0, current.0)
+        );
+
+        // Completing the chunk in generation 1 must match a fresh resampler.
+        playback.enqueue(current, &[0.3; 80], 16_000).unwrap();
+        let mut actual = [0.0; 480];
+        let (count, generation) = playback.drain_available(&mut actual).unwrap();
+        assert_eq!((count, generation), (480, current.0));
+
+        let mut fresh = Resampler::new(16_000, 48_000).unwrap();
+        assert!(fresh.process(&[0.3; 80]).unwrap().is_empty());
+        let expected = fresh.process(&[0.3; 80]).unwrap();
+        assert_eq!(&actual[..count], expected.as_slice());
+    }
+
+    #[test]
+    fn poisoned_producer_fences_token_and_clear_without_mutating_queue() {
+        let playback = PlaybackHandle::new(48_000, 100).unwrap();
+        let token = playback.token().unwrap();
+        playback.enqueue(token, &[0.5; 480], 48_000).unwrap();
+
+        let worker = playback.clone();
+        assert!(thread::spawn(move || {
+            let _guard = worker.0.producer.lock().unwrap();
+            panic!("poison producer lock");
+        })
+        .join()
+        .is_err());
+
+        assert!(matches!(playback.token(), Err(AudioError::Closed)));
+        assert!(matches!(playback.clear(), Err(AudioError::Closed)));
+        assert!(matches!(
+            playback.enqueue(token, &[0.5; 480], 48_000),
+            Err(AudioError::Closed)
+        ));
+        let queue = playback.0.queue.lock().unwrap();
+        assert_eq!(queue.generation, token.0);
+        assert_eq!(queue.samples.len(), 480);
+    }
+
     #[test]
     fn old_producer_cannot_refill_after_clear_or_close() {
         let queue = PlaybackHandle::new(48_000, 100).unwrap();
@@ -186,7 +401,14 @@ mod tests {
             Err(AudioError::StalePlayback)
         ));
         queue.enqueue(current, &[0.3; 480], 48_000).unwrap();
-        assert!(queue.0.lock().unwrap().samples.iter().all(|s| *s == 0.3));
+        assert!(queue
+            .0
+            .queue
+            .lock()
+            .unwrap()
+            .samples
+            .iter()
+            .all(|s| *s == 0.3));
         queue.close();
         assert!(matches!(
             queue.enqueue(current, &[0.1; 480], 48_000),
@@ -201,22 +423,56 @@ mod tests {
             queue.enqueue(token, &[0.1; 400], 16_000),
             Err(AudioError::QueueFull)
         ));
-        assert!(queue.0.lock().unwrap().resampler.is_none());
+        assert!(queue.0.producer.lock().unwrap().resampler.is_none());
         queue.enqueue(token, &[0.1; 80], 16_000).unwrap();
-        assert!(queue.0.lock().unwrap().resampler.is_some());
+        assert!(queue.0.producer.lock().unwrap().resampler.is_some());
     }
     #[test]
     fn resampling_preserves_history_across_chunks_and_clear_resets_it() {
         let queue = PlaybackHandle::new(48_000, 200).unwrap();
         let token = queue.token().unwrap();
         queue.enqueue(token, &[0.4; 80], 16_000).unwrap();
-        assert!(queue.0.lock().unwrap().samples.is_empty());
+        assert!(queue.0.queue.lock().unwrap().samples.is_empty());
         queue.enqueue(token, &[0.4; 80], 16_000).unwrap();
-        assert!(!queue.0.lock().unwrap().samples.is_empty());
+        assert!(!queue.0.queue.lock().unwrap().samples.is_empty());
         queue.clear().unwrap();
-        let state = queue.0.lock().unwrap();
-        assert!(state.samples.is_empty());
-        assert!(state.resampler.is_none());
+        assert!(queue.0.queue.lock().unwrap().samples.is_empty());
+        assert!(queue.0.producer.lock().unwrap().resampler.is_none());
+    }
+    #[test]
+    fn resampling_preflight_uses_exact_remaining_space_after_clear() {
+        let playback = PlaybackHandle::new(48_000, 20).unwrap();
+        let token = playback.token().unwrap();
+        // 160 inputs at 16 kHz need a 480-sample output plus 480 samples of
+        // headroom. One queued native sample makes that preflight fail.
+        playback.enqueue(token, &[0.2], 48_000).unwrap();
+        assert!(matches!(
+            playback.enqueue(token, &[0.4; 160], 16_000),
+            Err(AudioError::QueueFull)
+        ));
+        assert!(playback.0.producer.lock().unwrap().resampler.is_none());
+
+        let current = playback.clear().unwrap();
+        assert!(matches!(
+            playback.enqueue(token, &[0.4; 160], 16_000),
+            Err(AudioError::StalePlayback)
+        ));
+        playback.enqueue(current, &[0.4; 160], 16_000).unwrap();
+        // The drain path must remain usable while the producer lock is held.
+        let producer = playback.0.producer.lock().unwrap();
+        let producer_generation = producer.generation;
+        let (done, drained) = std::sync::mpsc::channel();
+        let consumer = playback.clone();
+        let reader = std::thread::spawn(move || {
+            let _ = done.send(consumer.drain_available(&mut [0.; 960]));
+        });
+        let result = drained.recv_timeout(std::time::Duration::from_secs(2));
+        drop(producer);
+        reader.join().unwrap();
+        let (count, generation) = result.expect("drain must not wait for producer").unwrap();
+        assert!(count > 0);
+        assert_eq!(generation, current.0);
+        assert_eq!(producer_generation, generation);
     }
     #[test]
     fn drain_available_returns_only_queued_samples_without_zero_padding() {
