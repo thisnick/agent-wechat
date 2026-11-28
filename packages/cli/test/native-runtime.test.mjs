@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, copyFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, copyFile, lstat, realpath, rename, symlink, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { assetName, fetchBytes, inspectBinary, installNative, installPath, manifestName, readManifest,
-  resolveNative, targetKey, supportedTargets, targetFor, validateManifest } from '../scripts/native-runtime.mjs';
+import { assetName, fetchBytes, inspectBinary, installNative, installPath, manifestName, overrideStampPath, readManifest,
+  resolveNative, stampPath, targetKey, supportedTargets, targetFor, validateManifest, verifyBytes } from '../scripts/native-runtime.mjs';
 import { prepareNativePackage, nativePackageUnpublished } from '../../../scripts/release/prepare-package.mjs';
 const exec = promisify(execFile);
 const version = '0.16.0';
@@ -17,7 +17,7 @@ const supportedTarget = targetFor();
 const identity = { product: 'agent-wechat', backend: 'native', version, apiVersion: 1, target: supportedTarget.rustTarget, capabilities: ['serve'] };
 const code = `#!/bin/sh\nexec node - "$@" <<'NATIVE_FIXTURE'\nif(process.argv[2]==='--json')console.log(${JSON.stringify(JSON.stringify(identity))});else if(process.argv[2]==='wait'){process.on('SIGTERM',()=>process.exit(23));setInterval(()=>{},1000);console.log('ready')}else {console.log(JSON.stringify(process.argv.slice(2)));process.exit(7)}\nNATIVE_FIXTURE\n`;
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'wx-native-package-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'wx-native-package-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const artifacts = join(root, 'artifacts');
   await mkdir(artifacts);
@@ -173,4 +173,274 @@ test('publication requires every target; an ARM manifest selects only the ARM by
   const fragment = { ...manifest, assets: [manifest.assets.find(asset => asset.arch === 'arm64')] };
   assert.throws(() => validateManifest(fragment, version, { target: arm, requireAllTargets: true }), /every supported target/);
   assert.throws(() => validateManifest(fragment, version, { target: x64 }), /no asset for linux-x64/);
+});
+
+test('install writes verification stamp and matching launch skips hashing and identity exec', async t => {
+  const { root, artifacts, asset } = await fixture(t);
+  const destination = await installNative({ root, artifactDir: artifacts });
+  const stampFile = stampPath(destination);
+  const stamp = JSON.parse(await readFile(stampFile, 'utf8'));
+  const info = await lstat(destination, { bigint: true });
+  assert.equal(stamp.schemaVersion, 1);
+  assert.equal(stamp.mode, 'installed');
+  assert.equal(stamp.path, destination);
+  assert.equal(stamp.version, version);
+  assert.equal(stamp.target, supportedTarget.rustTarget);
+  assert.equal(stamp.sha256, asset.sha256);
+  assert.deepEqual(stamp.stat, {
+    size: String(info.size),
+    mtimeNs: String(info.mtimeNs),
+    ctimeNs: String(info.ctimeNs),
+    ino: String(info.ino),
+    dev: String(info.dev),
+  });
+  assert.deepEqual(stamp.identity, identity);
+
+  let verifyCalls = 0;
+  let inspectCalls = 0;
+  const resolved = await resolveNative({
+    root,
+    verify: (bytes, expected) => { verifyCalls++; return verifyBytes(bytes, expected); },
+    inspect: async (p, v) => { inspectCalls++; return inspectBinary(p, v); },
+  });
+  assert.equal(resolved, destination);
+  assert.equal(verifyCalls, 0);
+  assert.equal(inspectCalls, 0);
+});
+
+test('stamp mismatch after size, same-size content, mtime, ctime, inode or device change re-verifies', async t => {
+  const { root, artifacts, bytes } = await fixture(t);
+  const path = await installNative({ root, artifactDir: artifacts });
+  const stampFile = stampPath(path);
+
+  let verifyCalls = 0;
+  let inspectCalls = 0;
+  const spies = {
+    verify: (b, expected) => { verifyCalls++; return verifyBytes(b, expected); },
+    inspect: async (p, v) => { inspectCalls++; return inspectBinary(p, v); },
+  };
+
+  // mtime change on a valid binary forces full verification and refreshes the stamp.
+  const origStat = await lstat(path, { bigint: true });
+  const shiftedMtime = new Date(Number(origStat.mtimeNs / 1_000_000n) - 5000);
+  await utimes(path, new Date(Number(origStat.atimeNs / 1_000_000n)), shiftedMtime);
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 1);
+  assert.equal(inspectCalls, 1);
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 1);
+  assert.equal(inspectCalls, 1);
+
+  // ctime change (e.g. chmod back and forth after a clock tick) forces full verification.
+  await new Promise(done => setTimeout(done, 15));
+  await chmod(path, 0o700);
+  await chmod(path, 0o755);
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 2);
+  assert.equal(inspectCalls, 2);
+
+  // inode change with identical bytes and preserved mtime forces full verification.
+  const beforeReplace = await lstat(path, { bigint: true });
+  const replacement = `${path}.new-inode`;
+  await writeFile(replacement, bytes, { mode: 0o755 });
+  await chmod(replacement, 0o755);
+  await utimes(replacement, new Date(Number(beforeReplace.atimeNs / 1_000_000n)), new Date(Number(beforeReplace.mtimeNs / 1_000_000n)));
+  await rename(replacement, path);
+  const afterReplace = await lstat(path, { bigint: true });
+  assert.notEqual(afterReplace.ino, beforeReplace.ino);
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 3);
+  assert.equal(inspectCalls, 3);
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 3);
+  assert.equal(inspectCalls, 3);
+
+  // device mismatch in stamp forces full verification and refreshes the stamp.
+  const devMismatch = JSON.parse(await readFile(stampFile, 'utf8'));
+  devMismatch.stat.dev = String(BigInt(devMismatch.stat.dev) + 1n);
+  await writeFile(stampFile, JSON.stringify(devMismatch));
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 4);
+  assert.equal(inspectCalls, 4);
+
+  // size mismatch in stamp alone forces full verification and refreshes the stamp.
+  const sizeMismatch = JSON.parse(await readFile(stampFile, 'utf8'));
+  sizeMismatch.stat.size = String(BigInt(sizeMismatch.stat.size) + 1n);
+  await writeFile(stampFile, JSON.stringify(sizeMismatch));
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 5);
+  assert.equal(inspectCalls, 5);
+
+  // Size change on disk against a matching stamp is rejected without executing the binary.
+  await writeFile(path, Buffer.concat([bytes, Buffer.from('\n')]));
+  await assert.rejects(resolveNative({ root, ...spies }), /SHA-256/);
+  assert.equal(verifyCalls, 6);
+  assert.equal(inspectCalls, 5);
+
+  // Restore valid binary & matching stamp before testing same-size corruption with restored mtime.
+  await writeFile(path, bytes);
+  assert.equal(await resolveNative({ root, ...spies }), path);
+  assert.equal(verifyCalls, 7);
+  assert.equal(inspectCalls, 6);
+
+  // Same-size corruption with restored mtime still misses via ctime and is rejected before execution.
+  const preCorrupt = await lstat(path, { bigint: true });
+  const mutated = Buffer.from(bytes);
+  mutated[mutated.length - 1] = mutated[mutated.length - 1] === 0x0a ? 0x20 : 0x0a;
+  assert.equal(mutated.length, bytes.length);
+  await new Promise(done => setTimeout(done, 15));
+  await writeFile(path, mutated);
+  await utimes(path, new Date(Number(preCorrupt.atimeNs / 1_000_000n)), new Date(Number(preCorrupt.mtimeNs / 1_000_000n)));
+  await assert.rejects(resolveNative({ root, ...spies }), /SHA-256/);
+  assert.equal(verifyCalls, 8);
+  assert.equal(inspectCalls, 6);
+});
+
+test('missing, corrupted, invalid or symlink stamp falls back to full verification', async t => {
+  const { root, artifacts, manifest } = await fixture(t);
+  const path = await installNative({ root, artifactDir: artifacts });
+  const stampFile = stampPath(path);
+  const validStamp = JSON.parse(await readFile(stampFile, 'utf8'));
+
+  const mutations = [
+    async () => rm(stampFile, { force: true }),
+    async () => writeFile(stampFile, '{truncated'),
+    async () => writeFile(stampFile, JSON.stringify({ ...validStamp, schemaVersion: 99 })),
+    async () => writeFile(stampFile, JSON.stringify({ ...validStamp, mode: 'override' })),
+    async () => writeFile(stampFile, JSON.stringify({ ...validStamp, sha256: '0'.repeat(64) })),
+    async () => writeFile(stampFile, JSON.stringify({ ...validStamp, path: `${path}.other` })),
+    async () => writeFile(stampFile, JSON.stringify({ ...validStamp, stat: { ...validStamp.stat, size: Number(validStamp.stat.size) } })),
+    async () => writeFile(stampFile, JSON.stringify({ ...validStamp, identity: { ...validStamp.identity, capabilities: [] } })),
+    async () => {
+      const target = join(root, 'external-stamp.json');
+      await writeFile(target, JSON.stringify(validStamp));
+      await rm(stampFile, { force: true });
+      await symlink(target, stampFile);
+    },
+  ];
+
+  for (const mutate of mutations) {
+    await mutate();
+    let verifyCalls = 0;
+    let inspectCalls = 0;
+    assert.equal(await resolveNative({
+      root,
+      verify: (b, expected) => { verifyCalls++; return verifyBytes(b, expected); },
+      inspect: async (p, v) => { inspectCalls++; return inspectBinary(p, v); },
+    }), path);
+    assert.equal(verifyCalls, 1);
+    assert.equal(inspectCalls, 1);
+    const repaired = await lstat(stampFile);
+    assert.equal(repaired.isFile(), true);
+    assert.equal(repaired.isSymbolicLink(), false);
+  }
+
+  // Updating the bundled manifest hash invalidates the existing stamp and rejects the old binary.
+  const updatedManifest = structuredClone(manifest);
+  updatedManifest.assets[0].sha256 = 'f'.repeat(64);
+  await writeFile(join(root, 'native-release.json'), JSON.stringify(updatedManifest));
+  await assert.rejects(resolveNative({ root }), /SHA-256/);
+});
+
+test('symlink or non-executable binary never passes cached resolution', async t => {
+  const { root, artifacts, bytes } = await fixture(t);
+  const path = await installNative({ root, artifactDir: artifacts });
+
+  await chmod(path, 0o644);
+  await assert.rejects(resolveNative({ root }), error => error?.code === 'EACCES');
+
+  await chmod(path, 0o755);
+  assert.equal(await resolveNative({ root }), path);
+
+  const other = join(root, 'other-wx');
+  await writeFile(other, bytes, { mode: 0o755 });
+  await rm(path);
+  await symlink(other, path);
+  await assert.rejects(resolveNative({ root }), /regular file/);
+});
+
+test('read-only install directory hits cache and falls back cleanly when stamp is missing', async t => {
+  if (process.getuid?.() === 0) return;
+  const { root, artifacts } = await fixture(t);
+  const path = await installNative({ root, artifactDir: artifacts });
+  const dir = dirname(path);
+
+  try {
+    await chmod(dir, 0o555);
+    let verifyCalls = 0;
+    let inspectCalls = 0;
+    assert.equal(await resolveNative({
+      root,
+      verify: (b, expected) => { verifyCalls++; return verifyBytes(b, expected); },
+      inspect: async (p, v) => { inspectCalls++; return inspectBinary(p, v); },
+    }), path);
+    assert.equal(verifyCalls, 0);
+    assert.equal(inspectCalls, 0);
+
+    await chmod(dir, 0o755);
+    await rm(stampPath(path));
+    await chmod(dir, 0o555);
+    assert.equal(await resolveNative({
+      root,
+      verify: (b, expected) => { verifyCalls++; return verifyBytes(b, expected); },
+      inspect: async (p, v) => { inspectCalls++; return inspectBinary(p, v); },
+    }), path);
+    assert.equal(verifyCalls, 1);
+    assert.equal(inspectCalls, 1);
+  } finally {
+    await chmod(dir, 0o755).catch(() => {});
+  }
+});
+
+test('AGENT_WECHAT_NATIVE_BINARY caches identity in package native folder and re-checks on change', async t => {
+  const { root, artifacts, asset, bytes } = await fixture(t);
+  const overridePath = join(artifacts, asset.name);
+  let inspectCalls = 0;
+  const spyInspect = async (p, v) => { inspectCalls++; return inspectBinary(p, v); };
+
+  assert.equal(await resolveNative({ root, binaryOverride: overridePath, inspect: spyInspect }), overridePath);
+  assert.equal(inspectCalls, 1);
+  // Override stamp stays inside package root, never next to operator binaries.
+  await assert.rejects(lstat(stampPath(overridePath)), /ENOENT/);
+  const stamp = JSON.parse(await readFile(overrideStampPath(root, version), 'utf8'));
+  assert.equal(stamp.mode, 'override');
+  assert.equal(stamp.path, overridePath);
+  assert.equal(stamp.sha256, null);
+
+  assert.equal(await resolveNative({ root, binaryOverride: overridePath, inspect: spyInspect }), overridePath);
+  assert.equal(inspectCalls, 1);
+
+  // Modifying the override binary invalidates the cache and rejects an invalid identity.
+  await writeFile(overridePath, `#!/bin/sh\nprintf '{"product":"agent-wechat","backend":"container"}\\n'\n`);
+  await assert.rejects(resolveNative({ root, binaryOverride: overridePath, inspect: spyInspect }), /matching native/);
+  assert.equal(inspectCalls, 2);
+
+  // Re-pointing a symlink override to another valid binary misses on canonical path and re-verifies.
+  const second = join(artifacts, 'second-wx');
+  await writeFile(second, bytes, { mode: 0o755 });
+  const link = join(artifacts, 'wx-link');
+  await symlink(second, link);
+  assert.equal(await resolveNative({ root, binaryOverride: link, inspect: spyInspect }), second);
+  assert.equal(inspectCalls, 3);
+  assert.equal(await resolveNative({ root, binaryOverride: link, inspect: spyInspect }), second);
+  assert.equal(inspectCalls, 3);
+
+  // Corrupted override stamp forces re-verification and repairs the stamp.
+  const overrideStampFile = overrideStampPath(root, version);
+  await writeFile(overrideStampFile, '{corrupt');
+  assert.equal(await resolveNative({ root, binaryOverride: link, inspect: spyInspect }), second);
+  assert.equal(inspectCalls, 4);
+
+  // Read-only package native directory falls back to identity verification cleanly.
+  if (process.getuid?.() !== 0) {
+    const stampDir = dirname(overrideStampFile);
+    try {
+      await rm(overrideStampFile);
+      await chmod(stampDir, 0o555);
+      assert.equal(await resolveNative({ root, binaryOverride: link, inspect: spyInspect }), second);
+      assert.equal(inspectCalls, 5);
+    } finally {
+      await chmod(stampDir, 0o755).catch(() => {});
+    }
+  }
 });

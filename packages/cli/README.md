@@ -21,7 +21,7 @@ advertising the corresponding calling capability.
 
 During the native beta series, use a published exact version such as `1.0.0-beta.0`, or `@agent-wechat/cli@beta`. The stable `latest` channel retains the old container CLI until promotion. See the beta release instructions before assuming a beta has been published.
 
-The explicit npm installation downloads one exact-version asset over verified HTTPS. Its size and SHA-256 must match `native-release.json` inside the npm package, then a bounded local identity check must report the same version, native backend, Rust target and serve capability before atomic installation. Normal command invocation never downloads a missing runtime. A missing manifest, unsupported platform, corrupt asset or wrong backend is an error.
+The explicit npm installation downloads one exact-version asset over verified HTTPS. Its size and SHA-256 must match `native-release.json` inside the npm package, then a bounded local identity check must report the same version, native backend, Rust target and serve capability before atomic installation. After installing the executable, the installer atomically writes a verification stamp next to it recording its size, `mtime`, `ctime`, inode, device, expected SHA-256 and verified identity. On subsequent commands, the npm launcher compares the executable's file metadata and the bundled manifest hash against that stamp; if the stamp is missing, unreadable, invalid or any field differs, the launcher falls back to full SHA-256 and identity verification before executing the binary. Normal command invocation never downloads a missing runtime. A missing manifest, unsupported platform, corrupt asset or wrong backend is an error.
 
 Installers that disable lifecycle scripts are supported:
 
@@ -39,7 +39,7 @@ For offline deployment, provision the release binary and its `wx-vVERSION-checks
 AGENT_WECHAT_NATIVE_ARTIFACT_DIR=/absolute/release-assets wx-native-install
 ```
 
-The offline manifest must agree with the npm-bundled manifest. Alternatively, provision a trusted executable yourself and set `AGENT_WECHAT_NATIVE_BINARY=/absolute/path/to/wx`; the launcher verifies its native identity/version rather than downloading. This explicit override trusts the operator-provisioned bytes and does not assert they are identical to a release asset. `AGENT_WECHAT_SKIP_NATIVE_INSTALL=1` defers installation during image/package provisioning; commands remain unavailable until the runtime is provided. Do not disable TLS verification.
+The offline manifest must agree with the npm-bundled manifest. Alternatively, provision a trusted executable yourself and set `AGENT_WECHAT_NATIVE_BINARY=/absolute/path/to/wx`; the launcher verifies its native identity/version rather than downloading, and caches that check by file metadata inside the package's `native/` directory so it re-verifies whenever the target path or metadata changes. This explicit override trusts the operator-provisioned bytes and does not assert they are identical to a release asset. `AGENT_WECHAT_SKIP_NATIVE_INSTALL=1` defers installation during image/package provisioning; commands remain unavailable until the runtime is provided. Do not disable TLS verification.
 
 The OpenClaw plugin uses an already installed global native `wx` or a configured absolute executable. It never downloads binaries or relies on its plugin installer running npm lifecycle scripts. For managed processes, prefer the actual release executable path to avoid an extra launcher process; the npm launcher also forwards arguments, standard streams, exit codes and termination signals.
 
@@ -111,7 +111,7 @@ Deployment examples and the deliberate release preparation sequence are in [depl
 
 ## Package helper scripts
 
-`native-install.mjs` runs during npm installation, or through `wx-native-install` for offline/disabled-script installs. It selects the host architecture, checks the npm-bundled hash and verifies executable identity before atomic installation. `native-launcher.mjs` only runs an already installed executable.
+`native-install.mjs` runs during npm installation, or through `wx-native-install` for offline/disabled-script installs. It selects the host architecture, checks the npm-bundled hash, verifies executable identity before atomic installation, and writes the verification stamp next to the binary. `native-launcher.mjs` only runs an already installed executable, checking its metadata against the verification stamp and falling back to full SHA-256 and identity verification whenever anything differs or the stamp is missing or invalid.
 
 `native-check-package.mjs` is the prepack/prepublish gate. It checks version/source/target/checksum metadata; before publication it additionally requires both architecture assets to exist and match the package's manifest. A local pack smoke can use one architecture fragment; publication requires the complete matrix. These helpers belong to the existing CLI package, not additional npm packages.
 
