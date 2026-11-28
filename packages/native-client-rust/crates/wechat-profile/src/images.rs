@@ -83,6 +83,9 @@ pub(crate) fn image_md5(xml: &str) -> Result<Option<String>> {
                             let s = std::str::from_utf8(a.value.as_ref())
                                 .map_err(|_| ProfileError::InvalidMetadata)?
                                 .to_ascii_lowercase();
+                            if s.is_empty() {
+                                continue;
+                            }
                             if s.len() != 32
                                 || !s.bytes().all(|c| c.is_ascii_hexdigit())
                                 || value.replace(s).is_some()
@@ -183,10 +186,13 @@ impl ProfileReader {
             details,
         }))
     }
-    /// Resolve one exact local message through its advertised original hash and
-    /// hardlink namespace. Ambiguous groups are rejected. Standard/Thumbnail
-    /// require the exact resource basename/type/status/encoded-size join. A suffix
-    /// alone is not a quality proof; Original also requires the XML content MD5.
+    /// Resolve one exact local message through its message-resource binding or
+    /// advertised original hash and hardlink namespace. Ambiguous groups are
+    /// rejected. Standard and Thumbnail require the exact resource
+    /// basename/type/status/encoded-size join; Original accepts either that
+    /// exact resource join (type 65537, including server-transcoded JPEG
+    /// copies) or the XML content MD5. A filename suffix alone is not a quality
+    /// proof.
     pub fn cached_image(&self, id: &SourceMessageId, quality: ImageQuality) -> Result<CachedImage> {
         if !crate::schema::message_table(&id.table) {
             return Err(ProfileError::InvalidQuery);
@@ -219,12 +225,14 @@ impl ProfileReader {
                 .text
                 .as_deref()
                 .ok_or(ProfileError::InvalidMetadata)?,
-        )?
-        .ok_or(ProfileError::NotCached)?;
+        )?;
         let resource = self.image_resources(id, local, &row)?;
         if matches!(quality, ImageQuality::Standard | ImageQuality::Thumbnail) && resource.is_none()
         {
             return Err(ProfileError::ImageQualityUnavailable);
+        }
+        if resource.is_none() && hash.is_none() {
+            return Err(ProfileError::NotCached);
         }
         let hard = self
             .snapshot
@@ -250,7 +258,7 @@ impl ProfileReader {
                 format!("{}_t.dat", r.base),
             ]
         } else {
-            vec![hash.clone()]
+            vec![hash.clone().ok_or(ProfileError::NotCached)?]
         };
         let rows = s
             .query_map(rusqlite::params_from_iter(args), |r| {
@@ -331,11 +339,14 @@ impl ProfileReader {
             }
             let (plain, _) = self.decode_dat(&data)?;
             let (mime, width, height) = validate_image(&plain)?;
-            let original = format!("{:x}", Md5::digest(&plain)) == hash;
+            let original = hash
+                .as_deref()
+                .is_some_and(|expected| format!("{:x}", Md5::digest(&plain)) == expected);
             let role = if resource.as_ref().is_some_and(|r| {
                 r.base == base && r.details.get(suffix).copied() == Some(data.len() as u64)
             }) {
                 match suffix {
+                    "_h" => VerifiedImageQuality::Original,
                     "" => VerifiedImageQuality::Standard,
                     "_t" => VerifiedImageQuality::Thumbnail,
                     _ => VerifiedImageQuality::Unknown,
@@ -346,13 +357,14 @@ impl ProfileReader {
             // Equal bytes can legitimately occupy multiple advertised roles. Honor
             // an explicit resource-bound role before comparing original content.
             let verified = match quality {
+                ImageQuality::Original if role == VerifiedImageQuality::Original => role,
                 ImageQuality::Standard if role == VerifiedImageQuality::Standard => role,
                 ImageQuality::Thumbnail if role == VerifiedImageQuality::Thumbnail => role,
                 _ if original => VerifiedImageQuality::Original,
                 _ => role,
             };
             if match quality {
-                ImageQuality::Original => !original,
+                ImageQuality::Original => verified != VerifiedImageQuality::Original,
                 ImageQuality::Standard => verified != VerifiedImageQuality::Standard,
                 ImageQuality::Thumbnail => verified != VerifiedImageQuality::Thumbnail,
                 ImageQuality::Best => false,
@@ -379,7 +391,12 @@ impl ProfileReader {
         }
         variants.sort_by_key(|v| {
             (
-                v.quality == VerifiedImageQuality::Original,
+                match v.quality {
+                    VerifiedImageQuality::Original => 3u8,
+                    VerifiedImageQuality::Standard => 2,
+                    VerifiedImageQuality::Thumbnail => 1,
+                    VerifiedImageQuality::Unknown => 0,
+                },
                 u64::from(v.width) * u64::from(v.height),
                 v.media.bytes.len(),
             )

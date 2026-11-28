@@ -147,8 +147,9 @@ pub enum ImageQuality {
 #[serde(rename_all = "camelCase")]
 pub struct CachedImage {
     pub media: CachedBytes,
-    /// Original requires advertised content MD5. Standard/Thumbnail require an
-    /// exact native resource join; a filename suffix alone remains Unknown.
+    /// Original requires either an exact native resource join (type 65537) or
+    /// advertised content MD5. Standard/Thumbnail require an exact native
+    /// resource join; a filename suffix alone remains Unknown.
     pub quality: VerifiedImageQuality,
     pub width: u32,
     pub height: u32,

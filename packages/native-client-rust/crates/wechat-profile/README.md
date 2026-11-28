@@ -129,9 +129,12 @@ preserves the observed header/control/partition policy and is bounded to 64 MiB.
 Other DAT versions/control values and the observed encoding policy below 1024
 plaintext bytes are unsupported. ECB/XOR wrapping is not authenticated encryption.
 
-`cached_image` resolves a selected message through original-content MD5 and its
-hardlink directory maps, rejects ambiguous groups and validates decoded bytes.
-Original requires an MD5 match; a filename suffix alone is insufficient.
+`cached_image` resolves a selected message through its message-resource binding
+or original-content MD5 and hardlink directory maps, rejects ambiguous groups,
+and validates decoded bytes. Standard and Thumbnail require the exact resource
+join; Original accepts either that exact resource join (type 65537, including
+server-transcoded JPEG copies) or an XML MD5 match; a filename suffix alone is
+insufficient.
 `cached_voice` retains encoded voice bytes. `cached_hardlink_file` checks the
 requested file/video MD5 and rejects ambiguous bindings. Network downloads and
 sticker CDN jobs belong to the daemon, not this crate.
