@@ -10,7 +10,7 @@ fn configure(command: Command, parents: &[&str]) -> Command {
     let mut path = parents.to_vec();
     path.push(&name);
     let guidance = match path.as_slice() {
-        ["wx"] => "Getting started:\n  wx config servers list\n  wx config servers select box\n  wx accounts list\n  wx accounts select personal\n  wx accounts status\n\nUse wx <COMMAND> --help for a command's options and subcommands.\nSet AGENT_WECHAT_TOKEN to supply an API token through the environment.",
+        ["wx"] => "Getting started:\n  wx auth login\n  wx daemon start\n  wx status\n  wx chats list\n\nRemote servers: wx config servers --help\nUse wx <COMMAND> --help for a command's options and subcommands.\nSet AGENT_WECHAT_TOKEN to supply an API token through the environment.",
         ["wx", "accounts"] => "Examples:\n  wx accounts list\n  wx accounts select personal\n  wx accounts status\n  wx --account personal accounts settings\n\nSelect saves the default account for the current named server.\n--account ID or AGENT_WECHAT_ACCOUNT overrides that choice for a command.\nUse wx accounts <COMMAND> --help for its arguments and options.",
         ["wx", "accounts", "select"] => "Example: wx accounts select personal\n\nChoose an account ID or alias from wx accounts list.\nFirst save and select a named server with wx config servers.\nThis saves a CLI default; it does not sign in or reconnect the account.",
         ["wx", "profiles"] => "Examples:\n  wx profiles add archive --path /absolute/path/to/stopped-profile\n  wx profiles list\n  wx profiles select archive\n  wx profiles inspect\n\nProfiles are local stopped files. --local-profile NAME overrides the saved choice.\nUse wx profiles <COMMAND> --help for its arguments and options.",

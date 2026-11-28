@@ -92,15 +92,15 @@ pub(super) async fn assert_client_hello(
 }
 
 pub(super) fn remote(address: std::net::SocketAddr) -> Remote {
-    Remote {
-        http: reqwest::Client::builder()
+    Remote::from_parts(
+        reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap(),
-        base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
-        token: "synthetic-bearer".into(),
-        account: Some("test-account".into()),
-    }
+        reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+        "synthetic-bearer",
+        Some("test-account".into()),
+    )
 }
 
 pub(super) fn hello() -> CallEvent {

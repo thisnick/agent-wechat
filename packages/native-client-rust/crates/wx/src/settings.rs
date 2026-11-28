@@ -62,6 +62,26 @@ pub fn valid_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Where the active client endpoint choice came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointSource {
+    Flag,
+    Environment,
+    SavedServer,
+    Default,
+}
+
+impl EndpointSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Environment => "environment",
+            Self::SavedServer => "saved_server",
+            Self::Default => "default",
+        }
+    }
+}
+
 impl File {
     pub fn load(
         explicit: Option<&Path>,
@@ -213,12 +233,12 @@ impl File {
             .clone();
         Ok((name, profile))
     }
-    pub fn client(
+    pub fn client_with_source(
         &self,
         selected: Option<&str>,
         url: Option<&str>,
         server: &crate::config::ServerConfig,
-    ) -> Result<(crate::config::ClientConfig, Option<String>)> {
+    ) -> Result<(crate::config::ClientConfig, Option<String>, EndpointSource)> {
         let environment_url = std::env::var("AGENT_WECHAT_URL").ok();
         let environment_name = std::env::var("AGENT_WECHAT_SERVER").ok();
         let direct = url.or_else(|| {
@@ -235,6 +255,15 @@ impl File {
                 None
             }
         });
+        let source = if url.is_some() || selected.is_some() {
+            EndpointSource::Flag
+        } else if environment_url.is_some() || environment_name.is_some() {
+            EndpointSource::Environment
+        } else if self.settings.active_server.is_some() {
+            EndpointSource::SavedServer
+        } else {
+            EndpointSource::Default
+        };
         let name = self.server_name(name, direct)?;
         let saved = name.as_ref().and_then(|n| self.settings.servers.get(n));
         Ok((
@@ -253,6 +282,7 @@ impl File {
                     .or_else(|| saved.and_then(|s| s.default_account_id.clone())),
             },
             name,
+            source,
         ))
     }
 }
