@@ -191,7 +191,7 @@ impl Inner {
 
     fn invalidate_app_session_on_error<T>(&self, account: &str, result: Result<T>) -> Result<T> {
         result.inspect_err(|error| {
-            if !error.is::<CallRpcNotSubmitted>() {
+            if !error.is::<CallRpcNotSubmitted>() && !error.is::<UnsupportedCallMedia>() {
                 self.invalidate_app_session(account);
             }
         })

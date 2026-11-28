@@ -82,6 +82,10 @@ fn app_session_cache_is_fenced_by_errors_and_account_authority() {
         inner.invalidate_app_session_on_error::<()>("one", Err(CallRpcNotSubmitted.into()));
     assert!(unsent.unwrap_err().is::<CallRpcNotSubmitted>());
     assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
+    let unsupported =
+        inner.invalidate_app_session_on_error::<()>("one", Err(UnsupportedCallMedia.into()));
+    assert!(unsupported.unwrap_err().is::<UnsupportedCallMedia>());
+    assert_eq!(inner.cached_app_session("one", auth).unwrap().app_uin(), 17);
     let error = inner.invalidate_app_session_on_error::<()>(
         "one",
         Err(anyhow::anyhow!("synthetic app failure")),

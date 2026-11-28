@@ -812,20 +812,20 @@ impl Actor {
                 if let Some(pre) = self.preconnect.as_ref() {
                     pre.mark_answering();
                 }
-                let result = self
-                    .session
-                    .as_mut()
-                    .expect("incoming session")
-                    .accept_with_camera(
-                        &self.transport,
-                        &mut self.state,
-                        self.authority,
-                        join_camera,
-                        self.tasks.next()?,
-                    );
+                let result = self.inner.invalidate_app_session_on_error(
+                    &self.worker.lease.authority().account_id,
+                    self.session
+                        .as_mut()
+                        .expect("incoming session")
+                        .accept_with_camera(
+                            &self.transport,
+                            &mut self.state,
+                            self.authority,
+                            join_camera,
+                            self.tasks.next()?,
+                        ),
+                );
                 if let Err(error) = result {
-                    self.inner
-                        .invalidate_app_session(&self.worker.lease.authority().account_id);
                     self.abort_preconnect();
                     if error.is::<UnsupportedCallMedia>() && self.phase() == IncomingPhase::Joined {
                         self.exit()?;
@@ -869,15 +869,16 @@ impl Actor {
                     "Incoming Reject admission revoked"
                 );
                 self.transport.admission = ControlAdmission::Terminal(sink);
-                let result = self.session.as_mut().expect("incoming session").reject(
-                    &self.transport,
-                    &mut self.state,
-                    self.authority,
-                    self.tasks.next()?,
+                let result = self.inner.invalidate_app_session_on_error(
+                    &self.worker.lease.authority().account_id,
+                    self.session.as_mut().expect("incoming session").reject(
+                        &self.transport,
+                        &mut self.state,
+                        self.authority,
+                        self.tasks.next()?,
+                    ),
                 );
                 if let Err(error) = result {
-                    self.inner
-                        .invalidate_app_session(&self.worker.lease.authority().account_id);
                     if error.is::<CallRpcNotSubmitted>() && self.drain_commands()? {
                         return Ok(BackendOutcome::Ended);
                     }
