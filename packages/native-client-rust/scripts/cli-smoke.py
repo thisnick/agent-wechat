@@ -48,11 +48,15 @@ with tempfile.TemporaryDirectory(prefix="native-cli-smoke-") as temporary:
         assert run("daemon","status")["ownershipGeneration"]==first["ownershipGeneration"]
         run("config","servers","add","local","--url",f"http://127.0.0.1:{port}","--token-file",str(token))
         run("config","servers","select","local")
-        assert run("auth","status",code=2)["error"]["code"]=="account_not_selected"
+        no_account = run("auth", "status", code=2)["error"]
+        assert no_account["code"] == "account_not_configured"
+        assert "wx accounts create --alias me" in no_account.get("next", [])
         a=run("accounts","create","a","--alias","alpha"); assert a["id"]=="a"
         assert run("accounts","get")["id"]=="a"
         run("accounts","create","b")
-        assert run("auth","status",code=2)["error"]["code"]=="account_ambiguous"
+        ambiguous = run("auth", "status", code=2)["error"]
+        assert ambiguous["code"] == "account_ambiguous"
+        assert "wx accounts list" in ambiguous.get("next", [])
         run("accounts","select","alpha")
         assert run("accounts","status")["id"]=="a"
         # Legacy spellings remain executable but are hidden from help.

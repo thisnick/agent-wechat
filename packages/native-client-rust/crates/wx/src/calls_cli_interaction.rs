@@ -161,12 +161,12 @@ impl Interaction {
                 return Ok(UiAction::None);
             }
             let query = line.strip_prefix("i ").unwrap_or(line).to_owned();
-            let remote = Remote {
-                http: remote.http.clone(),
-                base: remote.base.clone(),
-                token: remote.token.clone(),
-                account: remote.account.clone(),
-            };
+            let remote = Remote::from_parts(
+                remote.http.clone(),
+                remote.base.clone(),
+                remote.bearer_token(),
+                remote.account.clone(),
+            );
             let existing = call
                 .into_iter()
                 .flat_map(|call| call.participants.iter())

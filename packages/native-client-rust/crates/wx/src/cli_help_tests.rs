@@ -200,3 +200,17 @@ fn every_argument_and_flag_has_help() {
     check(&root, "wx", &mut missing);
     assert!(missing.is_empty(), "add help text to: {missing:#?}");
 }
+
+#[test]
+fn root_help_leads_with_local_first_run() {
+    let help = command()
+        .try_get_matches_from(["wx", "--help"])
+        .unwrap_err()
+        .to_string();
+    let login = help.find("wx auth login").expect("missing wx auth login");
+    let daemon = help
+        .find("wx daemon start")
+        .expect("missing wx daemon start");
+    assert!(login < daemon, "{help}");
+    assert!(!help.contains("wx config servers select box"), "{help}");
+}

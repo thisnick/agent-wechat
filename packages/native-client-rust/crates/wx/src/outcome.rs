@@ -12,6 +12,8 @@ struct Error {
     exit: i32,
     code: String,
     message: String,
+    retryable: Option<bool>,
+    next: Vec<String>,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -19,35 +21,90 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+/// Structured classification of a CLI failure for exit status, JSON output,
+/// and human next-step hints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifiedError {
+    pub exit: i32,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub next: Vec<String>,
+}
+
 pub fn failure(exit: i32, code: &str, message: &str) -> anyhow::Error {
     Error {
         exit,
         code: code.into(),
         message: message.into(),
+        retryable: None,
+        next: Vec::new(),
     }
     .into()
 }
+
+pub fn failure_with_next(
+    exit: i32,
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+    next: Vec<String>,
+) -> anyhow::Error {
+    Error {
+        exit,
+        code: code.into(),
+        message: message.into(),
+        retryable: Some(retryable),
+        next,
+    }
+    .into()
+}
+
 pub fn classify(error: &anyhow::Error) -> (i32, String) {
-    if let Some(error) = error.downcast_ref::<Error>() {
-        return (error.exit, error.code.clone());
+    let described = describe(error);
+    (described.exit, described.code)
+}
+
+pub fn describe(error: &anyhow::Error) -> ClassifiedError {
+    if let Some(structured) = error.downcast_ref::<Error>() {
+        let message = if error.chain().count() > 1 {
+            format!("{error:#}")
+        } else {
+            structured.message.clone()
+        };
+        return ClassifiedError {
+            exit: structured.exit,
+            code: structured.code.clone(),
+            message,
+            retryable: structured.retryable.unwrap_or(structured.exit == 3),
+            next: structured.next.clone(),
+        };
     }
     if error.downcast_ref::<reqwest::Error>().is_some() {
-        return (3, "endpoint_unavailable".into());
+        return ClassifiedError {
+            exit: 3,
+            code: "endpoint_unavailable".into(),
+            message: format!("{error:#}"),
+            retryable: true,
+            next: Vec::new(),
+        };
     }
     let message = error.to_string();
-    if message.contains("unsupported_capability") {
-        return (9, "unsupported_capability".into());
-    }
-    if message.contains("needs_login") {
-        return (5, "needs_login".into());
-    }
-    if message.contains("account_ambiguous") {
-        return (2, "account_ambiguous".into());
-    }
-    if message.contains("account_not_") {
-        return (2, "account_not_selected".into());
-    }
-    if error.downcast_ref::<std::io::Error>().is_some()
+    let full = format!("{error:#}");
+    let (exit, code) = if message.contains("unsupported_capability") {
+        (9, "unsupported_capability")
+    } else if message.contains("needs_login") {
+        (5, "needs_login")
+    } else if message.contains("account_ambiguous") {
+        (2, "account_ambiguous")
+    } else if message.contains("account_not_configured") {
+        (2, "account_not_configured")
+    } else if message.contains("account_not_found") {
+        (2, "account_not_found")
+    } else if message.contains("account_not_") {
+        (2, "account_not_selected")
+    } else if error.downcast_ref::<std::io::Error>().is_some()
         || [
             "config",
             "must ",
@@ -62,10 +119,19 @@ pub fn classify(error: &anyhow::Error) -> (i32, String) {
         .iter()
         .any(|s| message.contains(s))
     {
-        return (2, "invalid_configuration_or_input".into());
+        (2, "invalid_configuration_or_input")
+    } else {
+        (1, "operation_failed")
+    };
+    ClassifiedError {
+        exit,
+        code: code.into(),
+        message: full,
+        retryable: exit == 3,
+        next: Vec::new(),
     }
-    (1, "operation_failed".into())
 }
+
 pub fn result_exit(value: &Value) -> i32 {
     if value["clientWaitExpired"] == true {
         return 7;
@@ -110,5 +176,24 @@ mod tests {
             classify(&anyhow::anyhow!("account_ambiguous: choose one")).0,
             2
         );
+        assert_eq!(
+            classify(&anyhow::anyhow!("account_not_configured: none")).1,
+            "account_not_configured"
+        );
+    }
+    #[test]
+    fn structured_errors_preserve_retryable_and_next_steps() {
+        let error = failure_with_next(
+            3,
+            "daemon_not_running",
+            "No wx daemon is listening on 127.0.0.1:6174.",
+            true,
+            vec!["wx daemon start".into()],
+        );
+        let described = describe(&error);
+        assert_eq!(described.exit, 3);
+        assert_eq!(described.code, "daemon_not_running");
+        assert!(described.retryable);
+        assert_eq!(described.next, vec!["wx daemon start"]);
     }
 }

@@ -235,7 +235,10 @@ async fn watch_with(
                     return Err(expired(&after, saved_in(saved), explicit));
                 }
                 let message = error.to_string();
-                if message.contains("401") || message.contains("403") {
+                if outcome::classify(&error).0 == 4
+                    || message.contains("401")
+                    || message.contains("403")
+                {
                     return Err(error);
                 }
                 eprintln!("Event connection unavailable; retained cursor will resume");
@@ -344,12 +347,12 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let remote = Remote {
-            http: reqwest::Client::new(),
-            base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
-            token: token.into(),
-            account: Some("busy".into()),
-        };
+        let remote = Remote::from_parts(
+            reqwest::Client::new(),
+            reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            token,
+            Some("busy".into()),
+        );
         (temp, store, remote)
     }
     /// Seeding the account is slow, so one test covers both the default start
