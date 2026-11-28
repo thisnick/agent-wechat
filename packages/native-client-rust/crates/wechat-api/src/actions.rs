@@ -92,7 +92,13 @@ async fn account_storage(
     Path(a): Path<String>,
 ) -> ApiResult<Json<wechat_store::StorageUsage>> {
     c.require(Some(&a), "read")?;
-    Ok(Json(app.core.store.storage_usage(&a)?))
+    let store = app.core.store.clone();
+    work(move || {
+        let snapshot = store.read_snapshot(&a)?;
+        snapshot.storage_usage(&a)
+    })
+    .await
+    .map(Json)
 }
 async fn update_settings(
     State(app): State<App>,

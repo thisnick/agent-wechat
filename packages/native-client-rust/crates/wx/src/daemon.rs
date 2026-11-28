@@ -95,21 +95,15 @@ async fn identity(config: &crate::config::ServerConfig, owned: &OwnedProcess) ->
     }
     Ok(value)
 }
-fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: u64) -> anyhow::Error {
-    let mut text = error.to_string();
-    // When after_offset > 0 (e.g. a freshly spawned daemon failed before readiness),
-    // only inspect lines written during this attempt so stale errors from earlier runs
-    // are not misattributed.
-    let matched = if after_offset > 0 {
-        crate::doctor::last_log_error(log, after_offset)
-    } else {
-        crate::doctor::last_log_error(log, 0)
-    };
-    if let Some(matched) = matched {
-        text.push_str(&format!("\nLast log error: {}", matched.line));
+fn with_log_hint(error: anyhow::Error, log: &Path, after_offset: Option<u64>) -> anyhow::Error {
+    let mut hint = String::new();
+    if let Some(offset) = after_offset {
+        if let Some(matched) = crate::doctor::last_log_error(log, offset) {
+            hint.push_str(&format!("Last log error: {}\n", matched.line));
+        }
     }
-    text.push_str("\nRun `wx daemon doctor` to diagnose.");
-    error.context(text)
+    hint.push_str("Run `wx daemon doctor` to diagnose");
+    error.context(hint)
 }
 
 pub async fn run(
@@ -150,7 +144,7 @@ pub async fn run(
                     return output.print(
                         &identity(&config, &owned)
                             .await
-                            .map_err(|e| with_log_hint(e, &log, 0))?,
+                            .map_err(|e| with_log_hint(e, &log, None))?,
                     );
                 }
                 std::fs::remove_file(&record)?;
@@ -160,12 +154,12 @@ pub async fn run(
                     anyhow::Error::new(e)
                         .context("daemon listener is occupied; no owner was adopted or stopped"),
                     &log,
-                    0,
+                    None,
                 )
             })?;
             drop(listener);
             let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)
-                .map_err(|e| with_log_hint(e, &log, 0))?;
+                .map_err(|e| with_log_hint(e, &log, None))?;
             let output_file = wechat_platform::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -211,14 +205,14 @@ pub async fn run(
                         return Err(with_log_hint(
                             anyhow::anyhow!("native daemon exited before readiness ({status})"),
                             &log,
-                            log_start_offset,
+                            Some(log_start_offset),
                         ));
                     }
                     if Instant::now() >= deadline {
                         return Err(with_log_hint(
                             anyhow::anyhow!("native daemon readiness deadline reached"),
                             &log,
-                            log_start_offset,
+                            Some(log_start_offset),
                         ));
                     }
                     if let Ok(Ok(value)) = tokio::time::timeout(
@@ -236,7 +230,7 @@ pub async fn run(
                                     "listener belongs to another process; no owner was adopted"
                                 ),
                                 &log,
-                                log_start_offset,
+                                Some(log_start_offset),
                             ));
                         }
                         let owned = OwnedProcess {
@@ -288,11 +282,11 @@ pub async fn run(
                 }
             }
         }
-        DaemonCommand::Status => match load(&record).map_err(|e| with_log_hint(e, &log, 0))? {
+        DaemonCommand::Status => match load(&record).map_err(|e| with_log_hint(e, &log, None))? {
             Some(owned) if fingerprint(owned.pid).is_some() => output.print(
                 &identity(&config, &owned)
                     .await
-                    .map_err(|e| with_log_hint(e, &log, 0))?,
+                    .map_err(|e| with_log_hint(e, &log, None))?,
             ),
             _ => output.print(&json!({"state":"stopped","managed":true,"dataDir":config.data_dir})),
         },
@@ -390,5 +384,42 @@ mod tests {
         assert!(process_matches(&owned));
         owned.start_ticks = "0".into();
         assert!(!process_matches(&owned));
+    }
+
+    #[test]
+    fn with_log_hint_does_not_duplicate_error_or_show_stale_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("daemon.log");
+        let stale = "Error: stale problem from earlier run\n";
+        std::fs::write(&log, stale).unwrap();
+        let offset = stale.len() as u64;
+
+        let err_none = with_log_hint(anyhow::anyhow!("daemon listener is occupied"), &log, None);
+        let formatted_none = format!("{err_none:#}");
+        assert_eq!(
+            formatted_none
+                .matches("daemon listener is occupied")
+                .count(),
+            1
+        );
+        assert!(formatted_none.contains("Run `wx daemon doctor` to diagnose"));
+        assert!(!formatted_none.contains("stale problem"));
+
+        let fresh_line = "Error: fresh startup failure\n";
+        std::fs::write(&log, format!("{stale}{fresh_line}")).unwrap();
+        let err_fresh = with_log_hint(
+            anyhow::anyhow!("native daemon exited before readiness"),
+            &log,
+            Some(offset),
+        );
+        let formatted_fresh = format!("{err_fresh:#}");
+        assert_eq!(
+            formatted_fresh
+                .matches("native daemon exited before readiness")
+                .count(),
+            1
+        );
+        assert!(formatted_fresh.contains("Last log error: Error: fresh startup failure"));
+        assert!(!formatted_fresh.contains("stale problem"));
     }
 }

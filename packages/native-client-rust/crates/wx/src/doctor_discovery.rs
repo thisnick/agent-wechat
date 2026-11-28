@@ -51,7 +51,16 @@ pub(crate) struct ProcessRecord {
 }
 
 impl ProcessRecord {
-    pub(crate) fn is_live(&self) -> bool {
+    /// True when the recorded PID is still running with the same process start
+    /// fingerprint, even if the binary on disk was replaced (e.g. after a `wx`
+    /// upgrade on Linux where `/proc/<pid>/exe` ends with ` (deleted)`).
+    pub(crate) fn pid_is_live(&self) -> bool {
+        wechat_platform::process_identity(self.pid)
+            .is_some_and(|(created, _)| created == self.start_ticks)
+    }
+
+    /// True when both the start fingerprint and on-disk executable path match.
+    pub(crate) fn executable_matches(&self) -> bool {
         wechat_platform::process_identity(self.pid).is_some_and(|(created, executable)| {
             created == self.start_ticks && executable == self.executable
         })
@@ -103,6 +112,7 @@ pub(crate) struct RunningWxProcess {
     #[cfg(target_os = "linux")]
     pub(crate) uid: Option<u32>,
     pub(crate) parent_comm: Option<String>,
+    pub(crate) parent_cmdline: Option<String>,
     pub(crate) cgroup: Option<String>,
     pub(crate) data_dir: Option<PathBuf>,
     pub(crate) listen: SocketAddr,
@@ -148,9 +158,9 @@ pub(crate) fn desktop_hub_dir(env: &Environment) -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        env.config_home
+        // Tauri's app_local_data_dir() uses LOCALAPPDATA (env.data_home), not APPDATA.
+        env.data_home
             .as_ref()
-            .or(env.data_home.as_ref())
             .filter(|p| p.is_absolute())
             .map(|root| root.join("io.github.thisnick.agent-wechat/hub"))
     }
@@ -167,6 +177,39 @@ pub(crate) fn desktop_hub_dir(env: &Environment) -> Option<PathBuf> {
                     .map(|h| h.join(".local/share"))
             })
             .map(|root| root.join("io.github.thisnick.agent-wechat/hub"))
+    }
+}
+
+/// Path to the desktop app's `settings/desktop.json` under Tauri's `app_config_dir()`.
+pub(crate) fn desktop_config_file(env: &Environment) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        env.home.as_ref().filter(|p| p.is_absolute()).map(|h| {
+            h.join(
+                "Library/Application Support/io.github.thisnick.agent-wechat/settings/desktop.json",
+            )
+        })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        env.config_home
+            .as_ref()
+            .filter(|p| p.is_absolute())
+            .map(|root| root.join("io.github.thisnick.agent-wechat/settings/desktop.json"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        env.config_home
+            .as_ref()
+            .filter(|p| p.is_absolute())
+            .cloned()
+            .or_else(|| {
+                env.home
+                    .as_ref()
+                    .filter(|p| p.is_absolute())
+                    .map(|h| h.join(".config"))
+            })
+            .map(|root| root.join("io.github.thisnick.agent-wechat/settings/desktop.json"))
     }
 }
 
@@ -200,9 +243,8 @@ fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn desktop_hub_port(hub_dir: &Path) -> u16 {
-    let config_path = hub_dir.parent().map(|p| p.join("config.json"));
-    if let Some(path) = config_path {
+fn desktop_hub_port(env: &Environment) -> u16 {
+    if let Some(path) = desktop_config_file(env) {
         if let Some(bytes) = read_bounded_regular_file(&path, 64 * 1024) {
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 if let Some(port) = value["localPort"].as_u64() {
@@ -291,6 +333,7 @@ pub(crate) fn parse_systemd_unit(
     let mut protect_home = None;
     let mut protect_system = None;
     let mut read_write_paths = Vec::new();
+    let mut unit_env = base_env_without_overrides(env);
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
@@ -307,6 +350,29 @@ pub(crate) fn parse_systemd_unit(
                 "ReadWritePaths" => {
                     for token in split_simple_args(value) {
                         read_write_paths.push(expand_systemd_path(&token, home));
+                    }
+                }
+                "Environment" => {
+                    if value.is_empty() {
+                        unit_env.data_dir = None;
+                        unit_env.server_config = None;
+                    } else {
+                        for token in split_simple_args(value) {
+                            if let Some((k, v)) = token.split_once('=') {
+                                if v.is_empty() {
+                                    continue;
+                                }
+                                match k {
+                                    "AGENT_WECHAT_DATA_DIR" => {
+                                        unit_env.data_dir = Some(expand_systemd_path(v, home));
+                                    }
+                                    "AGENT_WECHAT_SERVER_CONFIG" => {
+                                        unit_env.server_config = Some(expand_systemd_path(v, home));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -327,14 +393,13 @@ pub(crate) fn parse_systemd_unit(
         }
     }
     if data_dir.is_none() || listen.is_none() {
-        let base_env = base_env_without_overrides(env);
         let overrides = Overrides {
             server_config: server_config.clone(),
             data_dir: data_dir.clone(),
             listen,
             ..Default::default()
         };
-        if let Ok(resolved) = config::resolve(&overrides, &base_env, cwd) {
+        if let Ok(resolved) = config::resolve(&overrides, &unit_env, cwd) {
             if data_dir.is_none() {
                 data_dir = Some(resolved.data_dir);
             }
@@ -413,12 +478,9 @@ fn parse_wx_serve_args(args: &[String], home: Option<&Path>) -> Option<ParsedSer
         return None;
     }
     let first = args[0].trim_start_matches('-');
-    // Accept either `wx ... serve ...` or `node .../native-launcher.mjs ... serve ...`
-    let is_wx = is_wx_executable(first)
-        || args
-            .get(1)
-            .is_some_and(|a| a.contains("native-launcher") || is_wx_executable(a));
-    if !is_wx {
+    // Match only the actual `wx` binary, not a wrapper such as `node .../native-launcher.mjs`,
+    // which spawns `wx` as a child process.
+    if !is_wx_executable(first) {
         return None;
     }
     let has_serve = args.iter().skip(1).any(|a| a == "serve");
@@ -493,6 +555,30 @@ fn linux_proc_comm(pid: u32) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn linux_proc_cmdline(pid: u32) -> Option<String> {
+    let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let joined = raw
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.is_empty()).then_some(joined)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_against(path: PathBuf, base: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn linux_proc_env_overrides(pid: u32, base: &Environment) -> Environment {
     let mut env = base.clone();
     let Ok(raw) = fs::read(format!("/proc/{pid}/environ")) else {
@@ -560,34 +646,39 @@ fn scan_wx_serve_processes_impl(
         let Some(parsed) = parse_wx_serve_args(&args, base_env.home.as_deref()) else {
             continue;
         };
-        let mut data_dir = parsed.data_dir;
+        let proc_cwd =
+            fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut data_dir = parsed.data_dir.map(|p| resolve_against(p, &proc_cwd));
         let mut listen = parsed.listen;
-        let mut token_file = parsed.token_file;
+        let server_config = parsed.server_config.map(|p| resolve_against(p, &proc_cwd));
+        let mut token_file = parsed.token_file.map(|p| resolve_against(p, &proc_cwd));
         if data_dir.is_none() || listen.is_none() || token_file.is_none() {
             let proc_env = linux_proc_env_overrides(pid, &base_env);
             let overrides = Overrides {
-                server_config: parsed.server_config.clone(),
+                server_config: server_config.clone(),
                 data_dir: data_dir.clone(),
                 listen,
                 token_file: token_file.clone(),
                 ..Default::default()
             };
-            if let Ok(resolved) = config::resolve(&overrides, &proc_env, cwd) {
+            if let Ok(resolved) = config::resolve(&overrides, &proc_env, &proc_cwd) {
                 data_dir.get_or_insert(resolved.data_dir);
                 listen.get_or_insert(resolved.listen);
                 token_file.get_or_insert(resolved.token_file);
             }
         }
         let parent_comm = linux_proc_comm(ppid);
+        let parent_cmdline = linux_proc_cmdline(ppid);
         let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok();
         results.push(RunningWxProcess {
             pid,
             uid,
             parent_comm,
+            parent_cmdline,
             cgroup,
             data_dir,
             listen: listen.unwrap_or_else(|| "127.0.0.1:6174".parse().unwrap()),
-            server_config: parsed.server_config,
+            server_config,
             token_file,
             token_stdin: parsed.token_stdin,
             exit_with_parent: parsed.exit_with_parent,
@@ -712,6 +803,7 @@ fn scan_wx_serve_processes_impl(
         results.push(RunningWxProcess {
             pid,
             parent_comm: None,
+            parent_cmdline: None,
             cgroup: None,
             data_dir,
             listen: listen.unwrap_or_else(|| "127.0.0.1:6174".parse().unwrap()),
@@ -797,10 +889,16 @@ pub(crate) fn classify_process_owner(
     {
         return DaemonOwner::Systemd;
     }
+    let node_parent_is_openclaw = proc.parent_comm.as_deref() == Some("node")
+        && proc.parent_cmdline.as_deref().is_some_and(|cmd| {
+            let lower = cmd.to_ascii_lowercase();
+            lower.contains("openclaw") && !lower.contains("native-launcher")
+        });
     if proc
         .parent_comm
         .as_deref()
-        .is_some_and(|c| matches!(c, "node" | "openclaw" | "openclaw-gateway"))
+        .is_some_and(|c| matches!(c, "openclaw" | "openclaw-gateway"))
+        || node_parent_is_openclaw
         || (proc.token_stdin && proc.exit_with_parent)
     {
         return DaemonOwner::OpenClaw;
@@ -824,7 +922,7 @@ pub(crate) fn discover_daemons(
         };
         let dir = canonical_or_original(raw_dir);
         let record = read_process_record(&dir).ok().flatten();
-        let live_record_pid = record.as_ref().filter(|r| r.is_live()).map(|r| r.pid);
+        let live_record_pid = record.as_ref().filter(|r| r.pid_is_live()).map(|r| r.pid);
         let owner =
             classify_process_owner(proc, desktop_dir.as_deref(), systemd_unit, live_record_pid);
         by_dir.insert(
@@ -850,7 +948,7 @@ pub(crate) fn discover_daemons(
             let record = read_process_record(&dir).ok().flatten();
             let resolved = config::resolve(&Overrides::default(), &base_env, cwd).ok();
             let (owner, address, listen, state, pid) = match record {
-                Some(rec) if rec.is_live() => (
+                Some(rec) if rec.pid_is_live() => (
                     DaemonOwner::WxDaemon,
                     rec.endpoint.clone(),
                     rec.endpoint
@@ -917,7 +1015,7 @@ pub(crate) fn discover_daemons(
     if let Some(hub_dir) = desktop_dir {
         let dir = canonical_or_original(&hub_dir);
         if dir.exists() && !by_dir.contains_key(&dir) {
-            let port = desktop_hub_port(&dir);
+            let port = desktop_hub_port(env);
             let listen = SocketAddr::from(([127, 0, 0, 1], port));
             by_dir.insert(
                 dir.clone(),
@@ -997,7 +1095,7 @@ pub(crate) async fn probe_port_owner(
             .data_dir
             .as_deref()
             .and_then(|d| read_process_record(d).ok().flatten())
-            .filter(|r| r.is_live())
+            .filter(|r| r.pid_is_live())
             .map(|r| r.pid);
         let owner = classify_process_owner(proc, desktop_dir, systemd_unit, live_rec);
         return PortOwner {
@@ -1137,9 +1235,13 @@ fn linux_listening_socket_inode(addr: SocketAddr) -> Option<u64> {
 #[cfg(target_os = "linux")]
 fn collect_profile_inodes(profile_path: &Path, ids: &mut std::collections::BTreeSet<(u64, u64)>) {
     use std::os::unix::fs::MetadataExt;
+    const MAX_PROFILE_INODES: usize = 256;
+
     let global = profile_path.join("xwechat_files/all_users/config/global_config");
     if let Ok(m) = fs::symlink_metadata(&global) {
-        ids.insert((m.dev(), m.ino()));
+        if m.is_file() {
+            ids.insert((m.dev(), m.ino()));
+        }
     }
     let mut db_dirs = Vec::new();
     let direct_db = profile_path.join("db_storage");
@@ -1155,16 +1257,59 @@ fn collect_profile_inodes(profile_path: &Path, ids: &mut std::collections::BTree
         }
     }
     for db_dir in db_dirs {
-        if let Ok(sub) = fs::read_dir(&db_dir) {
-            for entry in sub.flatten().take(64) {
-                if let Ok(m) = fs::symlink_metadata(entry.path()) {
-                    if m.is_file() {
-                        ids.insert((m.dev(), m.ino()));
+        if ids.len() >= MAX_PROFILE_INODES {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&db_dir) else {
+            continue;
+        };
+        for entry in entries.flatten().take(64) {
+            if ids.len() >= MAX_PROFILE_INODES {
+                break;
+            }
+            let path = entry.path();
+            let Ok(m) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if wechat_platform::is_link(&m) {
+                continue;
+            }
+            if m.is_file() {
+                ids.insert((m.dev(), m.ino()));
+            } else if m.is_dir() {
+                // Profile databases live one folder deeper: db_storage/message/message_0.db,
+                // db_storage/contact/contact.db, db_storage/session/session.db, etc.
+                if let Ok(sub_entries) = fs::read_dir(&path) {
+                    for sub in sub_entries.flatten().take(64) {
+                        if ids.len() >= MAX_PROFILE_INODES {
+                            break;
+                        }
+                        if let Ok(sm) = fs::symlink_metadata(sub.path()) {
+                            if !wechat_platform::is_link(&sm) && sm.is_file() {
+                                ids.insert((sm.dev(), sm.ino()));
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pid_holds_inodes(pid: u32, ids: &std::collections::BTreeSet<(u64, u64)>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    for fd in fds.flatten() {
+        if let Ok(meta) = fd.path().metadata() {
+            if ids.contains(&(meta.dev(), meta.ino())) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Best-effort check whether an official WeChat desktop process appears to be running (warning only).
@@ -1210,15 +1355,8 @@ pub(crate) fn official_wechat_running(profile_path: Option<&Path>) -> bool {
                         continue;
                     }
                 }
-                if let Ok(fds) = fs::read_dir(entry.path().join("fd")) {
-                    use std::os::unix::fs::MetadataExt;
-                    for fd in fds.flatten() {
-                        if let Ok(meta) = fd.path().metadata() {
-                            if profile_inodes.contains(&(meta.dev(), meta.ino())) {
-                                return true;
-                            }
-                        }
-                    }
+                if linux_pid_holds_inodes(pid, &profile_inodes) {
+                    return true;
                 }
             }
         }
@@ -1243,7 +1381,6 @@ pub(crate) fn official_wechat_running(profile_path: Option<&Path>) -> bool {
 #[cfg(target_os = "linux")]
 pub(crate) fn other_uid_holds_profile(profile_path: &Path) -> Option<u32> {
     use std::collections::BTreeSet;
-    use std::os::unix::fs::MetadataExt;
 
     let my_uid = unsafe { libc::geteuid() };
     let mut ids = BTreeSet::new();
@@ -1266,15 +1403,8 @@ pub(crate) fn other_uid_holds_profile(profile_path: &Path) -> Option<u32> {
         if uid == my_uid {
             continue;
         }
-        let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            if let Ok(m) = fd.path().metadata() {
-                if ids.contains(&(m.dev(), m.ino())) {
-                    return Some(uid);
-                }
-            }
+        if linux_pid_holds_inodes(pid, &ids) {
+            return Some(uid);
         }
     }
     None
@@ -1369,6 +1499,122 @@ ReadWritePaths=%h/custom-data %h/xwechat_files %h/.xwechat
         assert_eq!(
             unit.data_dir.as_deref(),
             Some(home.join(".local/share/agent-wechat").as_path())
+        );
+    }
+
+    #[test]
+    fn systemd_unit_parses_environment_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let env = Environment {
+            home: Some(home.to_path_buf()),
+            ..Default::default()
+        };
+        let unit = parse_systemd_unit(
+            &home.join(".config/systemd/user/agent-wechat-native.service"),
+            "[Service]\nEnvironment=AGENT_WECHAT_DATA_DIR=%h/env-data\nExecStart=%h/.local/bin/wx serve\n",
+            &env,
+            home,
+        );
+        assert_eq!(
+            unit.data_dir.as_deref(),
+            Some(home.join("env-data").as_path())
+        );
+    }
+
+    #[test]
+    fn desktop_hub_port_reads_settings_desktop_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let env = Environment {
+            home: Some(home.to_path_buf()),
+            config_home: Some(home.join("cfg")),
+            data_home: Some(home.join("data")),
+            ..Default::default()
+        };
+        let settings_file = desktop_config_file(&env).unwrap();
+        fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+        fs::write(&settings_file, r#"{"localPort": 6299}"#).unwrap();
+        assert_eq!(desktop_hub_port(&env), 6299);
+
+        let hub_dir = desktop_hub_dir(&env).unwrap();
+        fs::create_dir_all(&hub_dir).unwrap();
+        let discovered = discover_daemons(&env, home, &[], None);
+        let desktop = discovered
+            .iter()
+            .find(|d| d.owner == DaemonOwner::Desktop)
+            .expect("desktop daemon should be discovered");
+        assert_eq!(desktop.address, "http://127.0.0.1:6299");
+    }
+
+    #[test]
+    fn rejects_native_launcher_wrapper_and_does_not_label_it_openclaw() {
+        let launcher_args: Vec<String> = [
+            "node",
+            "/usr/lib/node_modules/@agent-wechat/cli/bin/native-launcher.mjs",
+            "serve",
+            "--data-dir",
+            "/tmp/d",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(parse_wx_serve_args(&launcher_args, None).is_none());
+
+        let proc = RunningWxProcess {
+            pid: 4242,
+            #[cfg(target_os = "linux")]
+            uid: Some(1000),
+            parent_comm: Some("node".into()),
+            parent_cmdline: Some(
+                "node /usr/lib/node_modules/@agent-wechat/cli/bin/native-launcher.mjs serve".into(),
+            ),
+            cgroup: None,
+            data_dir: Some(PathBuf::from("/tmp/d")),
+            listen: "127.0.0.1:6174".parse().unwrap(),
+            server_config: None,
+            token_file: None,
+            token_stdin: false,
+            exit_with_parent: false,
+        };
+        assert_eq!(
+            classify_process_owner(&proc, None, None, None),
+            DaemonOwner::Unknown
+        );
+
+        let openclaw_proc = RunningWxProcess {
+            parent_cmdline: Some("node /opt/openclaw/gateway.mjs".into()),
+            ..proc
+        };
+        assert_eq!(
+            classify_process_owner(&openclaw_proc, None, None, None),
+            DaemonOwner::OpenClaw
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_profile_inodes_and_fd_detection_cover_nested_db_storage_files() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("direct-profile");
+        let msg_dir = profile.join("db_storage/message");
+        fs::create_dir_all(&msg_dir).unwrap();
+        let msg_db = msg_dir.join("message_0.db");
+        fs::write(&msg_db, b"SQLite format 3\0").unwrap();
+        let meta = fs::symlink_metadata(&msg_db).unwrap();
+
+        let mut ids = std::collections::BTreeSet::new();
+        collect_profile_inodes(&profile, &mut ids);
+        assert!(
+            ids.contains(&(meta.dev(), meta.ino())),
+            "nested db_storage/message/message_0.db inode should be collected"
+        );
+
+        let _open_file = fs::File::open(&msg_db).unwrap();
+        assert!(
+            linux_pid_holds_inodes(std::process::id(), &ids),
+            "current process holding nested db_storage/message/message_0.db should be detected"
         );
     }
 }

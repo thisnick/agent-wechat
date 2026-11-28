@@ -460,7 +460,7 @@ async fn inspect_folder(
         .as_ref()
         .ok()
         .and_then(|opt| opt.as_ref())
-        .filter(|rec| rec.is_live());
+        .filter(|rec| rec.pid_is_live());
 
     let matching_proc = running_procs.iter().find(|p| {
         p.data_dir
@@ -592,6 +592,7 @@ async fn inspect_folder(
         &data_dir,
         &process_record_res,
         daemon_running,
+        daemon_pid,
         fix,
         &mut checks,
     );
@@ -666,6 +667,7 @@ async fn inspect_folder(
     // 7. SQLite registry & account control databases (read-only admission checks!)
     let mut max_copy_needed: u64 = 0;
     let mut registered_accounts = Vec::new();
+    let mut redaction_account_ids: BTreeSet<String> = BTreeSet::new();
     let registry_path = data_dir.join("registry.sqlite");
     if data_dir_exists {
         let reg_inspect = wechat_store::inspect_database_readonly(
@@ -696,16 +698,21 @@ async fn inspect_folder(
             }
         }
 
-        // Collect all account IDs from both filesystem (`accounts/*/agent/control.sqlite`) and registry.
+        // Collect all account IDs from both filesystem (`accounts/*`) and registry.
+        // Every non-dot folder name under `accounts/` is added to `redaction_account_ids`
+        // so WAL-only or unreadable-registry accounts are still scrubbed from bug reports.
         let mut account_ids: BTreeSet<String> =
             registered_accounts.iter().map(|a| a.id.clone()).collect();
+        redaction_account_ids.extend(account_ids.iter().cloned());
         let accounts_root = data_dir.join("accounts");
         if let Ok(entries) = fs::read_dir(&accounts_root) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if !name.starts_with('.') && entry.path().join("agent/control.sqlite").exists()
-                    {
-                        account_ids.insert(name.to_owned());
+                    if !name.starts_with('.') {
+                        redaction_account_ids.insert(name.to_owned());
+                        if entry.path().join("agent/control.sqlite").exists() {
+                            account_ids.insert(name.to_owned());
+                        }
                     }
                 }
             }
@@ -741,11 +748,17 @@ async fn inspect_folder(
 
     // 8. Disk space, inodes & filesystem type
     let fs_report = inspect_filesystem(&data_dir);
-    check_filesystem(&data_dir, &fs_report, max_copy_needed, &mut checks);
+    check_filesystem(
+        &data_dir,
+        &fs_report,
+        if daemon_running { 0 } else { max_copy_needed },
+        daemon_running,
+        &mut checks,
+    );
 
     // 9. Daemon log permissions & last fatal error
     let log_path = data_dir.join("daemon/daemon.log");
-    let known_account_ids: Vec<String> = registered_accounts.iter().map(|a| a.id.clone()).collect();
+    let known_account_ids: Vec<String> = redaction_account_ids.into_iter().collect();
     check_daemon_log(
         &log_path,
         &data_dir,
@@ -1006,6 +1019,7 @@ fn check_process_record(
     data_dir: &Path,
     record_res: &Result<Option<ProcessRecord>, String>,
     daemon_running: bool,
+    daemon_pid: Option<u32>,
     fix: bool,
     checks: &mut Vec<Check>,
 ) {
@@ -1028,7 +1042,8 @@ fn check_process_record(
             ));
         }
         Ok(Some(rec)) => {
-            if rec.is_live() {
+            let pid_live = rec.pid_is_live();
+            if pid_live && rec.executable_matches() {
                 checks.push(Check::ok(
                     "process_record",
                     format!(
@@ -1036,17 +1051,36 @@ fn check_process_record(
                         rec.pid, rec.endpoint
                     ),
                 ));
+            } else if pid_live || daemon_pid == Some(rec.pid) {
+                let message = if pid_live {
+                    format!(
+                        "Managed daemon PID {} is still running ({}), but its binary on disk no longer matches {} (for example after a wx upgrade)",
+                        rec.pid,
+                        rec.endpoint,
+                        rec.executable.display()
+                    )
+                } else {
+                    format!(
+                        "Daemon PID {} is still running ({}); daemon/process.json was kept untouched",
+                        rec.pid, rec.endpoint
+                    )
+                };
+                checks.push(Check::warn(
+                    "process_record",
+                    message,
+                    Some("Restart the daemon when convenient if you upgraded wx; do not delete process.json while the daemon is running.".into()),
+                ));
             } else if fix {
                 let daemon_dir = data_dir.join("daemon");
                 let dir_safe = fs::symlink_metadata(&daemon_dir)
                     .is_ok_and(|m| m.is_dir() && !wechat_platform::is_link(&m))
                     && wechat_platform::private_path(&daemon_dir).unwrap_or(false);
                 // Re-read process.json right before unlinking so we cannot remove a record
-                // written by a concurrent `wx daemon start`.
+                // written by a concurrent `wx daemon start` or owned by a live PID.
                 let still_stale = doctor_discovery::read_process_record(data_dir)
                     .ok()
                     .flatten()
-                    .is_some_and(|fresh| !fresh.is_live());
+                    .is_some_and(|fresh| !fresh.pid_is_live() && daemon_pid != Some(fresh.pid));
                 let removable = dir_safe
                     && still_stale
                     && fs::symlink_metadata(&record_path)
@@ -1626,6 +1660,7 @@ fn check_filesystem(
     data_dir: &Path,
     fs_report: &FilesystemReport,
     copy_needed: u64,
+    daemon_running: bool,
     checks: &mut Vec<Check>,
 ) {
     // Space & inodes check
@@ -1635,11 +1670,19 @@ fn check_filesystem(
                 (Some(fi), Some(ti)) => format!(", {fi}/{ti} inodes free"),
                 _ => String::new(),
             };
-            let min_needed = copy_needed.max(FAIL_FREE_BYTES);
-            let warn_needed = copy_needed
-                .saturating_add(64 * 1024 * 1024)
-                .max(WARN_FREE_BYTES);
-            if free < min_needed {
+            let min_needed = if daemon_running {
+                FAIL_FREE_BYTES
+            } else {
+                copy_needed.max(FAIL_FREE_BYTES)
+            };
+            let warn_needed = if daemon_running {
+                WARN_FREE_BYTES
+            } else {
+                copy_needed
+                    .saturating_add(64 * 1024 * 1024)
+                    .max(WARN_FREE_BYTES)
+            };
+            if !daemon_running && free < min_needed {
                 checks.push(Check::fail(
                     "disk.space",
                     format!(
@@ -1651,7 +1694,7 @@ fn check_filesystem(
                     ),
                     Some("Free disk space before starting the daemon; SQLite validation copies need roughly 2x the database size.".into()),
                 ));
-            } else if fs_report.free_inodes.is_some_and(|fi| fi < 100) {
+            } else if !daemon_running && fs_report.free_inodes.is_some_and(|fi| fi < 100) {
                 checks.push(Check::fail(
                     "disk.space",
                     format!(
@@ -3382,5 +3425,153 @@ Error: storage is already owned by another operation
             assert_eq!(check.status, CheckStatus::Fail, "link={}", link.display());
             assert!(check.message.contains("symlink"), "{}", check.message);
         }
+    }
+
+    #[tokio::test]
+    async fn doctor_fix_preserves_process_json_when_live_pid_has_different_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("upgraded-daemon");
+        wechat_platform::private_dir(&data_dir).unwrap();
+        let pid = std::process::id();
+        let (ticks, _) = wechat_platform::process_identity(pid).unwrap();
+        let record_path = data_dir.join("daemon/process.json");
+        write_private(
+            &record_path,
+            serde_json::to_vec(&json!({
+                "pid": pid,
+                "startTicks": ticks,
+                "executable": "/nonexistent/previous-wx (deleted)",
+                "dataDir": fs::canonicalize(&data_dir).unwrap(),
+                "endpoint": "http://127.0.0.1:19994",
+                "serverId": "srv",
+                "ownershipGeneration": "gen"
+            }))
+            .unwrap()
+            .as_slice(),
+        );
+
+        let env = Environment {
+            home: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let report = diagnose(
+            &Overrides {
+                data_dir: Some(data_dir.clone()),
+                listen: Some("127.0.0.1:19994".parse().unwrap()),
+                ..Default::default()
+            },
+            &env,
+            temp.path(),
+            &DoctorOptions {
+                all: false,
+                fix: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            record_path.exists(),
+            "--fix must not delete process.json when the recorded PID is still alive after an upgrade"
+        );
+        assert!(report.target.daemon_running);
+        let proc_check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "process_record")
+            .unwrap();
+        assert_eq!(proc_check.status, CheckStatus::Warn);
+        assert!(
+            proc_check.message.contains("still running"),
+            "{}",
+            proc_check.message
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_bug_report_redacts_folder_only_account_ids_when_registry_is_unreadable() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("corrupt-reg");
+        wechat_platform::private_dir(&data_dir).unwrap();
+        // Write an invalid registry.sqlite so immutable read cannot yield any account IDs.
+        write_private(&data_dir.join("registry.sqlite"), b"not a sqlite file");
+        // Create a folder-only account ID (e.g. only in WAL or mid-creation).
+        wechat_platform::private_dir(&data_dir.join("accounts/team-secret-42")).unwrap();
+        write_private(
+            &data_dir.join("daemon/daemon.log"),
+            b"Error: unexpected subsystem failure while touching team-secret-42\n",
+        );
+
+        let env = Environment {
+            home: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let report = diagnose(
+            &Overrides {
+                data_dir: Some(data_dir),
+                listen: Some("127.0.0.1:19993".parse().unwrap()),
+                ..Default::default()
+            },
+            &env,
+            temp.path(),
+            &DoctorOptions {
+                all: false,
+                fix: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let bug = report.bug_report.expect("bug report should be present");
+        assert!(
+            !bug.unrecognized_errors.is_empty(),
+            "expected unrecognized error in bug report"
+        );
+        let serialized = serde_json::to_string(&bug).unwrap();
+        assert!(
+            !serialized.contains("team-secret-42"),
+            "bug report leaked folder-only account ID: {serialized}"
+        );
+    }
+
+    #[test]
+    fn check_filesystem_does_not_fail_running_daemon_on_copy_estimate() {
+        let dir = Path::new("/tmp/data");
+        let fs_report = FilesystemReport {
+            fs_type: Some("ext4".into()),
+            free_bytes: Some(500 * 1024 * 1024),
+            total_bytes: Some(2 * 1024 * 1024 * 1024),
+            free_inodes: Some(50_000),
+            total_inodes: Some(100_000),
+        };
+        let large_copy = 1024 * 1024 * 1024; // 1 GiB > 500 MiB free
+
+        let mut running_checks = Vec::new();
+        check_filesystem(dir, &fs_report, 0, true, &mut running_checks);
+        let running_space = running_checks
+            .iter()
+            .find(|c| c.id == "disk.space")
+            .unwrap();
+        assert_eq!(running_space.status, CheckStatus::Ok);
+
+        let low_report = FilesystemReport {
+            free_bytes: Some(10 * 1024 * 1024),
+            ..fs_report.clone()
+        };
+        let mut running_low_checks = Vec::new();
+        check_filesystem(dir, &low_report, 0, true, &mut running_low_checks);
+        let running_low_space = running_low_checks
+            .iter()
+            .find(|c| c.id == "disk.space")
+            .unwrap();
+        assert_eq!(running_low_space.status, CheckStatus::Warn);
+
+        let mut stopped_checks = Vec::new();
+        check_filesystem(dir, &fs_report, large_copy, false, &mut stopped_checks);
+        let stopped_space = stopped_checks
+            .iter()
+            .find(|c| c.id == "disk.space")
+            .unwrap();
+        assert_eq!(stopped_space.status, CheckStatus::Fail);
     }
 }
