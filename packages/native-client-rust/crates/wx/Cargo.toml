@@ -18,7 +18,8 @@ call-audio = []
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["string"] }
+clap_complete = "4"
 tokio = { workspace = true, features = ["io-std", "io-util"] }
 axum.workspace = true
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }

@@ -26,6 +26,7 @@ fn configure(command: Command, parents: &[&str]) -> Command {
         ["wx", "profiles", ..] => "Uses stopped local files. Select them with wx profiles select NAME or --local-profile NAME.\nUse --source-stopped only after stopping the owner or making a consistent snapshot.",
         ["wx", "config", ..] => "CLI server choices are saved locally. Use --config FILE to choose another client configuration.",
         ["wx", "daemon" | "store" | "serve", ..] => "Runs on this computer. Use --data-dir PATH and --server-config FILE for the local daemon store.",
+        ["wx", "completions"] => "Examples:\n  wx completions bash\n  wx completions zsh\n  wx completions fish\n  wx completions powershell\n\nPrints a completion script to stdout. Runs locally without a server connection or API token.",
         ["wx", "version" | "licenses"] => "Runs locally without a server connection or API token.",
         _ => "Use --server-name NAME to select a saved server and --account ID to select an account.\nRun wx accounts list to find account IDs and aliases. AGENT_WECHAT_TOKEN supplies an API token.",
     };

@@ -14,6 +14,7 @@ use wechat_core::Core;
 mod calls_cli;
 mod cli_help;
 mod client_actions;
+mod completions;
 mod config;
 mod connection;
 mod daemon;
@@ -102,6 +103,11 @@ enum Command {
     Version,
     /// Show bundled third-party license notices.
     Licenses,
+    /// Generate shell completion scripts for wx.
+    Completions {
+        /// Shell to generate completions for.
+        shell: completions::CompletionShell,
+    },
     /// Inspect configuration and manage saved servers.
     Config {
         #[command(subcommand)]
@@ -1879,9 +1885,13 @@ async fn run(cli: Cli) -> Result<()> {
                 | Command::Profiles { .. }
                 | Command::Version
                 | Command::Licenses
+                | Command::Completions { .. }
         )
     {
         bail!("--token-stdin is supported by serve and HTTP client commands");
+    }
+    if let Command::Completions { shell } = cli.command {
+        return completions::write(shell, &mut std::io::stdout().lock());
     }
     let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
@@ -2933,6 +2943,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Version
         | Command::Licenses
+        | Command::Completions { .. }
         | Command::Config { .. }
         | Command::Serve { .. }
         | Command::Store { .. }
