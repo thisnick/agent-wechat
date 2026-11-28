@@ -22,7 +22,7 @@ try {
   const { stdout } = await exec(process.platform === 'win32' ? process.execPath : 'npm', [...(process.platform === 'win32' ? [join(process.execPath, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js')] : []), 'pack', '--json', '--pack-destination', temporary], { cwd: staged, maxBuffer: 1024 * 1024 });
   const [packed] = JSON.parse(stdout);
   const names = packed.files.map(file => file.path);
-  for (const required of ['native-release.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'scripts/native-launcher.mjs', 'scripts/native-runtime.mjs', 'scripts/native-install.mjs', 'scripts/native-path.mjs']) assert.ok(names.includes(required), `Missing ${required}`);
+  for (const required of ['native-release.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'scripts/native-launcher.mjs', 'scripts/native-runtime.mjs', 'scripts/native-install.mjs', 'scripts/native-path.mjs', 'scripts/stable-binary.mjs']) assert.ok(names.includes(required), `Missing ${required}`);
   assert.equal(pkg.bin['wx-legacy'], undefined);
   assert.ok(!names.some(name => name.startsWith('dist/') || name === 'LEGACY.md'));
   assert.ok(!names.some(name => name.startsWith('src/') || name.startsWith('test/') || name.startsWith('native/')));
@@ -41,7 +41,16 @@ try {
   const launcher = join(root, 'scripts/native-launcher.mjs');
   await assert.rejects(exec(process.execPath, [launcher, '--json', 'version']), /not installed/);
   await exec(process.execPath, [join(root, 'scripts/native-install.mjs')], {
-    env: { ...process.env, AGENT_WECHAT_NATIVE_ARTIFACT_DIR: artifactDir, AGENT_WECHAT_NATIVE_BINARY: '', AGENT_WECHAT_SKIP_NATIVE_INSTALL: '' },
+    env: {
+      ...process.env,
+      XDG_DATA_HOME: join(temporary, 'xdg-data'),
+      XDG_CONFIG_HOME: join(temporary, 'xdg-config'),
+      AGENT_WECHAT_DATA_DIR: '',
+      AGENT_WECHAT_SERVER_CONFIG: '',
+      AGENT_WECHAT_NATIVE_ARTIFACT_DIR: artifactDir,
+      AGENT_WECHAT_NATIVE_BINARY: '',
+      AGENT_WECHAT_SKIP_NATIVE_INSTALL: '',
+    },
   });
   const result = await exec(process.execPath, [launcher, '--json', 'version'], { env: { ...process.env, AGENT_WECHAT_NATIVE_BINARY: '' } });
   const identity = JSON.parse(result.stdout);

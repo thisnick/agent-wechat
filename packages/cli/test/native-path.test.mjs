@@ -42,7 +42,7 @@ async function createGlobalNpmFixture(t, { pkgVersion = version, createBinLink =
   await mkdir(scriptsDir, { recursive: true });
   await mkdir(artifacts, { recursive: true });
 
-  for (const name of ['native-install.mjs', 'native-launcher.mjs', 'native-runtime.mjs', 'native-path.mjs']) {
+  for (const name of ['native-install.mjs', 'native-launcher.mjs', 'native-runtime.mjs', 'native-path.mjs', 'stable-binary.mjs']) {
     await copyFile(new URL(`../scripts/${name}`, import.meta.url), join(scriptsDir, name));
   }
   await chmod(join(scriptsDir, 'native-launcher.mjs'), 0o755);

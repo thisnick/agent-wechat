@@ -38,7 +38,7 @@ async function server(t, handler) {
 }
 async function copyLauncher(root) {
   await mkdir(join(root, 'scripts'));
-  for (const name of ['native-launcher.mjs', 'native-runtime.mjs', 'native-install.mjs', 'native-path.mjs']) {
+  for (const name of ['native-launcher.mjs', 'native-runtime.mjs', 'native-install.mjs', 'native-path.mjs', 'stable-binary.mjs']) {
     await copyFile(new URL(`../scripts/${name}`, import.meta.url), join(root, 'scripts', name));
   }
   return join(root, 'scripts/native-launcher.mjs');

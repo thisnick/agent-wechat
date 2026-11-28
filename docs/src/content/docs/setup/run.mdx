@@ -15,6 +15,7 @@ The simplest option, on any OS. It starts `wx serve` in the background for the c
 ```bash
 wx daemon start
 wx daemon status
+wx daemon restart
 wx daemon logs --follow
 wx daemon stop
 ```
@@ -22,27 +23,31 @@ wx daemon stop
 </TabItem>
 <TabItem label="systemd">
 
-Restarts on failure and starts with your user session. Install the example [user unit](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/agent-wechat-native.service):
+On Linux, a systemd user service restarts on failure and starts with your user session. Stop any running daemon (`wx daemon stop` or quit the desktop app) first, then install it:
 
-```bash
-mkdir -p ~/.config/systemd/user ~/.config/agent-wechat/server
-curl -fsSLo ~/.config/systemd/user/agent-wechat-native.service \
-  https://raw.githubusercontent.com/thisnick/agent-wechat/main/deploy/native/agent-wechat-native.service
-test -f ~/.config/agent-wechat/server/config.toml ||
-  echo 'schemaVersion = 1' > ~/.config/agent-wechat/server/config.toml
-```
+1. Preview the unit file without installing it:
 
-Before enabling it, edit the unit:
+   ```bash
+   wx daemon install --dry-run
+   ```
 
-- `ExecStart=` runs `~/.local/bin/wx`. Change it if `command -v wx` says otherwise.
-- If you logged in with `--official`, add WeChat's folders to `ReadWritePaths=`, for example `%h/xwechat_files %h/.xwechat`. By default the unit can only write to `~/.local/share/agent-wechat`.
+2. Install and start the service (it prompts before writing the unit or calling `systemctl`):
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now agent-wechat-native
-```
+   ```bash
+   wx daemon install
+   ```
 
-On a headless server, run `loginctl enable-linger` so the service starts without a login.
+   This writes `~/.config/systemd/user/agent-wechat-native.service` from the shipped [user unit](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/agent-wechat-native.service) with a stable native binary path, your data folder and server config, and write access to any registered `--official` profiles.
+
+3. Manage the service later:
+
+   ```bash
+   wx daemon status
+   wx daemon restart
+   wx daemon uninstall   # removes the service unit; keeps your data
+   ```
+
+On a headless server, run `loginctl enable-linger` so the service starts without a login. If you add an `--official` profile after installing, run `wx daemon uninstall` and `wx daemon install` again so `ReadWritePaths=` includes WeChat's folders.
 
 </TabItem>
 <TabItem label="Docker Compose" id="docker-compose">

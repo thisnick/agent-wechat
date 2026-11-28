@@ -1,7 +1,7 @@
 ---
 title: CLI 命令参考
 description: wx 命令分组、全局标志与退出状态码。
-sourceHash: "6b47df870f16"
+sourceHash: "bd357d866261"
 ---
 
 执行 `wx --help` 可查看顶级命令分组，`wx accounts --help` 查看某个命令组的子命令，或者 `wx accounts select --help` 查看具体操作参数。帮助信息按字母顺序排列并详细解释功能。所有命令默认输出易读的文本结果，添加 `--json` 可获得便于脚本解析的机器可读 JSON 输出。
@@ -11,7 +11,7 @@ sourceHash: "6b47df870f16"
 | 顶级命令 | 子命令与操作 |
 | --- | --- |
 | `wx serve` | 在前台启动守护服务进程 |
-| `wx daemon` | 后台托管命令：`start`、`status`、`doctor [--all] [--fix]`、`logs [--follow]`、`stop` |
+| `wx daemon` | 后台托管命令：`start`、`status`、`doctor [--all] [--fix]`、`restart`、`logs [--follow]`、`stop`、`install [--dry-run] [--yes]`、`uninstall` |
 | `wx auth` | 认证授权：`login [--official[=PATH]] [--qr] [--saved-only]`、`status`、`qr ID`、`attempts get/cancel ID`、`logout [--local]`、`forget --yes` |
 | `wx accounts` | 账号管理：`alias ID NAME`、`capabilities`、`connect`、`create [ID] [--alias NAME]`、`disconnect`、`get [ID]`、`list`、`remove ID --confirm ID`、`select ID`、`settings [--auto-download-max-mb MB]`、`status` |
 | `wx chats` | 会话管理：`list`、`get ID`、`find TEXT`、`read ID --expected-version V`、`mute ID`、`unmute ID`、`pin ID`、`unpin ID` |

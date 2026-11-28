@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 // npm postinstall (or explicit offline provisioning) installs a verified runtime.
 // The wx launcher only runs an already installed executable; it never downloads.
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ensureWxOnPath } from './native-path.mjs';
 import { installNative, packageRoot, resolveNative } from './native-runtime.mjs';
+import {
+  detectOutdatedDaemon,
+  formatUpgradeNotice,
+  shouldUpdateStableBinary,
+  updateStableBinary,
+} from './stable-binary.mjs';
 
 const usage = `Usage: wx-native-install [options]
 
@@ -47,8 +53,27 @@ try {
         console.error(`Verified separately provisioned native runtime: ${await resolveNative()}`);
         runtimeReady = true;
       } else {
-        console.error(`Installed native runtime: ${await installNative({ artifactDir: process.env.AGENT_WECHAT_NATIVE_ARTIFACT_DIR })}`);
+        const destination = await installNative({ artifactDir: process.env.AGENT_WECHAT_NATIVE_ARTIFACT_DIR });
+        console.error(`Installed native runtime: ${destination}`);
         runtimeReady = true;
+        let installedVersion = null;
+        try {
+          installedVersion = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')).version;
+        } catch {}
+        if (shouldUpdateStableBinary({ isPostinstall })) {
+          try {
+            const stable = await updateStableBinary(destination, { version: installedVersion ?? undefined });
+            if (stable) console.error(`Updated stable native binary link: ${stable}`);
+          } catch (linkError) {
+            console.error(`Warning: could not update stable native binary link: ${linkError.message}`);
+          }
+        }
+        if (installedVersion) {
+          try {
+            const outdated = await detectOutdatedDaemon(installedVersion);
+            if (outdated) console.error(formatUpgradeNotice(outdated));
+          } catch {}
+        }
       }
     }
     if (runtimeReady && (args.includes('--link') || (isPostinstall && process.env.npm_config_global === 'true'))) {
