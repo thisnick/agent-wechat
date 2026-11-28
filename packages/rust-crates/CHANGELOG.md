@@ -1,5 +1,19 @@
 # @agent-wechat/rust-crates
 
+## 3.3.0
+
+### Minor Changes
+
+- [#745](https://github.com/thisnick/agent-wechat/pull/745) [`fad3078`](https://github.com/thisnick/agent-wechat/commit/fad3078288019c5c5b2e7206091387f937162fe0) Thanks [@teest114514](https://github.com/teest114514)! - Reduce direct-call setup and media-startup latency by caching lease-fenced `AppSession` identities per account and reusing ringing-phase UDP relay pre-connection for outgoing calls as well as incoming calls.
+
+- [#738](https://github.com/thisnick/agent-wechat/pull/738) [`d68e787`](https://github.com/thisnick/agent-wechat/commit/d68e78773c14f84c82ecee060abadd05bb4c433a) Thanks [@thisnick](https://github.com/thisnick)! - Add headless, automation-friendly `wx calls session` commands with synthetic audio/video sources, live FFT and video metrics, frame snapshots, WAV/video recording, and event/media wait predicates. Emit direct-call `call.peer_status` signaling updates on Calls Protocol v3, propagate direct voice call mute/unmute state over `SwitchAV`, and ignore unknown future post-handshake call server event types in Rust and TypeScript clients.
+
+  Because `call.peer_status` is emitted on protocol v3 and older released clients disconnect on unknown event types, upgrade call clients (`wx`, desktop app, OpenClaw plugin, and `@agent-wechat/shared` SDK consumers) together with the daemon.
+
+### Patch Changes
+
+- [#775](https://github.com/thisnick/agent-wechat/pull/775) [`12041da`](https://github.com/thisnick/agent-wechat/commit/12041da9b5a65b99bc79b980e42f96d77fa64e87) Thanks [@thisnick](https://github.com/thisnick)! - Accept server-transcoded CDN original images (such as iPhone HEIC photos delivered as larger JPEGs) without failing with `media_integrity_failed`, and write/read their `_h.dat` cache entries in official profiles via the exact `MessageResourceDetail` (`type = 65537`) resource join. In `wechat-protocol`, non-strict (`strict_size: false`) `MediaQuality::Original` downloads now enforce `expected_bytes` unless the CDN reply explicitly carries a transcoded JPEG (`rsppicformat=1`, `substituteftype=1`, JPEG header).
+
 ## 3.2.1
 
 ### Patch Changes

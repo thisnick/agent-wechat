@@ -1,5 +1,13 @@
 # @agent-wechat/wechat
 
+## 3.3.0
+
+### Minor Changes
+
+- [#738](https://github.com/thisnick/agent-wechat/pull/738) [`d68e787`](https://github.com/thisnick/agent-wechat/commit/d68e78773c14f84c82ecee060abadd05bb4c433a) Thanks [@thisnick](https://github.com/thisnick)! - Add headless, automation-friendly `wx calls session` commands with synthetic audio/video sources, live FFT and video metrics, frame snapshots, WAV/video recording, and event/media wait predicates. Emit direct-call `call.peer_status` signaling updates on Calls Protocol v3, propagate direct voice call mute/unmute state over `SwitchAV`, and ignore unknown future post-handshake call server event types in Rust and TypeScript clients.
+
+  Because `call.peer_status` is emitted on protocol v3 and older released clients disconnect on unknown event types, upgrade call clients (`wx`, desktop app, OpenClaw plugin, and `@agent-wechat/shared` SDK consumers) together with the daemon.
+
 ## 3.2.1
 
 ## 3.2.0
