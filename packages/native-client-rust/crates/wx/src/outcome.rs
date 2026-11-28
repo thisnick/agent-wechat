@@ -102,7 +102,7 @@ pub fn json_error(exit: i32, code: &str, message: &str) -> Value {
 }
 pub fn human_error_hint(exit: i32, code: &str) -> Option<&'static str> {
     (exit == 1 && code == "operation_failed")
-        .then_some("Unexpected error. Run `wx feedback` to file a bug report.")
+        .then_some("If this looks like a bug, run `wx feedback` to file a bug report.")
 }
 #[cfg(test)]
 mod tests {

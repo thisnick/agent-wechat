@@ -1671,6 +1671,14 @@ async fn run(cli: Cli) -> Result<()> {
             return calls_cli::session::run_local(cmd.clone(), cli.json).await;
         }
     }
+    if matches!(cli.command, Command::Licenses) {
+        return output.print(
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+        );
+    }
+    if matches!(cli.command, Command::Version) {
+        return output.print(&wechat_api::version());
+    }
     if cli.token_stdin
         && matches!(
             &cli.command,
@@ -1683,15 +1691,11 @@ async fn run(cli: Cli) -> Result<()> {
                 | Command::Licenses
         )
     {
-        bail!("--token-stdin is supported by serve and HTTP client commands");
-    }
-    if matches!(cli.command, Command::Licenses) {
-        return output.print(
-            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
-        );
-    }
-    if matches!(cli.command, Command::Version) {
-        return output.print(&wechat_api::version());
+        return Err(failure(
+            2,
+            "invalid_configuration_or_input",
+            "--token-stdin is supported by serve and HTTP client commands",
+        ));
     }
     if let Command::Feedback { open } = cli.command {
         return feedback::run(open, cli.json);
@@ -1976,11 +1980,9 @@ async fn run(cli: Cli) -> Result<()> {
                 command: ChatCommand::List { .. } | ChatCommand::Find { .. }
             }
     );
-    let is_send = matches!(
+    let mut count_send = matches!(
         &cli.command,
-        Command::Messages {
-            command: MessageCommand::Send(_)
-        } | Command::Stickers {
+        Command::Stickers {
             command: stickers_cli::StickerCommand::Send { .. }
         }
     );
@@ -2444,7 +2446,7 @@ async fn run(cli: Cli) -> Result<()> {
                     wait,
                     idempotency_key,
                 } = *args;
-                client_actions::send(
+                let (value, replayed) = client_actions::send_with_replay_status(
                     &r,
                     &settings,
                     thread,
@@ -2467,7 +2469,9 @@ async fn run(cli: Cli) -> Result<()> {
                     detach,
                     wait,
                 )
-                .await?
+                .await?;
+                count_send = !replayed;
+                value
             }
             MessageCommand::SendStatus { id } => {
                 r.get(&r.path(&format!("sends/{}", encode(&id)))?).await?
@@ -2551,7 +2555,7 @@ async fn run(cli: Cli) -> Result<()> {
         output.print(&result)
     };
     printed?;
-    if is_send {
+    if count_send {
         feedback::maybe_record_send_and_emit_notice(&settings.path, &result, cli.json);
     }
     Ok(())

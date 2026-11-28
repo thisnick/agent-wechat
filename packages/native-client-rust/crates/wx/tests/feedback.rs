@@ -47,6 +47,12 @@ async fn start_mock_server(state: MockState) -> (String, tokio::task::JoinHandle
                 Json(state.send_response.lock().unwrap().clone())
             }),
         )
+        .route(
+            "/v1/accounts/synthetic-acc/sends/by-idempotency-key",
+            get(|State(state): State<MockState>| async move {
+                Json(state.send_response.lock().unwrap().clone())
+            }),
+        )
         .with_state(state);
 
     let handle = tokio::spawn(async move {
@@ -155,6 +161,16 @@ fn feedback_prints_repository_and_prefilled_issue_url_without_daemon() {
         "https://github.com/thisnick/agent-wechat"
     );
 
+    // `wx --token-stdin feedback` exits 2 (not exit 1 operation_failed).
+    let token_stdin_err = wx_cmd(&home, &xdg, &["--json", "--token-stdin", "feedback"], &[]);
+    assert_eq!(token_stdin_err.status.code(), Some(2));
+    let token_stdin_val: Value = serde_json::from_slice(&token_stdin_err.stderr).unwrap();
+    assert_eq!(
+        token_stdin_val["error"]["code"],
+        "invalid_configuration_or_input"
+    );
+    assert!(token_stdin_val["error"].get("report").is_none());
+
     // On headless Linux/Unix, `--open` prints the URL and exits 9 without the exit-1 hint.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -232,6 +248,7 @@ async fn send_counting_gating_and_unexpected_error_reporting_work_end_to_end() {
     }
 
     // 3. Accepted --detach message send and sticker send both count, using isolated XDG_CONFIG_HOME.
+    //    Replaying the same --idempotency-key does NOT double-count.
     *state.send_response.lock().unwrap() = json!({"id": "ok-1", "state": "queued"});
     let msg_out = wx_cmd_async(
         &home,
@@ -243,6 +260,8 @@ async fn send_counting_gating_and_unexpected_error_reporting_work_end_to_end() {
             "filehelper",
             "--text",
             "synthetic",
+            "--idempotency-key",
+            "replay-check-key",
             "--detach",
         ],
         &base_env,
@@ -255,6 +274,32 @@ async fn send_counting_gating_and_unexpected_error_reporting_work_end_to_end() {
     );
     let saved: Value = serde_json::from_slice(&std::fs::read(&prompt_file).unwrap()).unwrap();
     assert_eq!(saved["sends"], 1);
+    assert_eq!(saved["shown"], false);
+
+    let replay_out = wx_cmd_async(
+        &home,
+        &xdg,
+        &[
+            "--json",
+            "messages",
+            "send",
+            "filehelper",
+            "--text",
+            "synthetic",
+            "--idempotency-key",
+            "replay-check-key",
+            "--detach",
+        ],
+        &base_env,
+    )
+    .await;
+    assert!(
+        replay_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&replay_out.stderr)
+    );
+    let saved: Value = serde_json::from_slice(&std::fs::read(&prompt_file).unwrap()).unwrap();
+    assert_eq!(saved["sends"], 1, "idempotent replay must not double-count");
     assert_eq!(saved["shown"], false);
 
     let sticker_out = wx_cmd_async(
