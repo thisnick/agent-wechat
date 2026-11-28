@@ -1,5 +1,6 @@
 // Native composer acceptance uses synthetic files and an isolated HTTP fixture.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 export async function attachmentsAcceptance({
   script,
@@ -280,9 +281,20 @@ export async function attachmentsAcceptance({
   await staged(0);
 
   // The file input's change handler also stages, and empty-text Send is valid.
+  // Use a multi-chunk binary payload (> 256 KiB) to exercise raw IPC chunking end to end.
+  const largeSize = 300 * 1024 + 17;
+  const expectedLargeBytes = Buffer.alloc(largeSize);
+  for (let i = 0; i < largeSize; i++)
+    expectedLargeBytes[i] = (i ^ (i >>> 9) ^ (i >>> 17)) & 0xff;
+  const expectedLargeSha256 = createHash("sha256")
+    .update(expectedLargeBytes)
+    .digest("hex");
   await click("document.querySelector('[data-thread-id=\"open\"] .chat-row')");
   await until(`return Boolean(${plain})`, Boolean);
-  await script(`${transfer(["selected.pdf"])}
+  await script(`const bytes = new Uint8Array(${largeSize});
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (i ^ (i >>> 9) ^ (i >>> 17)) & 0xff;
+    const data = new DataTransfer();
+    data.items.add(new File([bytes], 'selected.pdf', { type: 'application/pdf' }));
     const input=document.querySelector('input[aria-label="Choose attachment"]');input.files=data.files;input.dispatchEvent(new Event('change',{bubbles:true}));
     const text=${plain};Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(text,'');text.dispatchEvent(new Event('input',{bubbles:true}));return true;`);
   await staged(1);
@@ -296,6 +308,8 @@ export async function attachmentsAcceptance({
   await staged(0);
   await mediaCount(4);
   assert.equal(uploadedFiles.at(-1).name, "selected.pdf");
+  assert.equal(uploadedFiles.at(-1).size, largeSize);
+  assert.equal(uploadedFiles.at(-1).sha256, expectedLargeSha256);
   assert.equal(sentMedia.at(-1).threadId, "open");
   assert.equal(sentMedia.at(-1).kind, "file");
   assert.equal(

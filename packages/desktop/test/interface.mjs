@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { crc32 } from "node:zlib";
 import { browserNavigationAcceptance } from "./browser-navigation.mjs";
 import { reloadPage } from "./webdriver-navigation.mjs";
 
@@ -17,6 +18,27 @@ export async function interfaceAcceptance({
     "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGPUrZjGgA0wYRUdtBIA+kEBS3hZwQIAAAAASUVORK5CYII=",
     "base64",
   );
+  // Multi-chunk (> 256 KiB) valid PNG carrying arbitrary binary bytes in an
+  // ancillary chunk so native WebView downloads exercise raw IPC framing.
+  const largePayloadLen = 300 * 1024 + 17;
+  const largePng = (() => {
+    const payload = Buffer.alloc(largePayloadLen);
+    for (let i = 0; i < largePayloadLen; i++)
+      payload[i] = (i ^ (i >>> 9) ^ (i >>> 17)) & 0xff;
+    const type = Buffer.from("awXt");
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(largePayloadLen, 0);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([type, payload])) >>> 0, 0);
+    return Buffer.concat([
+      png.subarray(0, -12),
+      length,
+      type,
+      payload,
+      crc,
+      png.subarray(-12),
+    ]);
+  })();
   const peers = ["first", "second"];
   const threads = peers.map((id) => ({
     id,
@@ -102,19 +124,22 @@ export async function interfaceAcceptance({
       },
     },
   ];
-  const assets = messages.map((message, i) => ({
-    id: "fixture-asset-" + i,
-    messageId: message.id,
-    accountId: "fixture",
-    kind: i < 2 ? "image" : "sticker",
-    variant: i < 2 ? "thumbnail" : "original",
-    actualVariant: i < 2 ? "thumbnail" : "original",
-    state: "available",
-    contentType: "image/png",
-    byteLength: png.length,
-    sha256: createHash("sha256").update(png).digest("hex"),
-    retryable: false,
-  }));
+  const assets = messages.map((message, i) => {
+    const bytes = i === 0 ? largePng : png;
+    return {
+      id: "fixture-asset-" + i,
+      messageId: message.id,
+      accountId: "fixture",
+      kind: i < 2 ? "image" : "sticker",
+      variant: i < 2 ? "thumbnail" : "original",
+      actualVariant: i < 2 ? "thumbnail" : "original",
+      state: "available",
+      contentType: "image/png",
+      byteLength: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      retryable: false,
+    };
+  });
   const backend = createServer(async (req, res) => {
     const path = new URL(req.url, "http://localhost").pathname;
     if (path === "/browser" || /^\/assets\/[\w.-]+$/.test(path)) {
@@ -159,9 +184,12 @@ export async function interfaceAcceptance({
       path.endsWith(`/messages/${asset.messageId}/media`),
     );
     if (messageAssets.length) return json({ items: messageAssets });
-    if (assets.some((asset) => path.endsWith(`/media/${asset.id}/content`))) {
+    const contentAsset = assets.find((asset) =>
+      path.endsWith(`/media/${asset.id}/content`),
+    );
+    if (contentAsset) {
       res.setHeader("Content-Type", "image/png");
-      return res.end(png);
+      return res.end(contentAsset.id === "fixture-asset-0" ? largePng : png);
     }
     if (path.endsWith("/events/stream")) {
       res.setHeader("Content-Type", "text/event-stream");
@@ -273,6 +301,28 @@ export async function interfaceAcceptance({
         (width) => width === 8,
       );
     }
+    await until(
+      `return new Promise((resolve, reject) => {
+        const open = indexedDB.open('agent-wechat-cache');
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result, tx = db.transaction('media', 'readonly');
+          const request = tx.objectStore('media').getAll();
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result.some(row => {
+            const buf = row.data?.content;
+            if (!buf || buf.byteLength !== ${largePng.length}) return false;
+            const view = new Uint8Array(buf);
+            for (let i = 0; i < ${largePayloadLen}; i++) {
+              if (view[${png.length - 4} + i] !== ((i ^ (i >>> 9) ^ (i >>> 17)) & 0xff)) return false;
+            }
+            return true;
+          }));
+          tx.oncomplete = () => db.close();
+        };
+      })`,
+      Boolean,
+    );
     const compact =
       await script(`const card = document.querySelector('.compact-link-card');
       return {text:card.innerText, links:document.querySelectorAll('.quote-preview a, .quote-preview button').length,

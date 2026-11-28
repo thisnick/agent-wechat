@@ -1,5 +1,6 @@
 // Pinning UI acceptance uses synthetic HTTP data and never contacts WeChat.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { reloadPage } from "./webdriver-navigation.mjs";
 import { composerAcceptance } from "./composer.mjs";
@@ -154,7 +155,13 @@ export async function pinningAcceptance({
         method: "POST", headers: { "Content-Type": req.headers["content-type"] }, body: Buffer.concat(chunks),
       }).formData();
       const file = form.get("file");
-      uploadedFiles.push({ name: file.name, type: file.type, size: file.size });
+      const bytes = Buffer.from(await file.arrayBuffer());
+      uploadedFiles.push({
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      });
       return json({ id: `source-${uploadedFiles.length}`, byteLength: file.size });
     }
     if (path === `/v1/accounts/${account}/sends` && req.method === "POST") {
