@@ -13,23 +13,29 @@ const stores = [
   "chatState",
   "syncState",
   "avatars",
+  "avatarMeta",
   "media",
   "mediaMeta",
   "drafts",
   "receipts",
 ] as const;
 type Store = (typeof stores)[number];
-// Media size and recency are available without loading the cached payload.
+type BlobStore = "avatars" | "media";
+type BlobMetaStore = "avatarMeta" | "mediaMeta";
+const blobStores: readonly BlobStore[] = ["avatars", "media"];
+const metaStore = (kind: BlobStore): BlobMetaStore =>
+  kind === "media" ? "mediaMeta" : "avatarMeta";
+// Blob size and recency are available without loading cached payloads.
 const fetchedStats: Store[] = [
   "threads",
   "contacts",
   "messages",
   "chatState",
   "syncState",
-  "avatars",
+  "avatarMeta",
   "mediaMeta",
 ];
-const fetched: Store[] = [...fetchedStats, "media"];
+const fetched: Store[] = [...fetchedStats, "avatars", "media"];
 export type AccountSnapshot = {
   threads: NativeThread[];
   contacts: NativeContact[];
@@ -62,8 +68,41 @@ type Row = {
   bytes?: number;
   messageId?: string;
 };
-type MediaRow = Pick<Row, "key" | "scope" | "data">;
-type MediaMetadata = Omit<Row, "data">;
+type BlobRow = Pick<Row, "key" | "scope" | "data" | "messageId">;
+type BlobMetadata = Omit<Row, "data">;
+const blobBytes = (data: StoredBlob | SavedBlob | undefined): number => {
+  if (!data || typeof data !== "object") return 0;
+  if ("content" in data && typeof data.content?.byteLength === "number")
+    return data.content.byteLength;
+  if ("blob" in data && typeof data.blob?.size === "number")
+    return data.blob.size;
+  return 0;
+};
+const metadataFromRow = (
+  row: Partial<Row>,
+  fallbackLastUsed = 0,
+): BlobMetadata | null => {
+  if (!Array.isArray(row.key)) return null;
+  const payload = row.data as StoredBlob | SavedBlob | undefined;
+  return {
+    key: row.key,
+    scope:
+      typeof row.scope === "string"
+        ? row.scope
+        : JSON.stringify(row.key.slice(0, -1)),
+    lastUsed:
+      typeof row.lastUsed === "number" && Number.isFinite(row.lastUsed)
+        ? row.lastUsed
+        : fallbackLastUsed,
+    bytes:
+      typeof row.bytes === "number" &&
+      Number.isFinite(row.bytes) &&
+      row.bytes >= 0
+        ? row.bytes
+        : blobBytes(payload),
+    messageId: row.messageId,
+  };
+};
 const request = <T>(value: IDBRequest<T>): Promise<T> =>
   new Promise((resolve, reject) => {
     value.onsuccess = () => resolve(value.result);
@@ -84,8 +123,11 @@ export class BrowserCache {
   private now: () => number;
   private channel?: BroadcastChannel;
   private invalidations = new Set<(account: string) => void>();
+  private closing = false;
   private closed = false;
   private failed = false;
+  private cancelBlockedOpen?: () => void;
+  private cancelOpen?: () => void;
   constructor(
     origin: string,
     hubId: string,
@@ -128,11 +170,18 @@ export class BrowserCache {
       const settle = (db: IDBDatabase | null) => {
         if (settled) return;
         settled = true;
+        clearBlockedTimer();
         resolve(db);
       };
       const failOpen = () => {
         if (settled) return;
         this.failed = true;
+        settle(null);
+      };
+      this.cancelBlockedOpen = () => {
+        if (blockedTimer !== undefined) settle(null);
+      };
+      this.cancelOpen = () => {
         settle(null);
       };
       open.onupgradeneeded = (event) => {
@@ -144,35 +193,59 @@ export class BrowserCache {
         }
         if (event.oldVersion === 1) {
           const tx = open.transaction!;
-          const meta = tx.objectStore("mediaMeta");
-          // Backfill the small rows without modifying any existing media bytes.
-          const scan = tx.objectStore("media").openCursor();
-          scan.onsuccess = () => {
-            const cursor = scan.result;
-            if (!cursor) return;
-            const { key, scope, lastUsed, bytes, messageId } =
-              cursor.value as Row;
-            meta.put({
-              key,
-              scope,
-              lastUsed,
-              bytes,
-              messageId,
-            } satisfies MediaMetadata);
-            cursor.continue();
-          };
+          for (const kind of blobStores) {
+            const payload = tx.objectStore(kind);
+            const meta = tx.objectStore(metaStore(kind));
+            // Media and avatars are disposable caches: if any legacy row hits a
+            // request-level read or write error during upgrade, clear that cache
+            // so the upgrade still commits and drafts/receipts remain accessible.
+            let reset = false;
+            const clearCache = () => {
+              if (reset) return;
+              reset = true;
+              payload.clear();
+              meta.clear();
+            };
+            const recover = (errEvent: Event) => {
+              errEvent.preventDefault();
+              errEvent.stopPropagation();
+              clearCache();
+            };
+            // Backfill the small rows without modifying any existing payload bytes.
+            const scan = payload.openCursor();
+            scan.onerror = recover;
+            scan.onsuccess = () => {
+              if (reset) return;
+              const cursor = scan.result;
+              if (!cursor) return;
+              const entry = metadataFromRow(cursor.value as Partial<Row>);
+              if (entry) {
+                try {
+                  const write = meta.put(entry);
+                  write.onerror = recover;
+                } catch {
+                  clearCache();
+                  return;
+                }
+              }
+              cursor.continue();
+            };
+          }
         }
       };
       open.onerror = () => {
-        clearBlockedTimer();
         failOpen();
       };
       open.onblocked = () => {
-        if (settled || blockedTimer !== undefined) return;
+        if (settled || this.closing || this.closed) {
+          settle(null);
+          return;
+        }
+        if (blockedTimer !== undefined) return;
         blockedTimer = setTimeout(failOpen, options.blockedTimeoutMs ?? 3000);
+        (blockedTimer as unknown as { unref?: () => void }).unref?.();
       };
       open.onsuccess = () => {
-        clearBlockedTimer();
         const db = open.result;
         if (settled || this.closed) {
           db.close();
@@ -481,26 +554,29 @@ export class BrowserCache {
     );
   }
   async blob(
-    kind: "avatars" | "media",
+    kind: BlobStore,
     account: string,
     id: string,
   ): Promise<SavedBlob | undefined> {
     await this.flush();
     const key = this.key(account, id);
-    const names: Store[] =
-      kind === "media" ? ["media", "mediaMeta"] : ["avatars"];
+    const metaName = metaStore(kind);
+    const names: Store[] = [kind, metaName];
     const data = await this.transaction(names, "readwrite", async (tx) => {
       const store = tx.objectStore(kind);
-      const row = await request<Row | MediaRow | undefined>(store.get(key));
+      const meta = tx.objectStore(metaName);
+      const [row, entry] = await Promise.all([
+        request<Row | BlobRow | undefined>(store.get(key)),
+        request<BlobMetadata | undefined>(meta.get(key)),
+      ]);
       if (!row) return;
       const lastUsed = this.now();
-      if (kind === "media") {
-        // Updating recency must not serialize the media ArrayBuffer again.
-        const meta = tx.objectStore("mediaMeta");
-        const entry = await request<MediaMetadata | undefined>(meta.get(key));
-        if (entry) meta.put({ ...entry, lastUsed });
+      // Updating recency must not serialize the cached ArrayBuffer again.
+      if (entry) {
+        meta.put({ ...entry, lastUsed });
       } else {
-        store.put({ ...row, lastUsed });
+        const repaired = metadataFromRow(row, lastUsed);
+        if (repaired) meta.put({ ...repaired, lastUsed });
       }
       return row.data as StoredBlob | SavedBlob;
     });
@@ -523,14 +599,14 @@ export class BrowserCache {
       await this.enqueue(() =>
         this.transaction(names, "readwrite", (tx) => {
           tx.objectStore(kind).delete(key);
-          if (kind === "media") tx.objectStore("mediaMeta").delete(key);
+          tx.objectStore(metaName).delete(key);
         }),
       );
       return;
     }
   }
   saveBlob(
-    kind: "avatars" | "media",
+    kind: BlobStore,
     account: string,
     id: string,
     data: SavedBlob,
@@ -545,7 +621,7 @@ export class BrowserCache {
         refreshedAt: data.refreshedAt,
         etag: data.etag,
       };
-      const row = {
+      const row: BlobMetadata = {
         key: this.key(account, id),
         scope: this.scope(account),
         lastUsed: this.now(),
@@ -553,43 +629,39 @@ export class BrowserCache {
         messageId,
       };
       return this.transaction(
-        ["avatars", "media", "mediaMeta"],
+        ["avatars", "avatarMeta", "media", "mediaMeta"],
         "readwrite",
         async (tx) => {
-          const media = tx.objectStore("media");
-          const meta = tx.objectStore("mediaMeta");
-          const avatars = tx.objectStore("avatars");
-          if (kind === "media") {
-            media.put({
-              key: row.key,
-              scope: row.scope,
-              data: stored,
-            } satisfies MediaRow);
-            meta.put(row);
-          } else {
-            avatars.put({ ...row, data: stored });
-          }
+          const payloadStore = tx.objectStore(kind);
+          const payloadMeta = tx.objectStore(metaStore(kind));
+          payloadStore.put({
+            key: row.key,
+            scope: row.scope,
+            data: stored,
+            ...(messageId !== undefined ? { messageId } : {}),
+          } satisfies BlobRow);
+          payloadMeta.put(row);
           const entries = (
             await Promise.all(
-              [avatars, meta].map(async (store) =>
-                (await request<MediaMetadata[]>(store.getAll())).map((row) => ({
-                  store,
-                  row,
-                })),
-              ),
+              blobStores.map(async (blobKind) => {
+                const meta = tx.objectStore(metaStore(blobKind));
+                return (await request<BlobMetadata[]>(meta.getAll())).map(
+                  (entry) => ({ kind: blobKind, row: entry }),
+                );
+              }),
             )
           ).flat();
           let bytes = entries.reduce(
             (sum, item) => sum + (item.row.bytes ?? 0),
             0,
           );
-          for (const { store, row } of entries.sort(
+          for (const { kind: entryKind, row: entry } of entries.sort(
             (a, b) => a.row.lastUsed - b.row.lastUsed,
           )) {
             if (bytes <= this.mediaBudget) break;
-            store.delete(row.key);
-            if (store === meta) media.delete(row.key);
-            bytes -= row.bytes ?? 0;
+            tx.objectStore(entryKind).delete(entry.key);
+            tx.objectStore(metaStore(entryKind)).delete(entry.key);
+            bytes -= entry.bytes ?? 0;
           }
         },
       );
@@ -599,7 +671,7 @@ export class BrowserCache {
     void this.enqueue(() =>
       this.transaction(["media", "mediaMeta"], "readwrite", async (tx) => {
         const meta = tx.objectStore("mediaMeta");
-        const rows = await this.rows<MediaMetadata>(tx, "mediaMeta", account);
+        const rows = await this.rows<BlobMetadata>(tx, "mediaMeta", account);
         for (const row of rows) {
           if (row.messageId !== message) continue;
           tx.objectStore("media").delete(row.key);
@@ -644,21 +716,27 @@ export class BrowserCache {
     available: boolean;
   }> {
     await this.flush();
-    const result = await this.transaction(fetchedStats, "readonly", async (tx) => {
-      const rows = await Promise.all(
-        fetchedStats.map((name) => this.rows<Pick<Row, "bytes">>(tx, name, account)),
-      );
-      return {
-        bytes: rows.reduce(
-          (sum, list) =>
-            sum + list.reduce((count, row) => count + (row.bytes ?? 0), 0),
-          0,
-        ),
-        messages: rows[2].length,
-        chats: rows[3].length,
-        available: true,
-      };
-    });
+    const result = await this.transaction(
+      fetchedStats,
+      "readonly",
+      async (tx) => {
+        const rows = await Promise.all(
+          fetchedStats.map((name) =>
+            this.rows<Pick<Row, "bytes">>(tx, name, account),
+          ),
+        );
+        return {
+          bytes: rows.reduce(
+            (sum, list) =>
+              sum + list.reduce((count, row) => count + (row.bytes ?? 0), 0),
+            0,
+          ),
+          messages: rows[2].length,
+          chats: rows[3].length,
+          available: true,
+        };
+      },
+    );
     return result ?? { bytes: 0, messages: 0, chats: 0, available: false };
   }
   private preferenceKey(id: string) {
@@ -694,8 +772,11 @@ export class BrowserCache {
     this.setPreference(`view:${account}`, { ...this.view(account), ...patch });
   }
   async close() {
+    this.closing = true;
+    this.cancelBlockedOpen?.();
     await this.flush();
     this.closed = true;
+    this.cancelOpen?.();
     this.channel?.close();
     (await this.database)?.close();
   }
