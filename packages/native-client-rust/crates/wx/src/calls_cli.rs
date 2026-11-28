@@ -266,7 +266,7 @@ fn endpoint(remote: &Remote) -> Result<CallEndpoint> {
     Ok(CallEndpoint {
         http: remote.http.clone(),
         base: remote.base.clone(),
-        token: remote.token.clone(),
+        token: remote.bearer_token(),
         account: remote.account()?.to_owned(),
     })
 }

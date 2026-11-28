@@ -14,7 +14,7 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
     Ok(())
 }
 /// The account `control.sqlite` schema version after every migration.
-pub(crate) const ACCOUNT_SCHEMA_VERSION: i64 = 15;
+pub const ACCOUNT_SCHEMA_VERSION: i64 = 15;
 pub fn unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

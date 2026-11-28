@@ -18,16 +18,19 @@ export const supportedTargets = Object.freeze([
 ]);
 export const supportedTarget = supportedTargets[0];
 const maxBinaryBytes = 256 * 1024 * 1024;
+const stampSchemaVersion = 1;
+const maxStampBytes = 65536;
 const allowedDownloadHosts = new Set(['github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com']);
 
 export function targetKey(target) { return [target.platform, target.arch, target.libc].filter(Boolean).join('-'); }
 export function executableName(target = targetFor()) { return target.platform === 'win32' ? 'wx.exe' : 'wx'; }
-export function targetFor({ platform = process.platform, arch = process.arch, glibc = process.report?.getReport().header.glibcVersionRuntime } = {}) {
+export function targetFor({ platform = process.platform, arch = process.arch, glibc } = {}) {
   const target = supportedTargets.find(item => item.platform === platform && item.arch === arch);
   if (!target) throw new Error(`Unsupported native wx platform: ${platform}-${arch}`);
   if (platform === 'linux') {
-    const [major, minor] = String(glibc ?? '').split('.').map(Number);
-    if (!glibc || !Number.isFinite(major) || !Number.isFinite(minor) || major < 2 || (major === 2 && minor < 36)) {
+    const runtimeGlibc = glibc === undefined ? process.report?.getReport().header.glibcVersionRuntime : glibc;
+    const [major, minor] = String(runtimeGlibc ?? '').split('.').map(Number);
+    if (!runtimeGlibc || !Number.isFinite(major) || !Number.isFinite(minor) || major < 2 || (major === 2 && minor < 36)) {
       throw new Error('Native wx on Linux requires glibc 2.36 or newer; musl is unsupported.');
     }
   }
@@ -59,14 +62,14 @@ export function validateManifest(manifest, version, { target = targetFor(), requ
   if (!asset) throw new Error(`Native manifest has no asset for ${targetKey(target)}`);
   return asset;
 }
-export async function readManifest(root = packageRoot) {
+export async function readManifest(root = packageRoot, { target = targetFor() } = {}) {
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   let data;
   try { data = await readFile(join(root, 'native-release.json')); }
   catch { throw new Error('This CLI package has no verified native release manifest. Build/provision a matching native release; invocation never downloads automatically.'); }
   if (data.length > 65536) throw new Error('Native release manifest is too large');
   const manifest = JSON.parse(data);
-  return { version: pkg.version, manifest, asset: validateManifest(manifest, pkg.version) };
+  return { version: pkg.version, manifest, asset: validateManifest(manifest, pkg.version, { target }) };
 }
 export async function fetchBytes(url, maxBytes, { fetchImpl = fetch, allowHttpLoopback = false, timeoutMs = 30_000 } = {}) {
   let current = new URL(url);
@@ -107,30 +110,122 @@ export function verifyBytes(bytes, asset) {
     throw new Error('Native binary size or SHA-256 does not match the manifest bundled in this npm package');
   }
 }
-export async function inspectBinary(path, version) {
+function isValidIdentity(value, version, target) {
+  return Boolean(
+    value && typeof value === 'object' && !Array.isArray(value)
+    && value.product === 'agent-wechat'
+    && value.backend === 'native'
+    && value.version === version
+    && value.target === target.rustTarget
+    && value.apiVersion === 1
+    && Array.isArray(value.capabilities)
+    && value.capabilities.every(item => typeof item === 'string')
+    && value.capabilities.includes('serve'),
+  );
+}
+export async function inspectBinary(path, version, { target = targetFor() } = {}) {
   if (!isAbsolute(path)) throw new Error('Native binary path must be absolute');
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error('Native binary must be a regular file');
   await access(path, constants.X_OK);
   const { stdout } = await exec(path, ['--json', 'version'], { timeout: 5000, maxBuffer: 65536, windowsHide: true });
   const value = JSON.parse(stdout);
-  if (value.product !== 'agent-wechat' || value.backend !== 'native' || value.version !== version
-    || value.target !== targetFor().rustTarget || value.apiVersion !== 1 || !value.capabilities?.includes('serve')) {
+  if (!isValidIdentity(value, version, target)) {
     throw new Error('Executable is not a matching native wx runtime; no container fallback is performed');
   }
   return value;
 }
 export function installPath(root, version, target = targetFor()) { return join(root, 'native', version, targetKey(target), executableName(target)); }
+export function stampPath(binaryPath) { return `${binaryPath}.verified.json`; }
+export function overrideStampPath(root, version, target = targetFor()) { return join(root, 'native', version, targetKey(target), 'override.verified.json'); }
+function statSnapshot(info) {
+  return {
+    size: String(info.size),
+    mtimeNs: String(info.mtimeNs),
+    ctimeNs: String(info.ctimeNs),
+    ino: String(info.ino),
+    dev: String(info.dev),
+  };
+}
+function statSnapshotsEqual(left, right) {
+  return left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.ino === right.ino
+    && left.dev === right.dev;
+}
+function statSnapshotMatches(recorded, current) {
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) return false;
+  for (const key of ['size', 'ino', 'dev']) {
+    if (typeof recorded[key] !== 'string' || !/^\d+$/.test(recorded[key])) return false;
+  }
+  for (const key of ['mtimeNs', 'ctimeNs']) {
+    if (typeof recorded[key] !== 'string' || !/^-?\d+$/.test(recorded[key])) return false;
+  }
+  return statSnapshotsEqual(recorded, statSnapshot(current));
+}
+function buildStamp({ mode, path, version, target, sha256, info, identity }) {
+  return {
+    schemaVersion: stampSchemaVersion,
+    mode,
+    path,
+    version,
+    target: target.rustTarget,
+    sha256,
+    stat: statSnapshot(info),
+    identity,
+  };
+}
+async function readValidStamp(file, expected) {
+  try {
+    const stampInfo = await lstat(file);
+    if (!stampInfo.isFile() || stampInfo.isSymbolicLink() || stampInfo.size < 2 || stampInfo.size > maxStampBytes) return false;
+    const raw = await readFile(file, 'utf8');
+    if (Buffer.byteLength(raw) > maxStampBytes) return false;
+    const stamp = JSON.parse(raw);
+    if (!stamp || typeof stamp !== 'object' || Array.isArray(stamp)) return false;
+    if (stamp.schemaVersion !== stampSchemaVersion || stamp.mode !== expected.mode
+      || stamp.path !== expected.path || stamp.version !== expected.version || stamp.target !== expected.target.rustTarget) {
+      return false;
+    }
+    if (expected.mode === 'installed') {
+      if (typeof stamp.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(stamp.sha256) || stamp.sha256 !== expected.sha256) return false;
+      if (expected.info.size !== BigInt(expected.bytes)) return false;
+    } else if (expected.mode === 'override') {
+      if (stamp.sha256 !== null) return false;
+    } else {
+      return false;
+    }
+    if (!statSnapshotMatches(stamp.stat, expected.info)) return false;
+    return isValidIdentity(stamp.identity, expected.version, expected.target);
+  } catch {
+    return false;
+  }
+}
+async function writeStamp(file, stamp) {
+  await mkdir(dirname(file), { recursive: true, mode: 0o755 });
+  const temporary = `${file}.${process.pid}.${createHash('sha256').update(randomUUID()).digest('hex').slice(0, 16)}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(stamp, null, 2)}\n`, { flag: 'wx', mode: 0o644 });
+    await chmod(temporary, 0o644);
+    await rename(temporary, file);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+async function tryWriteStamp(file, stamp) {
+  try { await writeStamp(file, stamp); } catch {}
+}
 export async function installNative({ root = packageRoot, artifactDir, fetchOptions, downloadUrl, inspect = inspectBinary } = {}) {
-  targetFor();
-  const { version, asset } = await readManifest(root);
+  const target = targetFor();
+  const { version, manifest, asset } = await readManifest(root, { target });
   if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('Refusing native installation with TLS verification disabled');
   let bytes;
   if (artifactDir) {
     if (!isAbsolute(artifactDir)) throw new Error('Offline artifact directory must be absolute');
     const localManifest = JSON.parse(await readFile(join(artifactDir, manifestName(version)), 'utf8'));
-    const localAsset = validateManifest(localManifest, version);
-    if (localAsset.sha256 !== asset.sha256 || localAsset.bytes !== asset.bytes || localManifest.sourceCommit !== (await readManifest(root)).manifest.sourceCommit) {
+    const localAsset = validateManifest(localManifest, version, { target });
+    if (localAsset.sha256 !== asset.sha256 || localAsset.bytes !== asset.bytes || localManifest.sourceCommit !== manifest.sourceCommit) {
       throw new Error('Offline manifest differs from the manifest bundled in this npm package');
     }
     const source = join(artifactDir, asset.name);
@@ -143,33 +238,96 @@ export async function installNative({ root = packageRoot, artifactDir, fetchOpti
     });
   }
   verifyBytes(bytes, asset);
-  const destination = installPath(root, version);
+  const destination = installPath(root, version, target);
   await mkdir(dirname(destination), { recursive: true, mode: 0o755 });
   const temporary = `${destination}.${process.pid}.${createHash('sha256').update(randomUUID()).digest('hex').slice(0, 16)}.tmp${process.platform === 'win32' ? '.exe' : ''}`;
+  let identity;
+  let beforeRename;
   try {
     await writeFile(temporary, bytes, { flag: 'wx', mode: 0o755 });
     await chmod(temporary, 0o755);
-    await inspect(temporary, version);
+    identity = await (inspect === inspectBinary ? inspectBinary(temporary, version, { target }) : inspect(temporary, version));
+    beforeRename = await lstat(temporary, { bigint: true });
     await rename(temporary, destination);
   } finally { await rm(temporary, { force: true }); }
+  const stampFile = stampPath(destination);
+  const afterRename = await lstat(destination, { bigint: true });
+  if (afterRename.isFile() && !afterRename.isSymbolicLink()
+    && afterRename.ino === beforeRename.ino && afterRename.dev === beforeRename.dev
+    && afterRename.size === BigInt(asset.bytes) && afterRename.mtimeNs === beforeRename.mtimeNs
+    && isValidIdentity(identity, version, target)) {
+    await writeStamp(stampFile, buildStamp({
+      mode: 'installed', path: destination, version, target, sha256: asset.sha256, info: afterRename, identity,
+    }));
+  } else {
+    await rm(stampFile, { force: true });
+  }
   return destination;
 }
-export async function resolveNative({ root = packageRoot, binaryOverride = process.env.AGENT_WECHAT_NATIVE_BINARY, inspect = inspectBinary } = {}) {
-  targetFor();
+export async function resolveNative({
+  root = packageRoot,
+  binaryOverride = process.env.AGENT_WECHAT_NATIVE_BINARY,
+  inspect = inspectBinary,
+  verify = verifyBytes,
+} = {}) {
+  const target = targetFor();
   if (binaryOverride) {
     const { version } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
     if (!isAbsolute(binaryOverride)) throw new Error('AGENT_WECHAT_NATIVE_BINARY must be an absolute executable path');
     const canonical = await realpath(binaryOverride);
-    await inspect(canonical, version);
+    const before = await lstat(canonical, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink()) throw new Error('Native binary must be a regular file');
+    // Keep the override stamp inside the package's own native/ folder rather than
+    // writing next to arbitrary operator paths (such as /usr/local/bin or /tmp).
+    const stampFile = overrideStampPath(root, version, target);
+    if (await readValidStamp(stampFile, { mode: 'override', path: canonical, version, target, sha256: null, info: before })) {
+      await access(canonical, constants.X_OK);
+      return canonical;
+    }
+    const identity = await (inspect === inspectBinary ? inspectBinary(canonical, version, { target }) : inspect(canonical, version));
+    try {
+      const after = await lstat(canonical, { bigint: true });
+      if (after.isFile() && !after.isSymbolicLink() && statSnapshotsEqual(statSnapshot(before), statSnapshot(after))
+        && isValidIdentity(identity, version, target)) {
+        await tryWriteStamp(stampFile, buildStamp({
+          mode: 'override', path: canonical, version, target, sha256: null, info: after, identity,
+        }));
+      }
+    } catch {}
     return canonical;
   }
-  const { version, asset } = await readManifest(root);
-  const path = installPath(root, version);
+  const { version, asset } = await readManifest(root, { target });
+  const path = installPath(root, version, target);
+  const notInstalledError = () => new Error('Native wx is not installed. Run wx-native-install, or provision the exact release and set AGENT_WECHAT_NATIVE_BINARY to its absolute path. No download or Docker fallback occurs during invocation.');
+  let before;
+  try { before = await lstat(path, { bigint: true }); }
+  catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') throw notInstalledError();
+    throw error;
+  }
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error('Native binary must be a regular file');
+  const stampFile = stampPath(path);
+  if (await readValidStamp(stampFile, { mode: 'installed', path, version, target, sha256: asset.sha256, bytes: asset.bytes, info: before })) {
+    await access(path, constants.X_OK);
+    return path;
+  }
   let bytes;
   try { bytes = await readFile(path); }
-  catch { throw new Error('Native wx is not installed. Run wx-native-install, or provision the exact release and set AGENT_WECHAT_NATIVE_BINARY to its absolute path. No download or Docker fallback occurs during invocation.'); }
-  verifyBytes(bytes, asset);
-  await inspect(path, version);
+  catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') throw notInstalledError();
+    throw error;
+  }
+  verify(bytes, asset);
+  const identity = await (inspect === inspectBinary ? inspectBinary(path, version, { target }) : inspect(path, version));
+  try {
+    const after = await lstat(path, { bigint: true });
+    if (after.isFile() && !after.isSymbolicLink() && statSnapshotsEqual(statSnapshot(before), statSnapshot(after))
+      && after.size === BigInt(asset.bytes) && isValidIdentity(identity, version, target)) {
+      await tryWriteStamp(stampFile, buildStamp({
+        mode: 'installed', path, version, target, sha256: asset.sha256, info: after, identity,
+      }));
+    }
+  } catch {}
   return path;
 }
 export function runNative(path, args, { spawnImpl = spawn, processObject = process } = {}) {

@@ -1,7 +1,7 @@
 ---
 title: CLI 命令参考
 description: wx 命令分组、全局标志与退出状态码。
-sourceHash: "01713974504f"
+sourceHash: "324b3741f239"
 ---
 
 执行 `wx --help` 可查看顶级命令分组，`wx accounts --help` 查看某个命令组的子命令，或者 `wx accounts select --help` 查看具体操作参数。帮助信息按字母顺序排列并详细解释功能。所有命令默认输出易读的文本结果，添加 `--json` 可获得便于脚本解析的机器可读 JSON 输出。
@@ -11,7 +11,7 @@ sourceHash: "01713974504f"
 | 顶级命令 | 子命令与操作 |
 | --- | --- |
 | `wx serve` | 在前台启动守护服务进程 |
-| `wx daemon` | 后台托管命令：`start`、`status`、`logs [--follow]`、`stop` |
+| `wx daemon` | 后台托管命令：`start`、`status`、`doctor [--all] [--fix]`、`logs [--follow]`、`stop` |
 | `wx auth` | 认证授权：`login [--official[=PATH]] [--qr] [--saved-only]`、`status`、`qr ID`、`attempts get/cancel ID`、`logout [--local]`、`forget --yes` |
 | `wx accounts` | 账号管理：`alias ID NAME`、`capabilities`、`connect`、`create [ID] [--alias NAME]`、`disconnect`、`get [ID]`、`list`、`remove ID --confirm ID`、`select ID`、`settings [--auto-download-max-mb MB]`、`status` |
 | `wx chats` | 会话管理：`list`、`get ID`、`find TEXT`、`read ID --expected-version V`、`mute ID`、`unmute ID`、`pin ID`、`unpin ID` |
@@ -27,6 +27,7 @@ sourceHash: "01713974504f"
 | `wx config` | CLI 配置：`client`、`servers add/list/remove/select`、`show` |
 | `wx profiles` | 在无需 Daemon 启动的情况下离线只读审查 Profile（`add`、`avatars`、`chats`、`contacts`、`groups`、`images`、`inspect`、`keys export`、`list`、`messages`、`select`） |
 | `wx store` | 实验性：复制、导入与导出 Profile；`usage` 显示 `control.sqlite` 中保存的内容 |
+| `wx completions` | 为 `bash`、`zsh`、`fish` 或 `powershell` 生成 Shell 命令补全脚本 |
 | `wx version` | 查看版本与编译目标平台 |
 
 `contacts find`、`groups find` 与 `groups members list --search` 用于在已保存的本地目录中搜索。搜索不区分大小写，并会组合匹配以空格分隔的多个词语：`wx contacts find "Mira work"` 可以在同一联系人的昵称和备注中同时匹配。`contacts lookup` 向微信服务端实时请求一个或两个确切联系人 ID 的详情。如果好友备注和昵称均为空，则显示名称默认取用其联系人 ID。`groups lookup` 向微信服务端实时请求指定群聊 ID 的完整成员名册。两种查询都不会保存结果；如需更新本地数据，请使用 `contacts refresh` 或 `groups members refresh`。
@@ -58,6 +59,39 @@ sourceHash: "01713974504f"
 在自动化脚本中可使用 `wx daemon status --json` 解析守护进程状态。`wx serve --json` 会在 stderr 上输出服务就绪记录。`wx daemon logs` 会流式输出原始格式的日志记录。
 
 `messages send --wait SECONDS` 参数对附件发送最长允许等待 3,600 秒，对文本或分享链接最长允许等待 900 秒（默认 30 秒）。发送大文件建议指定 `--wait 3600`。等待超时将返回退出状态码 7，此时后台任务仍在持续运行；可通过 `wx jobs get JOB_ID` 进行跟踪。参考[发送附件与媒体](/use/media/)。
+
+## Shell 命令补全 \{#shell-completions}
+
+`wx completions <shell>` 会将补全脚本输出到标准输出，支持 `bash`、`zsh`、`fish` 或 `powershell`。安装 npm 包不会自动配置补全功能。
+
+**Bash**（需要 `bash-completion`，或将 `eval "$(wx completions bash)"` 添加到 `~/.bashrc`）：
+
+```bash
+mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+wx completions bash > "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/wx"
+```
+
+**Zsh**（请确保在 `~/.zshrc` 中执行 `compinit` 之前已将 `~/.zfunc` 加入 `$fpath`，例如 `fpath=(~/.zfunc $fpath)` 和 `autoload -Uz compinit && compinit`）：
+
+```zsh
+mkdir -p ~/.zfunc
+wx completions zsh > ~/.zfunc/_wx
+```
+
+**Fish**：
+
+```fish
+mkdir -p ~/.config/fish/completions
+wx completions fish > ~/.config/fish/completions/wx.fish
+```
+
+**PowerShell**（在当前会话中运行，或添加到你的 `$PROFILE`）：
+
+```powershell
+wx completions powershell | Out-String | Invoke-Expression
+```
+
+升级 `wx` 后，请重新运行上述代码片段，以获取新增的命令和标志。
 
 ## 退出状态码 (Exit Codes) \{#exit-codes}
 

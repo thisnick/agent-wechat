@@ -582,12 +582,12 @@ mod tests {
             }
         });
         Mock {
-            remote: Remote {
-                http: reqwest::Client::new(),
-                base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
-                token: "synthetic-bearer".into(),
-                account: Some("test-account".into()),
-            },
+            remote: Remote::from_parts(
+                reqwest::Client::new(),
+                reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+                "synthetic-bearer",
+                Some("test-account".into()),
+            ),
             captured,
             gets,
             patches,

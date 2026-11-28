@@ -1068,12 +1068,12 @@ mod tests {
             .await
             .unwrap();
         });
-        let remote = Remote {
-            http: reqwest::Client::new(),
-            base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
-            token: "synthetic-token".into(),
-            account: Some("synthetic".into()),
-        };
+        let remote = Remote::from_parts(
+            reqwest::Client::new(),
+            reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            "synthetic-token",
+            Some("synthetic".into()),
+        );
         let config = settings::File {
             path: directory.path().join("client.toml"),
             settings: Default::default(),
@@ -1233,12 +1233,12 @@ mod tests {
                 }
             })).route("/v1/accounts/synthetic/sends/by-idempotency-key", axum::routing::get(|| async { Json(json!({"id":"quoted-fixture","state":"accepted"})) }))).await.unwrap();
         });
-        let remote = Remote {
-            http: reqwest::Client::new(),
-            base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
-            token: "synthetic-token".into(),
-            account: Some("synthetic".into()),
-        };
+        let remote = Remote::from_parts(
+            reqwest::Client::new(),
+            reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            "synthetic-token",
+            Some("synthetic".into()),
+        );
         let config = settings::File {
             path: directory.path().join("client.toml"),
             settings: Default::default(),
@@ -1372,12 +1372,12 @@ mod tests {
     #[test]
     fn video_receipt_binds_quality_before_any_network_request() {
         let temp = tempfile::tempdir().unwrap();
-        let remote = Remote {
-            http: reqwest::Client::new(),
-            base: reqwest::Url::parse("http://127.0.0.1:1/").unwrap(),
-            token: "synthetic-token".into(),
-            account: Some("synthetic".into()),
-        };
+        let remote = Remote::from_parts(
+            reqwest::Client::new(),
+            reqwest::Url::parse("http://127.0.0.1:1/").unwrap(),
+            "synthetic-token",
+            Some("synthetic".into()),
+        );
         let config = settings::File {
             path: temp.path().join("client.toml"),
             settings: Default::default(),
@@ -1448,12 +1448,12 @@ mod tests {
             .unwrap()
             .set_len(wechat_core::MAX_ORDINARY_SOURCE_BYTES as u64 + 1)
             .unwrap();
-        let remote = Remote {
-            http: reqwest::Client::new(),
-            base: reqwest::Url::parse("http://127.0.0.1:1/").unwrap(),
-            token: "synthetic-test-token".into(),
-            account: Some("synthetic".into()),
-        };
+        let remote = Remote::from_parts(
+            reqwest::Client::new(),
+            reqwest::Url::parse("http://127.0.0.1:1/").unwrap(),
+            "synthetic-test-token",
+            Some("synthetic".into()),
+        );
         let config = settings::File {
             path: temp.path().join("client.toml"),
             settings: Default::default(),

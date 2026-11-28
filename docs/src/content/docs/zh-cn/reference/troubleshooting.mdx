@@ -1,10 +1,10 @@
 ---
 title: 故障排查
 description: 常见安装、登录、Profile 数据、多媒体及 OpenClaw 问题的排查指南。
-sourceHash: "9900270f5e96"
+sourceHash: "a0c6d90deb90"
 ---
 
-遇到问题时，首先执行 `wx accounts status`。它会明确展示你是否已登录 (`authenticated`)、长连接状态 (`connection`) 以及是否有后台任务阻塞挂起。
+如果 Daemon 无法启动，或者你不确定哪个本地 Daemon 拥有某个数据目录，请先执行 `wx daemon doctor`。如果 Daemon 正在运行，并想检查登录和连接状态，请执行 `wx accounts status`。
 
 ## 安装问题 \{#install}
 
@@ -12,47 +12,75 @@ sourceHash: "9900270f5e96"
 
 ## 启动 Daemon 服务 \{#starting-the-daemon}
 
-**地址已被占用 (Address already in use)。** 说明端口已有其他 Daemon 实例正在监听，可能是通过 `wx daemon`、systemd、Docker 或 OpenClaw 托管模式启动的。请停止冲突实例，或者直接连接到已存在的该实例。切勿因端口冲突而盲目强制杀掉未确认的系统进程。
+请在保存数据目录的机器上执行 `wx daemon doctor`。当 Daemon 处于停止状态时，它只读取文件：绝不会以写入方式打开数据库，绝不会占用 `owner.lock`，绝不会启动 Daemon，也绝不会联系微信服务器。
+
+```bash
+wx daemon doctor
+```
+
+```text
+Target: /home/you/.local/share/agent-wechat (chosen from: default)
+Listen: http://127.0.0.1:6174  State: stopped (read-only check)
+
+Status  Check            Summary
+OK      server_config    Using default server settings
+OK      data_dir         Data folder is owned by UID 1000 with mode 0700
+OK      sqlite.registry  registry.sqlite OK (schema v4/4, 36.0 KiB)
+OK      disk.space       42.3 GiB free of 100.0 GiB
+OK      media_tools      FFmpeg and FFprobe available
+
+For daemons running in Docker, run `docker exec <container> wx daemon doctor`.
+```
+
+| 标志 | 作用 |
+| --- | --- |
+| `--all` | 对本机每个 Daemon 数据目录（`wx daemon`、systemd、桌面端 Hub 以及正在运行的 `wx serve` 进程）执行完整的检查项。 |
+| `--fix` | 仅执行安全的清理操作，例如为已终止的进程删除残留的 `daemon/process.json`。绝不会修改、移动或删除数据库文件。 |
+| `--json` | 以 JSON 格式输出目标、`checks[]`、`others[]` 以及已脱敏的缺陷报告（如有）。 |
+
+使用 `--data-dir PATH` 或 `--server-config FILE` 可检查非默认的数据目录。对于在 Docker 中运行的 Daemon，请执行 `docker exec <container> wx daemon doctor`。
+
+**地址已被占用 (Address already in use)。** 说明端口已有其他 Daemon 实例正在监听，可能是通过 `wx daemon`、systemd、Docker 或 OpenClaw 托管模式启动的。请执行 `wx daemon doctor` 查看是哪个进程占用了端口，然后停止该进程，或改为连接到它。切勿仅因其占用端口，就杀掉你不认识的进程。
 
 **旧版 `serverUrl` 或 `backend` 配置被拒绝。** 说明你正在使用 0.x 版本的旧配置。参考[从旧容器迁移](/setup/migrate/)进行升级调整。
 
-**提示 "cannot open … database WAL …; existing files preserved"。** 说明 Daemon 自身的某个 SQLite 数据库与其日志（旁边的 `-wal` 文件）不一致。通常发生于计算机、虚拟机或 WSL 突发断电或异常关机。Daemon 会自动尝试修复常见异常，并在数据库同级目录下保留一份带有 `.sqlite-recovery-…` 前缀的原始副本。如果依然拒绝启动：
+**提示 "cannot open … database WAL …; existing files preserved"。** 说明 Daemon 自身的某个 SQLite 数据库与其日志（旁边的 `-wal` 文件）不一致，或者其 `-shm` 索引文件无法识别。通常发生于计算机、虚拟机或 WSL 突发断电或异常关机，或者磁盘写满之后。请执行 `wx daemon doctor` 在不修改文件的前提下检查这些文件。Daemon 会自动修复常见情况（包括索引过期，或因中断启动而留下的 3 字节 `-shm` 文件），并把原始文件的副本保存在数据库旁边的 `.sqlite-recovery-…` 文件夹中。如果依然拒绝启动：
 
 1. 停止 Daemon 服务。
 2. 将报错信息中提及的数据库文件以及旁边的 `-wal` 与 `-shm` 文件备份复制到安全位置。
-3. 如果报错信息包含 `commits from a newer log generation`、`index exceeds log` 或 `published frame is not a verified commit`，说明日志缺少最新变更。若需丢弃这些未提交更改直接启动，可将该目录下的 `-shm` 文件移出目录，然后启动 Daemon。Daemon 会在正式写入前重新校验日志。
-4. 若为其他报错信息，说明日志本身已损坏。请从备份中恢复数据目录，或携带完整报错信息[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。
+3. 如果报错信息包含 `commits from a newer log generation`、`index exceeds log` 或 `published frame is not a verified commit`，说明日志缺少最新变更。若要不带这些最新变更启动，可将该目录下的 `-shm` 文件移出目录，然后启动 Daemon。Daemon 在使用日志前会再次校验它。
+4. 若为其他报错信息，说明日志或索引文件已损坏或无法识别。请从备份中恢复数据目录；或者附上 `wx daemon doctor` 输出的已脱敏缺陷报告，[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。
 
 ## 登录相关 \{#login}
 
-**提示 "Account mismatch" 或数据库无法解密解锁。** 说明当前扫码登录的微信账号与该 Profile 目录原本所属的账号不一致。必须使用该 Profile 原绑定的账号进行登录，重新扫码并不能混用不同账号的数据。
+**提示 "Account mismatch" 或数据库无法解锁。** 说明当前扫码登录的微信账号与该 Profile 目录原本所属的账号不一致。必须使用该 Profile 原绑定的账号登录，重新扫码无法绕过此问题。
 
 **二维码过期。** 重新执行 `wx auth login` 获取全新的二维码。
 
 **手机端确认授权无响应/挂起。** 部分扫码授权流程需要手机能够通过局域网直接与 Daemon 通信。请确保手机与主机处于同一局域网内，并排查主机防火墙及路由器的 AP 隔离策略。
 
-**重启后 `wx` 提示需要重新登录。** 说明本地已保存的会话被微信服务端下线拒绝。请执行 `wx auth login`；通常只需在手机微信上点击确认即可恢复登录。
+**重启后 `wx` 提示需要重新登录。** 说明本地已保存的会话被微信服务端拒绝。请执行 `wx auth login`；通常只需在手机微信上点击确认即可恢复登录。
 
 **登录时直接失败，没有二维码。** 微信拒绝了已保存的登录信息，再次尝试会重复同样的失败。在桌面应用中，选择**改用二维码登录**。在命令行中，执行 `wx --account ACCOUNT_ID auth login --force-qr`。两种方式都会保留同一个账号及其聊天记录。不要为此使用**添加微信账号**，它会新建一个空账号。如需报告问题，请附上登录界面中的**详细信息**一行，或 `wx auth login` 输出的 `service` 和 `serviceCode`。
 
 ## Profile 数据问题 \{#profile}
 
-**提示 "Unsupported schema"（数据库版本不支持）。** 说明该 Profile 的内部数据库表结构尚未被当前版本的 Daemon 识别适配。请完整保留该目录现状，切勿打开官方客户端对其产生修改，并关注是否有更新版本的 `wx` 发布。
+**提示 "Unsupported schema"（数据库版本不支持）。** 说明该 Profile 的数据库结构是 Daemon 无法写入的版本。请保持该目录原样，不要用微信打开它，并检查是否有更新版本的 `wx` 发布。
 
 **Profile 目录权限不足 (Permission denied)。** 运行 Daemon 的系统用户（Docker 容器内为 UID 10001）需要对 Profile 目录及其子文件具备读写权限。
 
 ## 媒体与发送问题 \{#media-and-sends}
 
-**媒体下载一直处于 `pending` 状态。** 说明下载任务仍在后台队列中执行；可稍后通过 `wx jobs get JOB_ID` 查看详情。若显示 `expired`，说明微信官方服务器上该文件已被清理过期，任何重试均无法挽回。
+**媒体下载一直处于 `pending` 状态。** 说明下载任务仍在后台执行；可稍后通过 `wx jobs get JOB_ID` 查看详情。若显示 `expired`，说明微信已不再保存该文件，重试也无法恢复。
 
-**发送状态显示为 `needs_review`。** 说明消息是否成功送达微信服务端处于未决状态。在重新发送前，请务必先打开手机微信确认聊天记录中是否已经发出。参见[消息发送与恢复机制](/how-it-works/sends/)。
+**发送状态显示为 `needs_review`。** 说明微信可能已收到该消息，也可能没有收到。在重新发送之前，请先在手机微信上查看聊天记录，确认消息是否已发出。参见[消息发送与恢复机制](/how-it-works/sends/)。
 
 ## OpenClaw 相关 \{#openclaw}
 
-**智能体从来不回复。** 检查 `dmPolicy` 与 `groupPolicy`（两者默认均为 `disabled` 关闭状态），确认发送方微信 ID 是否已添加进 `allowFrom` 白名单中；若是群聊，请确认对方是否正确 @ 提及了机器人。随后查看 Gateway 日志以确认是否有访问令牌授权错误。
+**智能体从来不回复。** 检查 `dmPolicy` 与 `groupPolicy`（两者默认均为 `disabled` 关闭状态），确认发送方是否已添加进 `allowFrom` 白名单中；若是群聊，请确认对方是否 @ 了机器人。随后查看 Gateway 日志，确认是否有令牌错误。
 
-**消息始终显示未读。** 被访问策略拦截忽略的消息以及配置了 `readPolicy: "never"` 时这是正常现象。若配置了 `on_model_dispatch`，请参考[严格已读模式配置](/openclaw/read-receipts/#strict-mode)。
+**消息始终显示未读。** 对于被忽略的消息，以及设置了 `readPolicy: "never"` 的情况，这是正常现象。若使用 `on_model_dispatch`，请参考[严格已读模式配置](/openclaw/read-receipts/#strict-mode)。
 
 ## 提交 Issue 缺陷报告 \{#reporting-a-bug}
 
-在提交报告时，请附带 `wx --json version`、`wx accounts status` 的输出以及具体执行的命令。提交前请注意抹除敏感访问令牌、手机号及私密聊天文字。[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。
+在提交报告时，请附带 `wx --json version`、`wx accounts status` 的输出以及具体执行的命令。提交前请先删除令牌、手机号及聊天内容。[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。

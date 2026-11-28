@@ -14,14 +14,19 @@ use wechat_core::Core;
 mod calls_cli;
 mod cli_help;
 mod client_actions;
+mod completions;
 mod config;
+mod connection;
 mod daemon;
+mod doctor;
+mod doctor_discovery;
 mod events;
 mod feedback;
 mod login;
 mod outcome;
 mod output;
 mod parent_watch;
+mod port_owner;
 mod profile_cli;
 mod profile_export;
 mod settings;
@@ -107,6 +112,11 @@ enum Command {
     },
     /// Show bundled third-party license notices.
     Licenses,
+    /// Generate shell completion scripts for wx.
+    Completions {
+        /// Shell to generate completions for.
+        shell: completions::CompletionShell,
+    },
     /// Inspect configuration and manage saved servers.
     Config {
         #[command(subcommand)]
@@ -1307,17 +1317,38 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let is_serve = matches!(cli.command, Command::Serve { .. });
     if let Err(error) = run(cli).await {
-        let (exit, code) = outcome::classify(&error);
+        let mut described = outcome::describe(&error);
+        if is_serve && !described.next.iter().any(|step| step == "wx daemon doctor") {
+            described.next.push("wx daemon doctor".into());
+        }
         if json {
-            eprintln!("{}", outcome::json_error(exit, &code, &error.to_string()));
+            eprintln!("{}", outcome::json_error(&described));
         } else {
-            eprintln!("{error:#}");
-            if let Some(hint) = outcome::human_error_hint(exit, &code) {
+            eprintln!("{}", described.message);
+            if let Some(hint) = error
+                .chain()
+                .find_map(|e| e.downcast_ref::<daemon::HintedError>())
+            {
+                if let Some(line) = &hint.last_log_error {
+                    eprintln!("Last log error: {line}");
+                }
+            }
+            if !described.next.is_empty() {
+                eprintln!("\nNext:");
+                for step in &described.next {
+                    eprintln!("  {step}");
+                }
+            }
+            if let Some(hint) = outcome::human_error_hint(&described) {
+                if !described.next.is_empty() {
+                    eprintln!();
+                }
                 eprintln!("{hint}");
             }
         }
-        std::process::exit(exit);
+        std::process::exit(described.exit);
     }
     std::process::exit(outcome::exit());
 }
@@ -1348,18 +1379,24 @@ async fn shutdown(core: Arc<Core>, parent: Option<parent_watch::ParentWatch>) {
     core.shutdown_gracefully().await;
 }
 
+struct AutoStart {
+    server_config: crate::config::ServerConfig,
+    token_file: PathBuf,
+    attempted: std::sync::atomic::AtomicBool,
+}
+
 struct Remote {
     http: reqwest::Client,
     base: reqwest::Url,
-    token: String,
+    token: std::sync::RwLock<String>,
     account: Option<String>,
+    target: Option<connection::ClientTarget>,
+    is_status_command: bool,
+    auto_start: Option<AutoStart>,
 }
 impl Remote {
-    fn new(config: crate::config::ClientConfig) -> Result<Self> {
-        Self::with_token(config, None)
-    }
-    fn with_token(config: crate::config::ClientConfig, token: Option<String>) -> Result<Self> {
-        let base = reqwest::Url::parse(&format!("{}/", config.endpoint.trim_end_matches('/')))?;
+    fn parse_base(endpoint: &str) -> Result<reqwest::Url> {
+        let base = reqwest::Url::parse(&format!("{}/", endpoint.trim_end_matches('/')))?;
         if !base.username().is_empty()
             || base.password().is_some()
             || base.query().is_some()
@@ -1368,43 +1405,143 @@ impl Remote {
         {
             bail!("invalid daemon endpoint");
         }
-        if base.scheme() == "http"
-            && !base.host_str().is_some_and(|h| {
-                h == "localhost"
-                    || h.parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback())
-            })
-        {
+        if base.scheme() == "http" && !connection::is_loopback_url(&base) {
             bail!("remote daemon endpoints require HTTPS");
         }
-        Ok(Self {
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(65))
-                .build()?,
+        Ok(base)
+    }
+    fn build_http(ca_cert_file: Option<&Path>) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(65));
+        if let Some(path) = ca_cert_file {
+            let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)
+                .context("invalid additional CA certificate")?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        Ok(builder.build()?)
+    }
+    fn from_parts(
+        http: reqwest::Client,
+        base: reqwest::Url,
+        token: impl Into<String>,
+        account: Option<String>,
+    ) -> Self {
+        Self {
+            http,
             base,
-            token: match token {
-                Some(value) => {
-                    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
-                    {
-                        return Err(failure(
-                            4,
-                            "invalid_api_token",
-                            "API bearer token is invalid",
-                        ));
-                    }
-                    value
-                }
-                None => wechat_api::read_token(&config.token_file).map_err(|_| {
-                    failure(
+            token: std::sync::RwLock::new(token.into()),
+            account,
+            target: None,
+            is_status_command: false,
+            auto_start: None,
+        }
+    }
+    fn new(config: crate::config::ClientConfig) -> Result<Self> {
+        let base = Self::parse_base(&config.endpoint)?;
+        let token = wechat_api::read_token(&config.token_file).map_err(|_| {
+            failure(
+                4,
+                "invalid_api_token",
+                "API bearer token file is missing or invalid",
+            )
+        })?;
+        Ok(Self {
+            http: Self::build_http(None)?,
+            base,
+            token: std::sync::RwLock::new(token),
+            account: config.account,
+            target: None,
+            is_status_command: false,
+            auto_start: None,
+        })
+    }
+    async fn connect(
+        config: crate::config::ClientConfig,
+        token: Option<String>,
+        target: connection::ClientTarget,
+        server_config: &crate::config::ServerConfig,
+        is_status_command: bool,
+        interactive: bool,
+    ) -> Result<Self> {
+        let base = Self::parse_base(&config.endpoint)?;
+        let http = Self::build_http(target.ca_cert_file.as_deref())?;
+        let mut started_daemon = false;
+        let token = match token {
+            Some(value) => {
+                if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+                    return Err(failure(
                         4,
                         "invalid_api_token",
-                        "API bearer token file is missing or invalid",
+                        "API bearer token is invalid",
+                    ));
+                }
+                value
+            }
+            None => match wechat_api::read_token(&config.token_file) {
+                Ok(value) => value,
+                Err(_) => {
+                    let (error, probe) = connection::diagnose(
+                        &target,
+                        connection::ConnectionFailure::MissingOrInvalidToken,
+                        connection::ClassificationOptions { is_status_command },
                     )
-                })?,
+                    .await;
+                    if probe == Some(connection::HealthProbe::NotListening)
+                        && interactive
+                        && target.is_local_default
+                    {
+                        let confirmed = {
+                            let stdin = std::io::stdin();
+                            let mut reader = stdin.lock();
+                            let mut stderr = std::io::stderr();
+                            connection::prompt_start_daemon(&mut reader, &mut stderr)?
+                        };
+                        if confirmed {
+                            eprintln!("Starting wx daemon...");
+                            daemon::start_background(server_config).await?;
+                            eprintln!("Started wx daemon on {}.", target.endpoint);
+                            started_daemon = true;
+                            wechat_api::read_token(&config.token_file).map_err(|_| {
+                                failure(
+                                    4,
+                                    "invalid_api_token",
+                                    "API bearer token file is missing or invalid",
+                                )
+                            })?
+                        } else {
+                            return Err(error);
+                        }
+                    } else {
+                        return Err(error);
+                    }
+                }
             },
+        };
+        let auto_start = if interactive && target.is_local_default && !started_daemon {
+            Some(AutoStart {
+                server_config: server_config.clone(),
+                token_file: config.token_file.clone(),
+                attempted: std::sync::atomic::AtomicBool::new(false),
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            http,
+            base,
+            token: std::sync::RwLock::new(token),
             account: config.account,
+            target: Some(target),
+            is_status_command,
+            auto_start,
         })
+    }
+    fn bearer_token(&self) -> String {
+        self.token
+            .read()
+            .expect("remote token lock poisoned")
+            .clone()
     }
     fn account(&self) -> Result<&str> {
         self.account
@@ -1439,6 +1576,31 @@ impl Remote {
         self.response_with_revision(method, path, body, key, timeout, None)
             .await
     }
+    fn build_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        key: Option<&str>,
+        timeout: Duration,
+        revision: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder> {
+        let mut request = self
+            .http
+            .request(method, self.base.join(path)?)
+            .bearer_auth(self.bearer_token())
+            .timeout(timeout);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        if let Some(key) = key {
+            request = request.header("idempotency-key", key);
+        }
+        if let Some(revision) = revision {
+            request = request.header("if-match", format!("\"{revision}\""));
+        }
+        Ok(request)
+    }
     async fn response_with_revision(
         &self,
         method: reqwest::Method,
@@ -1448,23 +1610,77 @@ impl Remote {
         timeout: Duration,
         revision: Option<&str>,
     ) -> Result<reqwest::Response> {
-        let mut request = self
-            .http
-            .request(method, self.base.join(path)?)
-            .bearer_auth(&self.token)
-            .timeout(timeout);
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        if let Some(key) = key {
-            request = request.header("idempotency-key", key);
-        }
-        if let Some(revision) = revision {
-            request = request.header("if-match", format!("\"{revision}\""));
-        }
-        let response = request.send().await?;
+        let mut retried_after_start = false;
+        let response = loop {
+            let request =
+                self.build_request(method.clone(), path, body.as_ref(), key, timeout, revision)?;
+            match request.send().await {
+                Ok(response) => {
+                    if let Some(auto) = &self.auto_start {
+                        auto.attempted
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    break response;
+                }
+                Err(err) if err.is_connect() => {
+                    let Some(target) = &self.target else {
+                        return Err(err.into());
+                    };
+                    let (diagnosed, probe) = connection::diagnose(
+                        target,
+                        connection::ConnectionFailure::ConnectError(err.to_string()),
+                        connection::ClassificationOptions {
+                            is_status_command: self.is_status_command,
+                        },
+                    )
+                    .await;
+                    if !retried_after_start && probe == Some(connection::HealthProbe::NotListening)
+                    {
+                        if let Some(auto) = &self.auto_start {
+                            if !auto
+                                .attempted
+                                .swap(true, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                let confirmed = {
+                                    let stdin = std::io::stdin();
+                                    let mut reader = stdin.lock();
+                                    let mut stderr = std::io::stderr();
+                                    connection::prompt_start_daemon(&mut reader, &mut stderr)?
+                                };
+                                if confirmed {
+                                    eprintln!("Starting wx daemon...");
+                                    Box::pin(daemon::start_background(&auto.server_config)).await?;
+                                    eprintln!("Started wx daemon on {}.", target.endpoint);
+                                    if let Ok(fresh) = wechat_api::read_token(&auto.token_file) {
+                                        *self.token.write().expect("remote token lock poisoned") =
+                                            fresh;
+                                    }
+                                    retried_after_start = true;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    return Err(diagnosed);
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
         if !response.status().is_success() {
             let code = response.status();
+            if code == reqwest::StatusCode::UNAUTHORIZED {
+                if let Some(target) = &self.target {
+                    let (diagnosed, _) = connection::diagnose(
+                        target,
+                        connection::ConnectionFailure::Unauthorized,
+                        connection::ClassificationOptions {
+                            is_status_command: self.is_status_command,
+                        },
+                    )
+                    .await;
+                    return Err(diagnosed);
+                }
+            }
             let error: Value = response.json().await.unwrap_or(Value::Null);
             let error_code = error["error"]["code"].as_str().unwrap_or("request_failed");
             let exit = if code.as_u16() == 401 || code.as_u16() == 403 {
@@ -1516,7 +1732,7 @@ impl Remote {
         let response = self
             .http
             .post(self.base.join(&self.path("uploads")?)?)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.bearer_token())
             .timeout(Duration::from_secs(3600))
             .multipart(reqwest::multipart::Form::new().part("file", part))
             .send()
@@ -1689,6 +1905,7 @@ async fn run(cli: Cli) -> Result<()> {
                 | Command::Version
                 | Command::Feedback { .. }
                 | Command::Licenses
+                | Command::Completions { .. }
         )
     {
         return Err(failure(
@@ -1700,8 +1917,34 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Feedback { open } = cli.command {
         return feedback::run(open, cli.json);
     }
+    if let Command::Completions { shell } = cli.command {
+        return completions::write(shell, &mut std::io::stdout().lock());
+    }
     let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
+    if let Command::Daemon {
+        command: daemon::DaemonCommand::Doctor { all, fix },
+    } = cli.command
+    {
+        let overrides = crate::config::Overrides {
+            server_config: cli.server_config.clone(),
+            data_dir: cli.data_dir.clone(),
+            token_file: cli.token_file.clone(),
+            listen: cli.listen,
+            network_listen: cli.network_listen,
+            tls_cert_file: cli.tls_cert_file.clone(),
+            tls_key_file: cli.tls_key_file.clone(),
+        };
+        return doctor::run_cli(
+            &overrides,
+            &env,
+            &cwd,
+            doctor::DoctorOptions { all, fix },
+            output,
+            cli.json,
+        )
+        .await;
+    }
     if matches!(
         &cli.command,
         Command::Serve { .. }
@@ -1856,8 +2099,21 @@ async fn run(cli: Cli) -> Result<()> {
         &env,
         &cwd,
     )?;
-    let (mut client, selected_server) =
-        settings.client(cli.server_name.as_deref(), cli.url.as_deref(), &config)?;
+    let (mut client, selected_server, endpoint_source) =
+        settings.client_with_source(cli.server_name.as_deref(), cli.url.as_deref(), &config)?;
+    let has_local_server_override = cli.token_file.is_some()
+        || cli.listen.is_some()
+        || cli.data_dir.is_some()
+        || cli.server_config.is_some()
+        || env.data_dir.is_some()
+        || env.server_config.is_some();
+    if has_local_server_override
+        && selected_server.is_none()
+        && cli.account.is_none()
+        && std::env::var_os("AGENT_WECHAT_ACCOUNT").is_none()
+    {
+        client.account = None;
+    }
     if let Some(url) = cli.url {
         client.endpoint = url;
     }
@@ -1883,17 +2139,35 @@ async fn run(cli: Cli) -> Result<()> {
         None
     };
     let resolved_token_file = env_token.is_none().then(|| client.token_file.clone());
-    let mut r = Remote::with_token(client, env_token.clone())?;
     let ca_cert_file = cli.ca_cert_file.clone();
-    if let Some(path) = cli.ca_cert_file {
-        let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)
-            .context("invalid additional CA certificate")?;
-        r.http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(65))
-            .add_root_certificate(certificate)
-            .build()?;
-    }
+    let interactive = connection::is_interactive(cli.json);
+    let is_status_command = matches!(cli.command, Command::Status);
+    let is_local_default = endpoint_source == settings::EndpointSource::Default
+        && env_token.is_none()
+        && !has_local_server_override
+        && !config.token_explicit
+        && std::env::var_os("AGENT_WECHAT_TOKEN_FILE").is_none()
+        && config.listen.port() != 0;
+    let target = connection::ClientTarget {
+        endpoint: client.endpoint.clone(),
+        server_name: selected_server.clone(),
+        source: endpoint_source,
+        token_file: resolved_token_file.clone(),
+        configured_token_file: client.token_file.clone(),
+        account: client.account.clone(),
+        ca_cert_file: ca_cert_file.clone(),
+        is_local_default,
+    };
+    let mut r = Remote::connect(
+        client,
+        env_token.clone(),
+        target.clone(),
+        &config,
+        is_status_command,
+        interactive,
+    )
+    .await?;
+    let mut selected_account_label: Option<String> = None;
     if let Command::Auth {
         command: AuthCommand::Login {
             official: Some(path),
@@ -1905,8 +2179,13 @@ async fn run(cli: Cli) -> Result<()> {
             "path": if path.is_empty() { None } else { Some(path) },
             "accountId": cli.account,
         })).await.map_err(|error| {
-            let message = format!("{error}; --official requires the official app to be closed and a supported Linux profile. Use --official=/absolute/path/to/profile on the daemon host. This uses files in place; it does not copy or convert macOS/Windows profiles.");
-            error.context(message)
+            let (exit, _) = outcome::classify(&error);
+            if matches!(exit, 3 | 4) {
+                error
+            } else {
+                let message = format!("{error}; --official requires the official app to be closed and a supported Linux profile. Use --official=/absolute/path/to/profile on the daemon host. This uses files in place; it does not copy or convert macOS/Windows profiles.");
+                error.context(message)
+            }
         })?;
         r.account = Some(
             selected["accountId"]
@@ -1953,19 +2232,181 @@ async fn run(cli: Cli) -> Result<()> {
                 })
                 .collect::<Vec<_>>();
             if matching.len() != 1 {
-                bail!("account_not_found: selected account or alias is unavailable");
+                return Err(connection::account_not_found_error(selected));
             }
+            selected_account_label = matching[0]["alias"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| matching[0]["id"].as_str().map(str::to_owned));
             matching[0]["id"]
                 .as_str()
                 .context("invalid account identity")?
                 .to_string()
+        } else if items.is_empty() {
+            if interactive
+                && matches!(
+                    &cli.command,
+                    Command::Auth {
+                        command: AuthCommand::Login { official: None, .. }
+                    }
+                )
+            {
+                let offer_official = connection::official_choice_available(
+                    cfg!(target_os = "linux"),
+                    target.is_loopback(),
+                    env.home.as_deref(),
+                );
+                let choice = {
+                    let stdin = std::io::stdin();
+                    let mut reader = stdin.lock();
+                    let mut stderr = std::io::stderr();
+                    connection::prompt_no_account_choice(&mut reader, &mut stderr, offer_official)?
+                };
+                match choice {
+                    connection::NoAccountChoice::CreateNew => {
+                        let created = r.post("v1/accounts", json!({"alias": "me"})).await?;
+                        let id = created["id"]
+                            .as_str()
+                            .context("invalid account identity")?
+                            .to_string();
+                        eprintln!("Created account {id} (alias: me).");
+                        selected_account_label = Some("me".into());
+                        id
+                    }
+                    connection::NoAccountChoice::UseOfficial => {
+                        let running = port_owner::find_running_wechat_pids();
+                        let confirmed = {
+                            let stdin = std::io::stdin();
+                            let mut reader = stdin.lock();
+                            let mut stderr = std::io::stderr();
+                            connection::prompt_official_confirmation(
+                                &mut reader,
+                                &mut stderr,
+                                &running,
+                            )?
+                        };
+                        if !confirmed {
+                            return Err(outcome::failure_with_next(
+                                2,
+                                "account_not_configured",
+                                "Setup cancelled; no account was configured.",
+                                false,
+                                vec![
+                                    "wx accounts create --alias me".into(),
+                                    "wx auth login --official".into(),
+                                ],
+                            ));
+                        }
+                        let attached = r
+                            .post(
+                                "v1/profiles/official",
+                                json!({ "path": Value::Null, "accountId": Value::Null }),
+                            )
+                            .await
+                            .map_err(|error| {
+                                let (exit, _) = outcome::classify(&error);
+                                if matches!(exit, 3 | 4) {
+                                    error
+                                } else {
+                                    let message = format!("{error}; --official requires the official app to be closed and a supported Linux profile. Use --official=/absolute/path/to/profile on the daemon host. This uses files in place; it does not copy or convert macOS/Windows profiles.");
+                                    error.context(message)
+                                }
+                            })?;
+                        let id = attached["accountId"]
+                            .as_str()
+                            .context("invalid official profile selection")?
+                            .to_string();
+                        eprintln!("Using official files in place (account {id}).");
+                        selected_account_label = Some(id.clone());
+                        id
+                    }
+                    connection::NoAccountChoice::Cancel => {
+                        return Err(outcome::failure_with_next(
+                            2,
+                            "account_not_configured",
+                            "Setup cancelled; no account was configured.",
+                            false,
+                            vec![
+                                "wx accounts create --alias me".into(),
+                                "wx auth login --official".into(),
+                            ],
+                        ));
+                    }
+                }
+            } else {
+                return Err(connection::account_not_configured_error());
+            }
+        } else if items.len() != 1 {
+            if interactive {
+                let options: Vec<connection::AccountOption> = items
+                    .iter()
+                    .filter_map(|item| {
+                        let id = item["id"].as_str()?.to_owned();
+                        let alias = item["alias"].as_str().map(str::to_owned);
+                        let state = item["connection"].as_str().map(str::to_owned).or_else(|| {
+                            item["authenticated"].as_bool().map(|authenticated| {
+                                if authenticated {
+                                    "authenticated".into()
+                                } else {
+                                    "logged_out".into()
+                                }
+                            })
+                        });
+                        Some(connection::AccountOption { id, alias, state })
+                    })
+                    .collect();
+                if options.is_empty() {
+                    return Err(connection::account_ambiguous_error());
+                }
+                let chosen = {
+                    let stdin = std::io::stdin();
+                    let mut reader = stdin.lock();
+                    let mut stderr = std::io::stderr();
+                    connection::prompt_select_account(&mut reader, &mut stderr, &options)?
+                };
+                let Some(chosen) = chosen else {
+                    return Err(connection::account_ambiguous_error());
+                };
+                let can_save_local_default = selected_server.is_none() && target.is_local_default;
+                if selected_server.is_some() || can_save_local_default {
+                    let save_default = {
+                        let stdin = std::io::stdin();
+                        let mut reader = stdin.lock();
+                        let mut stderr = std::io::stderr();
+                        connection::prompt_save_default_account(
+                            &mut reader,
+                            &mut stderr,
+                            &chosen.label(),
+                            selected_server.as_deref(),
+                        )?
+                    };
+                    if save_default {
+                        if let Some(server_name) = selected_server.as_deref() {
+                            if let Some(server) = settings.settings.servers.get_mut(server_name) {
+                                server.default_account_id = Some(chosen.id.clone());
+                                settings.save()?;
+                                eprintln!(
+                                    "Saved {} as the default account for server '{server_name}'.",
+                                    chosen.label()
+                                );
+                            }
+                        } else if can_save_local_default {
+                            settings.settings.default_account_id = Some(chosen.id.clone());
+                            settings.save()?;
+                            eprintln!("Saved {} as the default account.", chosen.label());
+                        }
+                    }
+                }
+                selected_account_label = Some(chosen.label());
+                chosen.id
+            } else {
+                return Err(connection::account_ambiguous_error());
+            }
         } else {
-            if items.is_empty() {
-                bail!("account_not_configured: create an account slot first");
-            }
-            if items.len() != 1 {
-                bail!("account_ambiguous: select --account or configure an endpoint default");
-            }
+            selected_account_label = items[0]["alias"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| items[0]["id"].as_str().map(str::to_owned));
             items[0]["id"]
                 .as_str()
                 .context("invalid account identity")?
@@ -1990,9 +2431,21 @@ async fn run(cli: Cli) -> Result<()> {
             command: stickers_cli::StickerCommand::Send { .. }
         }
     );
+    let attached_login = matches!(
+        &cli.command,
+        Command::Auth {
+            command: AuthCommand::Login { detach: false, .. }
+        }
+    );
     use reqwest::Method;
     let result = match cli.command {
-        Command::Status => r.get("v1/status").await?,
+        Command::Status => {
+            let mut status = r.get("v1/status").await?;
+            if let Some(object) = status.as_object_mut() {
+                object.insert("client".into(), target.status_client_json());
+            }
+            status
+        }
         Command::Stickers { command } => stickers_cli::run(&r, command).await?,
         Command::Calls { command } => {
             let spawn = calls_cli::session::SessionSpawnContext {
@@ -2104,16 +2557,24 @@ async fn run(cli: Cli) -> Result<()> {
             AccountCommand::Select { id } => {
                 let account = r.get(&format!("v1/accounts/{}", encode(&id))).await?;
                 let id = account["id"].as_str().context("invalid account response")?;
-                let server = selected_server
-                    .context("save a server with wx config servers add, then run wx config servers select NAME before selecting its default account")?;
-                settings
-                    .settings
-                    .servers
-                    .get_mut(&server)
-                    .context("saved server not found")?
-                    .default_account_id = Some(id.into());
-                settings.save()?;
-                json!({"server":server,"accountId":id})
+                if let Some(server) = selected_server {
+                    settings
+                        .settings
+                        .servers
+                        .get_mut(&server)
+                        .context("saved server not found")?
+                        .default_account_id = Some(id.into());
+                    settings.save()?;
+                    json!({"server":server,"accountId":id})
+                } else if target.is_local_default {
+                    settings.settings.default_account_id = Some(id.into());
+                    settings.save()?;
+                    json!({"server":Value::Null,"accountId":id})
+                } else {
+                    bail!(
+                        "save a server with wx config servers add, then run wx config servers select NAME before selecting its default account"
+                    );
+                }
             }
             AccountCommand::Settings {
                 auto_download_max_mb,
@@ -2545,6 +3006,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Version
         | Command::Feedback { .. }
         | Command::Licenses
+        | Command::Completions { .. }
         | Command::Config { .. }
         | Command::Serve { .. }
         | Command::Store { .. }
@@ -2553,12 +3015,21 @@ async fn run(cli: Cli) -> Result<()> {
             unreachable!()
         }
     };
-    let printed = if chat_list {
-        output.chats(&result)
+    if chat_list {
+        output.chats(&result)?;
     } else {
-        output.print(&result)
-    };
-    printed?;
+        output.print(&result)?;
+        if attached_login && !cli.json && result["state"] == "succeeded" {
+            let label = selected_account_label
+                .as_deref()
+                .or(r.account.as_deref())
+                .unwrap_or("account");
+            eprintln!(
+                "\n{}",
+                connection::login_next_steps(&result, label, target.is_loopback())
+            );
+        }
+    }
     if count_send {
         feedback::maybe_record_send_and_emit_notice(&settings.path, &result, cli.json);
     }

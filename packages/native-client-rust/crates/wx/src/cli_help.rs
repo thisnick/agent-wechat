@@ -10,9 +10,9 @@ fn configure(command: Command, parents: &[&str]) -> Command {
     let mut path = parents.to_vec();
     path.push(&name);
     let guidance = match path.as_slice() {
-        ["wx"] => "Getting started:\n  wx config servers list\n  wx config servers select box\n  wx accounts list\n  wx accounts select personal\n  wx accounts status\n\nUse wx <COMMAND> --help for a command's options and subcommands.\nSet AGENT_WECHAT_TOKEN to supply an API token through the environment.",
+        ["wx"] => "Getting started:\n  wx auth login\n  wx daemon start\n  wx status\n  wx chats list\n\nRemote servers: wx config servers --help\nUse wx <COMMAND> --help for a command's options and subcommands.\nSet AGENT_WECHAT_TOKEN to supply an API token through the environment.",
         ["wx", "accounts"] => "Examples:\n  wx accounts list\n  wx accounts select personal\n  wx accounts status\n  wx --account personal accounts settings\n\nSelect saves the default account for the current named server.\n--account ID or AGENT_WECHAT_ACCOUNT overrides that choice for a command.\nUse wx accounts <COMMAND> --help for its arguments and options.",
-        ["wx", "accounts", "select"] => "Example: wx accounts select personal\n\nChoose an account ID or alias from wx accounts list.\nFirst save and select a named server with wx config servers.\nThis saves a CLI default; it does not sign in or reconnect the account.",
+        ["wx", "accounts", "select"] => "Example: wx accounts select personal\n\nChoose an account ID or alias from wx accounts list.\nWith a selected saved server, this saves that server's default account;\notherwise it saves the default account for the local daemon.\nThis saves a CLI default; it does not sign in or reconnect the account.",
         ["wx", "profiles"] => "Examples:\n  wx profiles add archive --path /absolute/path/to/stopped-profile\n  wx profiles list\n  wx profiles select archive\n  wx profiles inspect\n\nProfiles are local stopped files. --local-profile NAME overrides the saved choice.\nUse wx profiles <COMMAND> --help for its arguments and options.",
         ["wx", "profiles", "select"] => "Example: wx profiles select archive\n\nChoose a name from wx profiles list. With a selected saved server, this saves\nthat server's profile default; otherwise it saves the standalone default.\nThis selects local files; it does not sign an account in to WeChat.",
         ["wx", "auth", "logout"] => "Examples:\n  wx auth logout\n  wx auth logout --local\n\nBoth stop automatic reconnection. Use --local to skip the WeChat logout request and keep saved credentials.",
@@ -25,7 +25,9 @@ fn configure(command: Command, parents: &[&str]) -> Command {
         _ if command.has_subcommands() => "Run this command with a subcommand and --help to see its arguments and options.",
         ["wx", "profiles", ..] => "Uses stopped local files. Select them with wx profiles select NAME or --local-profile NAME.\nUse --source-stopped only after stopping the owner or making a consistent snapshot.",
         ["wx", "config", ..] => "CLI server choices are saved locally. Use --config FILE to choose another client configuration.",
+        ["wx", "daemon", "doctor"] => "Examples:\n  wx daemon doctor\n  wx daemon doctor --all\n  wx daemon doctor --fix\n  wx --data-dir /path/to/data daemon doctor --json\n\nRuns read-only checks on the data folder when the daemon is stopped, without taking owner.lock or modifying databases.",
         ["wx", "daemon" | "store" | "serve", ..] => "Runs on this computer. Use --data-dir PATH and --server-config FILE for the local daemon store.",
+        ["wx", "completions"] => "Examples:\n  wx completions bash\n  wx completions zsh\n  wx completions fish\n  wx completions powershell\n\nPrints a completion script to stdout. Runs locally without a server connection or API token.",
         ["wx", "version" | "licenses" | "feedback"] => "Runs locally without a server connection or API token.",
         _ => "Use --server-name NAME to select a saved server and --account ID to select an account.\nRun wx accounts list to find account IDs and aliases. AGENT_WECHAT_TOKEN supplies an API token.",
     };
